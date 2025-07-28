@@ -1,0 +1,5 @@
+/bazel-RapidJsonnet
+/bazel-bin
+/bazel-out
+/bazel-testlogs
+/rust-project.json
