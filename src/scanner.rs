@@ -50,6 +50,7 @@ pub enum Token {
 pub struct TokenInfo {
     pub token: Token,
     pub span: Range<usize>,
+    pub source_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +80,7 @@ pub struct Scanner<'a> {
     position: usize,
     line: usize,
     column: usize,
-    source_id: &'a str,
+    pub source_id: &'a str,
 }
 
 impl<'a> Scanner<'a> {
@@ -150,6 +151,7 @@ impl<'a> Scanner<'a> {
             return Ok(TokenInfo {
                 token: Token::Eof,
                 span: start..start,
+                source_id: self.source_id.to_string(),
             });
         }
 
@@ -204,6 +206,7 @@ impl<'a> Scanner<'a> {
         TokenInfo {
             token,
             span: start..self.position,
+            source_id: self.source_id.to_string(),
         }
     }
 
@@ -354,6 +357,7 @@ impl<'a> Scanner<'a> {
         Ok(TokenInfo {
             token: Token::String(value),
             span: start..self.position,
+            source_id: self.source_id.to_string(),
         })
     }
 
@@ -442,6 +446,7 @@ impl<'a> Scanner<'a> {
         Ok(TokenInfo {
             token: Token::String(result),
             span: start..self.position,
+            source_id: self.source_id.to_string(),
         })
     }
 
@@ -489,6 +494,7 @@ impl<'a> Scanner<'a> {
             Ok(value) => Ok(TokenInfo {
                 token: Token::Number(value),
                 span: start..self.position,
+                source_id: self.source_id.to_string(),
             }),
             Err(_) => Err(self.make_error(
                 start..self.position,
@@ -528,6 +534,7 @@ impl<'a> Scanner<'a> {
         Ok(TokenInfo {
             token,
             span: start..self.position,
+            source_id: self.source_id.to_string(),
         })
     }
 
@@ -572,6 +579,7 @@ impl<'a> Scanner<'a> {
         Ok(TokenInfo {
             token: Token::Operator(operator),
             span: start..self.position,
+            source_id: self.source_id.to_string(),
         })
     }
 }
