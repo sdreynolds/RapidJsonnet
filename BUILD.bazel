@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -11,9 +11,22 @@ filegroup(
 
 rust_binary(
     name = "hello_world",
-    srcs = ["src/main.rs"],
+    srcs = ["src/main.rs", "src/scanner.rs"],
     compile_data = [":sample_files"],
     deps = [
         "@crates//:ariadne",
     ],
+)
+
+rust_library(
+    name = "scanner",
+    srcs = ["src/scanner.rs"],
+    deps = [
+        "@crates//:ariadne"
+    ]
+)
+
+rust_test(
+    name = "scanner_test",
+    crate = ":scanner"
 )
