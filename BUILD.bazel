@@ -2,11 +2,18 @@ load("@rules_rust//rust:defs.bzl", "rust_binary")
 
 package(default_visibility = ["//visibility:public"])
 
+filegroup(
+    name = "sample_files",
+    srcs = ["src/sample.tao"],
+    visibility = ["//visibility:public"],
+)
+
+
 rust_binary(
     name = "hello_world",
     srcs = ["src/main.rs"],
+    compile_data = [":sample_files"],
     deps = [
-        "@crates//:anyhow",
-        "@crates//:uuid",
+        "@crates//:ariadne",
     ],
 )

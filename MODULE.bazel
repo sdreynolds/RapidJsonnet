@@ -20,5 +20,11 @@ crate.spec(
     package = "uuid",
     version = "1.8.0",
 )
+crate.spec(
+    package = "ariadne",
+    features = ["auto-color"],
+    version = "0.5.1"
+)
+
 crate.from_specs()
 use_repo(crate, "crates")
