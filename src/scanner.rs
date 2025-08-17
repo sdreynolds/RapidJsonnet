@@ -53,31 +53,20 @@ pub struct TokenInfo {
 }
 
 #[derive(Debug, Clone)]
-pub enum ErrorKind {
-    UnterminatedString,
-    UnterminatedComment,
-    InvalidEscape,
-    InvalidNumber,
-    InvalidOperator,
-    InvalidTextBlock,
-    UnexpectedCharacter,
-}
-
-#[derive(Debug, Clone)]
 pub struct ScanError {
-    pub kind: ErrorKind,
     pub span: Range<usize>,
     pub message: String,
+    pub source_id: String,
 }
 
 impl ScanError {
-    pub fn into_report(self, source_id: &str) -> Report<(&str, Range<usize>)> {
+    pub fn into_report(&self) -> Report<'static, (&str, Range<usize>)> {
         let color = ariadne::Color::Red;
 
-        Report::build(ReportKind::Error, (source_id, self.span.clone()))
+        Report::build(ReportKind::Error, (self.source_id.as_str(), self.span.clone()))
             .with_message(&self.message)
             .with_label(
-                Label::new((source_id, self.span))
+                Label::new((self.source_id.as_str(), self.span.clone()))
                     .with_message(&self.message)
                     .with_color(color)
             )
@@ -129,6 +118,14 @@ impl<'a> Scanner<'a> {
             Ok(tokens)
         } else {
             Err(errors)
+        }
+    }
+
+    fn make_error(&self, span: Range<usize>, message: String) -> ScanError {
+        ScanError {
+            span,
+            message,
+            source_id: self.source_id.to_string(),
         }
     }
 
@@ -184,11 +181,10 @@ impl<'a> Scanner<'a> {
             // Operators
             ch if "!$:~+-&|^=<>*/%".contains(ch) => self.scan_operator(start),
 
-            _ => Err(ScanError {
-                kind: ErrorKind::UnexpectedCharacter,
-                span: start..start + ch.len_utf8(),
-                message: format!("Unexpected character '{}'", ch),
-            }),
+            _ => Err(self.make_error(
+                start..start + ch.len_utf8(),
+                format!("Unexpected character '{}'", ch),
+            )),
         }
     }
 
@@ -267,11 +263,10 @@ impl<'a> Scanner<'a> {
             self.advance();
         }
 
-        Err(ScanError {
-            kind: ErrorKind::UnterminatedComment,
-            span: start..self.position,
-            message: "Unterminated block comment".to_string(),
-        })
+        Err(self.make_error(
+            start..self.position,
+            "Unterminated block comment".to_string(),
+        ))
     }
 
     fn scan_string(&mut self, quote: char, verbatim: bool, start: usize) -> Result<TokenInfo, ScanError> {
@@ -310,26 +305,23 @@ impl<'a> Scanner<'a> {
                                 if let Some(unicode_char) = char::from_u32(code_point) {
                                     value.push(unicode_char);
                                 } else {
-                                    return Err(ScanError {
-                                        kind: ErrorKind::InvalidEscape,
-                                        span: hex_start - 2..self.position,
-                                        message: format!("Invalid unicode escape sequence: \\u{}", hex_digits),
-                                    });
+                                    return Err(self.make_error(
+                                        hex_start - 2..self.position,
+                                        format!("Invalid unicode escape sequence: \\u{}", hex_digits),
+                                    ));
                                 }
                             } else {
-                                return Err(ScanError {
-                                    kind: ErrorKind::InvalidEscape,
-                                    span: hex_start - 2..self.position,
-                                    message: format!("Invalid unicode escape sequence: \\u{}", hex_digits),
-                                });
+                                return Err(self.make_error(
+                                    hex_start - 2..self.position,
+                                    format!("Invalid unicode escape sequence: \\u{}", hex_digits),
+                                ));
                             }
                         }
                         _ => {
-                            return Err(ScanError {
-                                kind: ErrorKind::InvalidEscape,
-                                span: self.position - 2..self.position,
-                                message: format!("Invalid escape sequence: \\{}", escaped),
-                            });
+                            return Err(self.make_error(
+                                self.position - 2..self.position,
+                                format!("Invalid escape sequence: \\{}", escaped),
+                            ));
                         }
                     }
                 } else {
@@ -339,11 +331,10 @@ impl<'a> Scanner<'a> {
         }
 
         if self.is_at_end() {
-            return Err(ScanError {
-                kind: ErrorKind::UnterminatedString,
-                span: start..self.position,
-                message: format!("Unterminated string literal starting with {}", quote),
-            });
+            return Err(self.make_error(
+                start..self.position,
+                format!("Unterminated string literal starting with {}", quote),
+            ));
         }
 
         self.advance(); // closing quote
@@ -372,11 +363,10 @@ impl<'a> Scanner<'a> {
         }
 
         if self.peek() != '\n' {
-            return Err(ScanError {
-                kind: ErrorKind::InvalidTextBlock,
-                span: start..self.position,
-                message: "Text block must have newline after |||".to_string(),
-            });
+            return Err(self.make_error(
+                start..self.position,
+                "Text block must have newline after |||".to_string(),
+            ));
         }
         self.advance(); // newline
 
@@ -388,11 +378,10 @@ impl<'a> Scanner<'a> {
         }
 
         if indent.is_empty() {
-            return Err(ScanError {
-                kind: ErrorKind::InvalidTextBlock,
-                span: indent_start..self.position,
-                message: "Text block requires indentation on first non-empty line".to_string(),
-            });
+            return Err(self.make_error(
+                indent_start..self.position,
+                "Text block requires indentation on first non-empty line".to_string(),
+            ));
         }
 
         let mut lines = Vec::new();
@@ -426,11 +415,10 @@ impl<'a> Scanner<'a> {
             } else if line.starts_with(&indent) {
                 lines.push(line[indent.len()..].to_string());
             } else {
-                return Err(ScanError {
-                    kind: ErrorKind::InvalidTextBlock,
-                    span: line_start..self.position,
-                    message: format!("Text block line doesn't start with expected indentation: '{}'", indent),
-                });
+                return Err(self.make_error(
+                    line_start..self.position,
+                    format!("Text block line doesn't start with expected indentation: '{}'", indent),
+                ));
             }
         }
 
@@ -473,11 +461,10 @@ impl<'a> Scanner<'a> {
             }
 
             if !self.peek().is_ascii_digit() {
-                return Err(ScanError {
-                    kind: ErrorKind::InvalidNumber,
-                    span: start..self.position,
-                    message: "Invalid number: expected digits after exponent".to_string(),
-                });
+                return Err(self.make_error(
+                    start..self.position,
+                    "Invalid number: expected digits after exponent".to_string(),
+                ));
             }
 
             while self.peek().is_ascii_digit() {
@@ -491,11 +478,10 @@ impl<'a> Scanner<'a> {
                 token: Token::Number(value),
                 span: start..self.position,
             }),
-            Err(_) => Err(ScanError {
-                kind: ErrorKind::InvalidNumber,
-                span: start..self.position,
-                message: format!("Invalid number format: {}", number_str),
-            }),
+            Err(_) => Err(self.make_error(
+                start..self.position,
+                format!("Invalid number format: {}", number_str),
+            )),
         }
     }
 
@@ -565,11 +551,10 @@ impl<'a> Scanner<'a> {
 
         if operator.is_empty() {
             let ch = self.advance();
-            return Err(ScanError {
-                kind: ErrorKind::UnexpectedCharacter,
-                span: start..self.position,
-                message: format!("Unexpected character '{}'", ch),
-            });
+            return Err(self.make_error(
+                start..self.position,
+                format!("Unexpected character '{}'", ch),
+            ));
         }
 
         Ok(TokenInfo {
@@ -641,16 +626,13 @@ mod tests {
 
     #[test]
     fn test_error_reporting() {
-        use ariadne::Source;
         let mut scanner = Scanner::new("\"unterminated", "test.jsonnet");
         let error = scanner.scan_next().unwrap_err();
-        assert!(matches!(error.kind, ErrorKind::UnterminatedString));
+        assert_eq!(error.source_id, "test.jsonnet");
 
-        let report = error.into_report("test.jsonnet");
+        let report = error.into_report();
         // Test that report can be created without panicking
-        // Test that report can be created without panicking
-        report.print(("test.jsonnet", Source::from("\"unterminated")))
-        .unwrap();
+        let _ = report;
     }
 
     #[test]

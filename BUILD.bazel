@@ -10,7 +10,7 @@ filegroup(
 
 
 rust_binary(
-    name = "hello_world",
+    name = "main",
     srcs = ["src/main.rs", "src/scanner.rs"],
     compile_data = [":sample_files"],
     deps = [
