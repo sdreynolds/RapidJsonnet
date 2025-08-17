@@ -114,6 +114,18 @@ impl<'a> Scanner<'a> {
             }
         }
 
+        // Check for trailing semicolon - the last non-EOF token shouldn't be a semicolon
+        if tokens.len() >= 2 {
+            if let Some(second_last) = tokens.get(tokens.len() - 2) {
+                if matches!(second_last.token, Token::Semicolon) {
+                    errors.push(self.make_error(
+                        second_last.span.clone(),
+                        "Trailing semicolon at end of file is not valid in Jsonnet".to_string(),
+                    ));
+                }
+            }
+        }
+        
         if errors.is_empty() {
             Ok(tokens)
         } else {
@@ -641,5 +653,23 @@ mod tests {
         // Should not tokenize as operator since // starts a comment
         scanner.skip_whitespace_and_comments().unwrap();
         assert!(scanner.is_at_end());
+    }
+    
+    #[test]
+    fn test_trailing_semicolon_error() {
+        let mut scanner = Scanner::new("true;", "test");
+        let result = scanner.scan_all();
+        assert!(result.is_err());
+        
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("Trailing semicolon"));
+    }
+    
+    #[test]
+    fn test_valid_semicolon_in_middle() {
+        let mut scanner = Scanner::new("local x = 1; x", "test");
+        let result = scanner.scan_all();
+        assert!(result.is_ok());
     }
 }
