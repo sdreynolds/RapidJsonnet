@@ -56,7 +56,7 @@ impl<'a> Parser<'a> {
                 let error = ScanError {
                     span: current.span.clone(),
                     message: format!("{}: expected {:?}, found {:?}", message, expected, current.token),
-                    source_id: current.source_id.clone(),
+                    source_id: self.scanner.source_id.to_string(),
                 };
                 self.had_error = true;
                 Err(error)

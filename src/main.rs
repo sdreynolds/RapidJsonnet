@@ -26,32 +26,32 @@ fn tokenize_and_print(content: &str, source_id: &str) -> Result<(), Box<dyn std:
     let mut scanner = Scanner::new(content, source_id);
 
     let source = Source::from(content);
-    
+
     match scanner.scan_all() {
         Ok(tokens) => {
             let success_report = ariadne::Report::build(ariadne::ReportKind::Advice, (source_id, 0..0))
                 .with_message(format!("Successfully tokenized {} tokens", tokens.len() - 1)) // -1 for EOF
                 .with_note("All tokens parsed successfully");
-            
+
             // Add labels for each token with different colors
             let mut colored_report = success_report;
             let mut color_gen = ariadne::ColorGenerator::new();
-            
+
             for token_info in &tokens {
                 if matches!(token_info.token, scanner::Token::Eof) {
                     continue;
                 }
-                
+
                 let color = color_gen.next();
                 let token_type = get_token_type_name(&token_info.token);
-                
+
                 colored_report = colored_report.with_label(
                     ariadne::Label::new((source_id, token_info.span.clone()))
                         .with_message(format!("{}: {:?}", token_type, token_info.token))
                         .with_color(color)
                 );
             }
-            
+
             colored_report.finish().print((source_id, &source))?;
         }
         Err(errors) => {
@@ -98,7 +98,7 @@ fn repl_mode() -> Result<(), Box<dyn std::error::Error>> {
 fn get_token_type_name(token: &scanner::Token) -> &'static str {
     match token {
         scanner::Token::Identifier(_) => "Identifier",
-        scanner::Token::Number(_) => "Number", 
+        scanner::Token::Number(_) => "Number",
         scanner::Token::String(_) => "String",
         scanner::Token::Assert => "Keyword",
         scanner::Token::Else => "Keyword",

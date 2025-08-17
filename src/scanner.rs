@@ -50,7 +50,6 @@ pub enum Token {
 pub struct TokenInfo {
     pub token: Token,
     pub span: Range<usize>,
-    pub source_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -126,7 +125,7 @@ impl<'a> Scanner<'a> {
                 }
             }
         }
-        
+
         if errors.is_empty() {
             Ok(tokens)
         } else {
@@ -151,7 +150,6 @@ impl<'a> Scanner<'a> {
             return Ok(TokenInfo {
                 token: Token::Eof,
                 span: start..start,
-                source_id: self.source_id.to_string(),
             });
         }
 
@@ -206,7 +204,6 @@ impl<'a> Scanner<'a> {
         TokenInfo {
             token,
             span: start..self.position,
-            source_id: self.source_id.to_string(),
         }
     }
 
@@ -357,7 +354,6 @@ impl<'a> Scanner<'a> {
         Ok(TokenInfo {
             token: Token::String(value),
             span: start..self.position,
-            source_id: self.source_id.to_string(),
         })
     }
 
@@ -446,7 +442,6 @@ impl<'a> Scanner<'a> {
         Ok(TokenInfo {
             token: Token::String(result),
             span: start..self.position,
-            source_id: self.source_id.to_string(),
         })
     }
 
@@ -494,7 +489,6 @@ impl<'a> Scanner<'a> {
             Ok(value) => Ok(TokenInfo {
                 token: Token::Number(value),
                 span: start..self.position,
-                source_id: self.source_id.to_string(),
             }),
             Err(_) => Err(self.make_error(
                 start..self.position,
@@ -534,7 +528,6 @@ impl<'a> Scanner<'a> {
         Ok(TokenInfo {
             token,
             span: start..self.position,
-            source_id: self.source_id.to_string(),
         })
     }
 
@@ -579,7 +572,6 @@ impl<'a> Scanner<'a> {
         Ok(TokenInfo {
             token: Token::Operator(operator),
             span: start..self.position,
-            source_id: self.source_id.to_string(),
         })
     }
 }
@@ -662,18 +654,18 @@ mod tests {
         scanner.skip_whitespace_and_comments().unwrap();
         assert!(scanner.is_at_end());
     }
-    
+
     #[test]
     fn test_trailing_semicolon_error() {
         let mut scanner = Scanner::new("true;", "test");
         let result = scanner.scan_all();
         assert!(result.is_err());
-        
+
         let errors = result.unwrap_err();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("Trailing semicolon"));
     }
-    
+
     #[test]
     fn test_valid_semicolon_in_middle() {
         let mut scanner = Scanner::new("local x = 1; x", "test");
