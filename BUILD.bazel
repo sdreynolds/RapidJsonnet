@@ -37,6 +37,9 @@ rust_library(
 rust_library(
     name = "chunk",
     srcs = ["src/chunk.rs"],
+    deps = [
+        "@crates//:ariadne"
+    ]
 )
 
 rust_test(

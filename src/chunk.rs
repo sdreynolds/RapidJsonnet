@@ -107,7 +107,7 @@ impl<'a> Chunk<'a> {
             .with_message(message)
             .with_label(
                 Label::new((self.source_id, source_span))
-                    .with_message(message)
+                    .with_message("error occurred here")
             )
             .finish()
     }
@@ -123,9 +123,9 @@ impl<'a> Chunk<'a> {
     }
 }
 
-impl Default for Chunk {
+impl<'a> Default for Chunk<'a> {
     fn default() -> Self {
-        Self::new()
+        Self::new("")
     }
 }
 
@@ -135,80 +135,98 @@ mod tests {
 
     #[test]
     fn test_new_chunk() {
-        let chunk = Chunk::new();
+        let chunk = Chunk::new("test.jsonnet");
         assert!(chunk.is_empty());
         assert_eq!(chunk.count(), 0);
         assert_eq!(chunk.code.len(), 0);
-        assert_eq!(chunk.lines.len(), 0);
+        assert_eq!(chunk.spans.len(), 0);
         assert_eq!(chunk.constants.len(), 0);
+        assert_eq!(chunk.source_id, "test.jsonnet");
     }
 
     #[test]
     fn test_write_single_instruction() {
-        let mut chunk = Chunk::new();
-        chunk.write(123, 1);
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write(123, 0..5);
 
         assert_eq!(chunk.count(), 1);
         assert_eq!(chunk.code[0], 123);
-        assert_eq!(chunk.lines.len(), 1);
-        assert_eq!(chunk.lines[0].line, 1);
-        assert_eq!(chunk.lines[0].repeated_values, 1);
+        assert_eq!(chunk.spans.len(), 1);
+        assert_eq!(chunk.spans[0].span, 0..5);
+        assert_eq!(chunk.spans[0].repeated_values, 1);
     }
 
     #[test]
-    fn test_write_same_line() {
-        let mut chunk = Chunk::new();
-        chunk.write(123, 1);
-        chunk.write(124, 1);
-        chunk.write(125, 1);
+    fn test_write_multiple_instructions_different_spans() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write(123, 0..5);
+        chunk.write(124, 5..10);
+        chunk.write(125, 10..15);
 
         assert_eq!(chunk.count(), 3);
-        assert_eq!(chunk.lines.len(), 1);
-        assert_eq!(chunk.lines[0].line, 1);
-        assert_eq!(chunk.lines[0].repeated_values, 3);
+        assert_eq!(chunk.spans.len(), 3);
+        assert_eq!(chunk.spans[0].span, 0..5);
+        assert_eq!(chunk.spans[0].repeated_values, 1);
+        assert_eq!(chunk.spans[1].span, 5..10);
+        assert_eq!(chunk.spans[1].repeated_values, 1);
+        assert_eq!(chunk.spans[2].span, 10..15);
+        assert_eq!(chunk.spans[2].repeated_values, 1);
     }
 
     #[test]
-    fn test_write_different_lines() {
-        let mut chunk = Chunk::new();
-        chunk.write(123, 1);
-        chunk.write(124, 2);
-        chunk.write(125, 2);
-        chunk.write(126, 3);
+    fn test_write_same_span() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write(123, 0..5);
+        chunk.write(124, 0..5);
+        chunk.write(125, 0..5);
+
+        assert_eq!(chunk.count(), 3);
+        assert_eq!(chunk.spans.len(), 1);
+        assert_eq!(chunk.spans[0].span, 0..5);
+        assert_eq!(chunk.spans[0].repeated_values, 3);
+    }
+
+    #[test]
+    fn test_write_mixed_spans() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write(123, 0..5);
+        chunk.write(124, 5..10);
+        chunk.write(125, 5..10);
+        chunk.write(126, 10..15);
 
         assert_eq!(chunk.count(), 4);
-        assert_eq!(chunk.lines.len(), 3);
+        assert_eq!(chunk.spans.len(), 3);
 
-        assert_eq!(chunk.lines[0].line, 1);
-        assert_eq!(chunk.lines[0].repeated_values, 1);
+        assert_eq!(chunk.spans[0].span, 0..5);
+        assert_eq!(chunk.spans[0].repeated_values, 1);
 
-        assert_eq!(chunk.lines[1].line, 2);
-        assert_eq!(chunk.lines[1].repeated_values, 2);
+        assert_eq!(chunk.spans[1].span, 5..10);
+        assert_eq!(chunk.spans[1].repeated_values, 2);
 
-        assert_eq!(chunk.lines[2].line, 3);
-        assert_eq!(chunk.lines[2].repeated_values, 1);
+        assert_eq!(chunk.spans[2].span, 10..15);
+        assert_eq!(chunk.spans[2].repeated_values, 1);
     }
 
     #[test]
-    fn test_get_line() {
-        let mut chunk = Chunk::new();
-        chunk.write(123, 1);
-        chunk.write(124, 1);
-        chunk.write(125, 2);
-        chunk.write(126, 3);
-        chunk.write(127, 3);
+    fn test_get_span() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write(123, 0..5);
+        chunk.write(124, 0..5);
+        chunk.write(125, 5..10);
+        chunk.write(126, 10..15);
+        chunk.write(127, 10..15);
 
-        assert_eq!(chunk.get_line(0), Some(1));
-        assert_eq!(chunk.get_line(1), Some(1));
-        assert_eq!(chunk.get_line(2), Some(2));
-        assert_eq!(chunk.get_line(3), Some(3));
-        assert_eq!(chunk.get_line(4), Some(3));
-        assert_eq!(chunk.get_line(5), None);
+        assert_eq!(chunk.get_span(0), Some(&(0..5)));
+        assert_eq!(chunk.get_span(1), Some(&(0..5)));
+        assert_eq!(chunk.get_span(2), Some(&(5..10)));
+        assert_eq!(chunk.get_span(3), Some(&(10..15)));
+        assert_eq!(chunk.get_span(4), Some(&(10..15)));
+        assert_eq!(chunk.get_span(5), None);
     }
 
     #[test]
     fn test_add_constant() {
-        let mut chunk = Chunk::new();
+        let mut chunk = Chunk::new("test.jsonnet");
 
         let index1 = chunk.add_constant(1.5);
         let index2 = chunk.add_constant(2.7);
@@ -224,10 +242,25 @@ mod tests {
     }
 
     #[test]
-    fn test_line_run_length() {
-        let line_info = LineRunLength::new(42, 5);
-        assert_eq!(line_info.line, 42);
-        assert_eq!(line_info.repeated_values, 5);
+    fn test_span_run_length() {
+        let span_info = SpanRunLength::new(42..84, 5);
+        assert_eq!(span_info.span, 42..84);
+        assert_eq!(span_info.repeated_values, 5);
+    }
+
+    #[test]
+    fn test_create_error_report() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write(123, 0..5);
+        chunk.write(124, 5..10);
+        chunk.write(125, 10..15);
+
+        let report = chunk.create_error_report(1..3, "Test compilation error");
+
+        // The report should be created successfully - we can't easily test the internal
+        // structure without making the test too brittle, but we can verify it was created
+        // by checking it's the right type (this will compile if the function works)
+        let _: Report<(&str, Range<usize>)> = report;
     }
 
     #[test]
@@ -235,5 +268,6 @@ mod tests {
         let chunk = Chunk::default();
         assert!(chunk.is_empty());
         assert_eq!(chunk.count(), 0);
+        assert_eq!(chunk.source_id, "");
     }
 }
