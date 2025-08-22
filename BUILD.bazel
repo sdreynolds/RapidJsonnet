@@ -34,6 +34,11 @@ rust_library(
     ]
 )
 
+rust_library(
+    name = "chunk",
+    srcs = ["src/chunk.rs"],
+)
+
 rust_test(
     name = "scanner_test",
     crate = ":scanner"
@@ -42,4 +47,9 @@ rust_test(
 rust_test(
     name = "parser_test",
     crate = ":parser"
+)
+
+rust_test(
+    name = "chunk_test",
+    crate = ":chunk"
 )
