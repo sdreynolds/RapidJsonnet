@@ -1,22 +1,25 @@
+use std::ops::Range;
+use ariadne::{Report, ReportKind, Label};
+
 /// A type alias for values in the chunk - currently only f64
 pub type Value = f64;
 
-/// Represents a run-length encoding for line numbers
-/// This struct maps code indices to their corresponding source code line numbers
-/// in an efficient way by storing only unique lines and their repetition counts
+/// Represents a run-length encoding for spans
+/// This struct maps code indices to their corresponding source code spans
+/// in an efficient way by storing only unique spans and their repetition counts
 #[derive(Debug, Clone, PartialEq)]
-pub struct LineRunLength {
-    /// The line number in the source code
-    pub line: usize,
-    /// The count of opcodes/operands that share the same line
+pub struct SpanRunLength {
+    /// The span in the source code
+    pub span: Range<usize>,
+    /// The count of opcodes/operands that share the same span
     pub repeated_values: usize,
 }
 
-impl LineRunLength {
-    /// Creates a new LineRunLength entry
-    pub fn new(line: usize, repeated_values: usize) -> Self {
+impl SpanRunLength {
+    /// Creates a new SpanRunLength entry
+    pub fn new(span: Range<usize>, repeated_values: usize) -> Self {
         Self {
-            line,
+            span,
             repeated_values,
         }
     }
@@ -25,41 +28,44 @@ impl LineRunLength {
 /// A chunk represents a collection of bytecode instructions and associated metadata
 /// for the virtual machine to execute
 #[derive(Debug, Clone, PartialEq)]
-pub struct Chunk {
+pub struct Chunk<'a> {
+    /// Source identifier used with ariadne library
+    pub source_id: &'a str,
     /// Vector of bytecode containing opcodes and operands
     pub code: Vec<u8>,
-    /// Vector mapping code indices to line numbers using run-length encoding
-    pub lines: Vec<LineRunLength>,
+    /// Vector mapping code indices to spans using run-length encoding
+    pub spans: Vec<SpanRunLength>,
     /// Vector of constant values referenced by the bytecode
     pub constants: Vec<Value>,
 }
 
-impl Chunk {
-    /// Creates a new empty chunk
-    pub fn new() -> Self {
+impl<'a> Chunk<'a> {
+    /// Creates a new empty chunk with the given source identifier
+    pub fn new(source_id: &'a str) -> Self {
         Self {
+            source_id,
             code: Vec::new(),
-            lines: Vec::new(),
+            spans: Vec::new(),
             constants: Vec::new(),
         }
     }
 
-    /// Writes a byte to the chunk's code at the specified line number
-    pub fn write(&mut self, byte: u8, line: usize) {
+    /// Writes a byte to the chunk's code with the associated source span
+    pub fn write(&mut self, byte: u8, span: Range<usize>) {
         self.code.push(byte);
 
-        // Update line information using run-length encoding
-        if let Some(last_line) = self.lines.last_mut() {
-            if last_line.line == line {
-                // Same line as previous instruction, increment count
-                last_line.repeated_values += 1;
+        // Update span information using run-length encoding
+        if let Some(last_span) = self.spans.last_mut() {
+            if last_span.span == span {
+                // Same span as previous instruction, increment count
+                last_span.repeated_values += 1;
             } else {
-                // New line, create new entry
-                self.lines.push(LineRunLength::new(line, 1));
+                // New span, create new entry
+                self.spans.push(SpanRunLength::new(span, 1));
             }
         } else {
             // First instruction
-            self.lines.push(LineRunLength::new(line, 1));
+            self.spans.push(SpanRunLength::new(span, 1));
         }
     }
 
@@ -69,18 +75,41 @@ impl Chunk {
         self.constants.len() - 1
     }
 
-    /// Gets the line number for a given instruction index
-    pub fn get_line(&self, instruction_index: usize) -> Option<usize> {
+    /// Gets the span for a given instruction index
+    pub fn get_span(&self, instruction_index: usize) -> Option<&Range<usize>> {
         let mut current_index = 0;
 
-        for line_info in &self.lines {
-            if instruction_index < current_index + line_info.repeated_values {
-                return Some(line_info.line);
+        for span_info in &self.spans {
+            if instruction_index < current_index + span_info.repeated_values {
+                return Some(&span_info.span);
             }
-            current_index += line_info.repeated_values;
+            current_index += span_info.repeated_values;
         }
 
         None
+    }
+
+    /// Creates an ariadne error report for a range of code offsets with the given message
+    pub fn create_error_report(&self, code_range: Range<usize>, message: &str) -> Report<(&str, Range<usize>)> {
+        // Find the source spans that correspond to the code range
+        let start_span = self.get_span(code_range.start);
+        let end_span = self.get_span(code_range.end.saturating_sub(1));
+
+        // Determine the overall source span to highlight
+        let source_span = match (start_span, end_span) {
+            (Some(start), Some(end)) => start.start..end.end,
+            (Some(start), None) => start.clone(),
+            (None, Some(end)) => end.clone(),
+            (None, None) => 0..0, // Fallback if no spans found
+        };
+
+        Report::build(ReportKind::Error, (self.source_id, source_span.clone()))
+            .with_message(message)
+            .with_label(
+                Label::new((self.source_id, source_span))
+                    .with_message(message)
+            )
+            .finish()
     }
 
     /// Returns the number of instructions in the chunk
