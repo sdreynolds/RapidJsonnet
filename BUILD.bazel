@@ -42,6 +42,16 @@ rust_library(
     ]
 )
 
+rust_library(
+    name = "virtual_machine",
+    srcs = ["src/virtual_machine.rs"],
+    deps = [
+        ":chunk",
+        ":scanner",
+        "@crates//:serde_json"
+    ]
+)
+
 rust_test(
     name = "scanner_test",
     crate = ":scanner"
@@ -55,4 +65,9 @@ rust_test(
 rust_test(
     name = "chunk_test",
     crate = ":chunk"
+)
+
+rust_test(
+    name = "virtual_machine_test",
+    crate = ":virtual_machine"
 )
