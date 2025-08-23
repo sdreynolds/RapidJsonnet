@@ -4,6 +4,143 @@ use ariadne::{Report, ReportKind, Label};
 /// A type alias for values in the chunk - currently only f64
 pub type Value = f64;
 
+/// Opcodes for the Jsonnet virtual machine
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Opcode {
+    // Core Value Operations
+    LoadNull = 0,
+    LoadTrue = 1,
+    LoadFalse = 2,
+    LoadConst = 3,    // operand: u16 index
+    LoadSelf = 4,
+    LoadSuper = 5,
+    LoadVar = 6,      // operand: u16 name_index
+
+    // Object Operations
+    CreateObject = 10,      // operand: u16 field_count
+    CreateObjectComp = 11,
+    FieldDef = 12,          // operands: u16 name_index, u8 hidden_type
+    Assert = 13,
+    ObjectIndex = 14,
+    ObjectMerge = 15,
+
+    // Array Operations
+    CreateArray = 20,       // operand: u16 element_count
+    ArrayIndex = 21,
+    ArrayConcat = 22,
+
+    // Function Operations
+    CreateFunction = 30,    // operands: u8 param_count, u32 code_offset
+    Call = 31,              // operands: u8 positional_count, u8 named_count
+    Return = 32,
+    BindDefault = 33,       // operand: u16 param_name
+
+    // Control Flow
+    Jump = 40,              // operand: i32 offset
+    JumpIfFalse = 41,       // operand: i32 offset
+    JumpIfTrue = 42,        // operand: i32 offset
+    LocalScope = 43,        // operand: u8 var_count
+
+    // Binary Operators
+    Add = 50,
+    Sub = 51,
+    Mul = 52,
+    Div = 53,
+    Lt = 54,
+    Le = 55,
+    Gt = 56,
+    Ge = 57,
+    Shl = 58,
+    Shr = 59,
+    BitAnd = 60,
+    BitXor = 61,
+    BitOr = 62,
+    LogicalAnd = 63,
+    LogicalOr = 64,
+
+    // Unary Operators
+    Neg = 70,
+    Pos = 71,
+    Not = 72,
+    BitNot = 73,
+
+    // Standard Library Integration
+    StdCall = 80,           // operands: u16 function_index, u8 arg_count
+    Error = 81,
+
+    // Stack Management
+    Pop = 90,
+    Dup = 91,
+    Swap = 92,
+}
+
+impl Opcode {
+    /// Convert a u8 to an Opcode, returning None if invalid
+    pub fn from_u8(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Opcode::LoadNull),
+            1 => Some(Opcode::LoadTrue),
+            2 => Some(Opcode::LoadFalse),
+            3 => Some(Opcode::LoadConst),
+            4 => Some(Opcode::LoadSelf),
+            5 => Some(Opcode::LoadSuper),
+            6 => Some(Opcode::LoadVar),
+            10 => Some(Opcode::CreateObject),
+            11 => Some(Opcode::CreateObjectComp),
+            12 => Some(Opcode::FieldDef),
+            13 => Some(Opcode::Assert),
+            14 => Some(Opcode::ObjectIndex),
+            15 => Some(Opcode::ObjectMerge),
+            20 => Some(Opcode::CreateArray),
+            21 => Some(Opcode::ArrayIndex),
+            22 => Some(Opcode::ArrayConcat),
+            30 => Some(Opcode::CreateFunction),
+            31 => Some(Opcode::Call),
+            32 => Some(Opcode::Return),
+            33 => Some(Opcode::BindDefault),
+            40 => Some(Opcode::Jump),
+            41 => Some(Opcode::JumpIfFalse),
+            42 => Some(Opcode::JumpIfTrue),
+            43 => Some(Opcode::LocalScope),
+            50 => Some(Opcode::Add),
+            51 => Some(Opcode::Sub),
+            52 => Some(Opcode::Mul),
+            53 => Some(Opcode::Div),
+            54 => Some(Opcode::Lt),
+            55 => Some(Opcode::Le),
+            56 => Some(Opcode::Gt),
+            57 => Some(Opcode::Ge),
+            58 => Some(Opcode::Shl),
+            59 => Some(Opcode::Shr),
+            60 => Some(Opcode::BitAnd),
+            61 => Some(Opcode::BitXor),
+            62 => Some(Opcode::BitOr),
+            63 => Some(Opcode::LogicalAnd),
+            64 => Some(Opcode::LogicalOr),
+            70 => Some(Opcode::Neg),
+            71 => Some(Opcode::Pos),
+            72 => Some(Opcode::Not),
+            73 => Some(Opcode::BitNot),
+            80 => Some(Opcode::StdCall),
+            81 => Some(Opcode::Error),
+            90 => Some(Opcode::Pop),
+            91 => Some(Opcode::Dup),
+            92 => Some(Opcode::Swap),
+            _ => None,
+        }
+    }
+}
+
+/// Hidden field types for object fields
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FieldVisibility {
+    Visible = 0,      // :
+    Hidden = 1,       // ::
+    ForceVisible = 2, // :::
+}
+
 /// Represents a run-length encoding for spans
 /// This struct maps code indices to their corresponding source code spans
 /// in an efficient way by storing only unique spans and their repetition counts
@@ -51,7 +188,7 @@ impl<'a> Chunk<'a> {
     }
 
     /// Writes a byte to the chunk's code with the associated source span
-    pub fn write(&mut self, byte: u8, span: Range<usize>) {
+    fn write(&mut self, byte: u8, span: Range<usize>) {
         self.code.push(byte);
 
         // Update span information using run-length encoding
@@ -120,6 +257,119 @@ impl<'a> Chunk<'a> {
     /// Returns whether the chunk is empty
     pub fn is_empty(&self) -> bool {
         self.code.is_empty()
+    }
+
+    /// Write an opcode with no operands
+    pub fn write_opcode(&mut self, opcode: Opcode, span: Range<usize>) {
+        self.write(opcode as u8, span);
+    }
+
+    /// Write an opcode with a u8 operand
+    pub fn write_opcode_u8(&mut self, opcode: Opcode, operand: u8, span: Range<usize>) {
+        self.write(opcode as u8, span.clone());
+        self.write(operand, span);
+    }
+
+    /// Write an opcode with a u16 operand (little-endian)
+    pub fn write_opcode_u16(&mut self, opcode: Opcode, operand: u16, span: Range<usize>) {
+        self.write(opcode as u8, span.clone());
+        let bytes = operand.to_le_bytes();
+        self.write(bytes[0], span.clone());
+        self.write(bytes[1], span);
+    }
+
+    /// Write an opcode with a u32 operand (little-endian)
+    pub fn write_opcode_u32(&mut self, opcode: Opcode, operand: u32, span: Range<usize>) {
+        self.write(opcode as u8, span.clone());
+        let bytes = operand.to_le_bytes();
+        for byte in bytes {
+            self.write(byte, span.clone());
+        }
+    }
+
+    /// Write an opcode with an i32 operand (little-endian)
+    pub fn write_opcode_i32(&mut self, opcode: Opcode, operand: i32, span: Range<usize>) {
+        self.write(opcode as u8, span.clone());
+        let bytes = operand.to_le_bytes();
+        for byte in bytes {
+            self.write(byte, span.clone());
+        }
+    }
+
+    /// Write an opcode with two u8 operands
+    pub fn write_opcode_u8_u8(&mut self, opcode: Opcode, op1: u8, op2: u8, span: Range<usize>) {
+        self.write(opcode as u8, span.clone());
+        self.write(op1, span.clone());
+        self.write(op2, span);
+    }
+
+    /// Write an opcode with u16 and u8 operands
+    pub fn write_opcode_u16_u8(&mut self, opcode: Opcode, op1: u16, op2: u8, span: Range<usize>) {
+        self.write(opcode as u8, span.clone());
+        let bytes1 = op1.to_le_bytes();
+        self.write(bytes1[0], span.clone());
+        self.write(bytes1[1], span.clone());
+        self.write(op2, span);
+    }
+
+    /// Write an opcode with u8 and u32 operands
+    pub fn write_opcode_u8_u32(&mut self, opcode: Opcode, op1: u8, op2: u32, span: Range<usize>) {
+        self.write(opcode as u8, span.clone());
+        self.write(op1, span.clone());
+        let bytes2 = op2.to_le_bytes();
+        for byte in bytes2 {
+            self.write(byte, span.clone());
+        }
+    }
+
+    /// Read a u8 from the code at the given index
+    pub fn read_u8(&self, index: usize) -> Option<u8> {
+        self.code.get(index).copied()
+    }
+
+    /// Read a u16 from the code at the given index (little-endian)
+    pub fn read_u16(&self, index: usize) -> Option<u16> {
+        if index + 1 < self.code.len() {
+            let bytes = [self.code[index], self.code[index + 1]];
+            Some(u16::from_le_bytes(bytes))
+        } else {
+            None
+        }
+    }
+
+    /// Read a u32 from the code at the given index (little-endian)
+    pub fn read_u32(&self, index: usize) -> Option<u32> {
+        if index + 3 < self.code.len() {
+            let bytes = [
+                self.code[index],
+                self.code[index + 1],
+                self.code[index + 2],
+                self.code[index + 3],
+            ];
+            Some(u32::from_le_bytes(bytes))
+        } else {
+            None
+        }
+    }
+
+    /// Read an i32 from the code at the given index (little-endian)
+    pub fn read_i32(&self, index: usize) -> Option<i32> {
+        if index + 3 < self.code.len() {
+            let bytes = [
+                self.code[index],
+                self.code[index + 1],
+                self.code[index + 2],
+                self.code[index + 3],
+            ];
+            Some(i32::from_le_bytes(bytes))
+        } else {
+            None
+        }
+    }
+
+    /// Read an opcode from the code at the given index
+    pub fn read_opcode(&self, index: usize) -> Option<Opcode> {
+        self.code.get(index).and_then(|&byte| Opcode::from_u8(byte))
     }
 }
 
@@ -261,6 +511,119 @@ mod tests {
         // structure without making the test too brittle, but we can verify it was created
         // by checking it's the right type (this will compile if the function works)
         let _: Report<(&str, Range<usize>)> = report;
+    }
+
+    #[test]
+    fn test_opcode_conversion() {
+        assert_eq!(Opcode::from_u8(0), Some(Opcode::LoadNull));
+        assert_eq!(Opcode::from_u8(3), Some(Opcode::LoadConst));
+        assert_eq!(Opcode::from_u8(50), Some(Opcode::Add));
+        assert_eq!(Opcode::from_u8(255), None);
+    }
+
+    #[test]
+    fn test_write_opcode() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode(Opcode::LoadNull, 0..5);
+
+        assert_eq!(chunk.count(), 1);
+        assert_eq!(chunk.read_opcode(0), Some(Opcode::LoadNull));
+    }
+
+    #[test]
+    fn test_write_opcode_u16() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode_u16(Opcode::LoadConst, 0x1234, 0..5);
+
+        assert_eq!(chunk.count(), 3);
+        assert_eq!(chunk.read_opcode(0), Some(Opcode::LoadConst));
+        assert_eq!(chunk.read_u16(1), Some(0x1234));
+    }
+
+    #[test]
+    fn test_write_opcode_u32() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode_u32(Opcode::CreateFunction, 0x12345678, 0..5);
+
+        assert_eq!(chunk.count(), 5);
+        assert_eq!(chunk.read_opcode(0), Some(Opcode::CreateFunction));
+        assert_eq!(chunk.read_u32(1), Some(0x12345678));
+    }
+
+    #[test]
+    fn test_write_opcode_i32() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode_i32(Opcode::Jump, -42, 0..5);
+
+        assert_eq!(chunk.count(), 5);
+        assert_eq!(chunk.read_opcode(0), Some(Opcode::Jump));
+        assert_eq!(chunk.read_i32(1), Some(-42));
+    }
+
+    #[test]
+    fn test_write_opcode_u8_u8() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode_u8_u8(Opcode::Call, 3, 2, 0..5);
+
+        assert_eq!(chunk.count(), 3);
+        assert_eq!(chunk.read_opcode(0), Some(Opcode::Call));
+        assert_eq!(chunk.read_u8(1), Some(3));
+        assert_eq!(chunk.read_u8(2), Some(2));
+    }
+
+    #[test]
+    fn test_write_opcode_u16_u8() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode_u16_u8(Opcode::FieldDef, 0x1234, 1, 0..5);
+
+        assert_eq!(chunk.count(), 4);
+        assert_eq!(chunk.read_opcode(0), Some(Opcode::FieldDef));
+        assert_eq!(chunk.read_u16(1), Some(0x1234));
+        assert_eq!(chunk.read_u8(3), Some(1));
+    }
+
+    #[test]
+    fn test_write_opcode_u8_u32() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode_u8_u32(Opcode::CreateFunction, 5, 0x12345678, 0..5);
+
+        assert_eq!(chunk.count(), 6);
+        assert_eq!(chunk.read_opcode(0), Some(Opcode::CreateFunction));
+        assert_eq!(chunk.read_u8(1), Some(5));
+        assert_eq!(chunk.read_u32(2), Some(0x12345678));
+    }
+
+    #[test]
+    fn test_field_visibility() {
+        assert_eq!(FieldVisibility::Visible as u8, 0);
+        assert_eq!(FieldVisibility::Hidden as u8, 1);
+        assert_eq!(FieldVisibility::ForceVisible as u8, 2);
+    }
+
+    #[test]
+    fn test_complex_opcode_sequence() {
+        let mut chunk = Chunk::new("test.jsonnet");
+
+        // Simulate: LOAD_CONST 0, ADD, RETURN
+        chunk.write_opcode_u16(Opcode::LoadConst, 0, 0..5);  // 3 bytes: opcode + u16
+        chunk.write_opcode(Opcode::Add, 5..10);              // 1 byte: opcode
+        chunk.write_opcode(Opcode::Return, 10..15);          // 1 byte: opcode
+
+        assert_eq!(chunk.count(), 5);
+        assert_eq!(chunk.read_opcode(0), Some(Opcode::LoadConst));
+        assert_eq!(chunk.read_u16(1), Some(0));
+        assert_eq!(chunk.read_opcode(3), Some(Opcode::Add));
+        assert_eq!(chunk.read_opcode(4), Some(Opcode::Return));
+    }
+
+    #[test]
+    fn test_read_beyond_bounds() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode(Opcode::LoadNull, 0..5);
+
+        assert_eq!(chunk.read_u16(0), None);
+        assert_eq!(chunk.read_u32(0), None);
+        assert_eq!(chunk.read_opcode(5), None);
     }
 
     #[test]
