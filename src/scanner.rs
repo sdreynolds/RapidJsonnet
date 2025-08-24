@@ -285,59 +285,64 @@ impl<'a> Scanner<'a> {
         self.advance(); // opening quote
         let mut value = String::new();
 
-        while !self.is_at_end() && self.peek() != quote {
-            let ch = self.advance();
-
-            if verbatim {
-                // Verbatim strings: only handle doubled quotes
-                if ch == quote && self.peek() == quote {
-                    self.advance(); // consume second quote
+        while !self.is_at_end() {
+            if self.peek() == quote {
+                if verbatim && self.peek_ahead(1) == Some(quote) {
+                    // Doubled quote in verbatim string
+                    self.advance(); // first quote
+                    self.advance(); // second quote
                     value.push(quote);
                 } else {
-                    value.push(ch);
+                    // End of string
+                    break;
                 }
             } else {
-                // Regular strings: handle escape sequences
-                if ch == '\\' {
-                    let escaped = self.advance();
-                    match escaped {
-                        '"' | '\'' | '\\' | '/' => value.push(escaped),
-                        'b' => value.push('\u{0008}'),
-                        'f' => value.push('\u{000C}'),
-                        'n' => value.push('\n'),
-                        'r' => value.push('\r'),
-                        't' => value.push('\t'),
-                        'u' => {
-                            let hex_start = self.position;
-                            let hex_digits: String = (0..4)
-                                .map(|_| self.advance())
-                                .collect();
+                let ch = self.advance();
+                if verbatim {
+                    value.push(ch);
+                } else {
+                    // Regular strings: handle escape sequences
+                    if ch == '\\' {
+                        let escaped = self.advance();
+                        match escaped {
+                            '"' | '\'' | '\\' | '/' => value.push(escaped),
+                            'b' => value.push('\u{0008}'),
+                            'f' => value.push('\u{000C}'),
+                            'n' => value.push('\n'),
+                            'r' => value.push('\r'),
+                            't' => value.push('\t'),
+                            'u' => {
+                                let hex_start = self.position;
+                                let hex_digits: String = (0..4)
+                                    .map(|_| self.advance())
+                                    .collect();
 
-                            if let Ok(code_point) = u32::from_str_radix(&hex_digits, 16) {
-                                if let Some(unicode_char) = char::from_u32(code_point) {
-                                    value.push(unicode_char);
+                                if let Ok(code_point) = u32::from_str_radix(&hex_digits, 16) {
+                                    if let Some(unicode_char) = char::from_u32(code_point) {
+                                        value.push(unicode_char);
+                                    } else {
+                                        return Err(self.make_error(
+                                            hex_start - 2..self.position,
+                                            format!("Invalid unicode escape sequence: \\u{}", hex_digits),
+                                        ));
+                                    }
                                 } else {
                                     return Err(self.make_error(
                                         hex_start - 2..self.position,
                                         format!("Invalid unicode escape sequence: \\u{}", hex_digits),
                                     ));
                                 }
-                            } else {
+                            }
+                            _ => {
                                 return Err(self.make_error(
-                                    hex_start - 2..self.position,
-                                    format!("Invalid unicode escape sequence: \\u{}", hex_digits),
+                                    self.position - 2..self.position,
+                                    format!("Invalid escape sequence: \\{}", escaped),
                                 ));
                             }
                         }
-                        _ => {
-                            return Err(self.make_error(
-                                self.position - 2..self.position,
-                                format!("Invalid escape sequence: \\{}", escaped),
-                            ));
-                        }
+                    } else {
+                        value.push(ch);
                     }
-                } else {
-                    value.push(ch);
                 }
             }
         }

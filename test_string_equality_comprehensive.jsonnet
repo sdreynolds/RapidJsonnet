@@ -1,0 +1,1 @@
+("hello" == "hello") && ("world" != "hello") && ("42" != 42) && (true != false)

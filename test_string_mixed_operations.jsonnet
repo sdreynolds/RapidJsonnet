@@ -1,0 +1,1 @@
+"Number: " + 42 + " and boolean: " + true + " and null: " + null

@@ -154,8 +154,30 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Add => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? + b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
-                    self.push(Value::Number(result))?;
+
+                    // String concatenation if either operand is a string
+                    match (&a, &b) {
+                        (Value::String(_), _) | (_, Value::String(_)) => {
+                            let a_str = match &a {
+                                Value::String(s) => s.clone(),
+                                Value::Number(n) => n.to_string(),
+                                Value::Boolean(b) => b.to_string(),
+                                Value::Null => "null".to_string(),
+                            };
+                            let b_str = match &b {
+                                Value::String(s) => s.clone(),
+                                Value::Number(n) => n.to_string(),
+                                Value::Boolean(b) => b.to_string(),
+                                Value::Null => "null".to_string(),
+                            };
+                            self.push(Value::String(format!("{}{}", a_str, b_str)))?;
+                        }
+                        // Numeric addition for all other cases
+                        _ => {
+                            let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? + b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                            self.push(Value::Number(result))?;
+                        }
+                    }
                     self.advance_pc();
                 }
 
@@ -221,6 +243,57 @@ impl<'a> VirtualMachine<'a> {
                     let a = self.pop()?;
                     let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? >= b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
                     self.push(Value::Boolean(result))?;
+                    self.advance_pc();
+                }
+
+                // Equality operations
+                Opcode::Eq => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    let result = self.values_equal(&a, &b);
+                    self.push(Value::Boolean(result))?;
+                    self.advance_pc();
+                }
+
+                Opcode::Ne => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    let result = !self.values_equal(&a, &b);
+                    self.push(Value::Boolean(result))?;
+                    self.advance_pc();
+                }
+
+                // String operations
+                Opcode::StringConcat => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+
+                    // @TODO: actually benchmark this optimization. First glance doesn't look like an improvement.
+                    // Optimized string concatenation - assumes both are strings
+                    let result = match (&a, &b) {
+                        (Value::String(s1), Value::String(s2)) => {
+                            Value::String(format!("{}{}", s1, s2))
+                        }
+                        _ => {
+                            // This should not happen if compiler type tracking is correct
+                            // Fall back to safe conversion
+                            let a_str = match &a {
+                                Value::String(s) => s.clone(),
+                                Value::Number(n) => n.to_string(),
+                                Value::Boolean(b) => b.to_string(),
+                                Value::Null => "null".to_string(),
+                            };
+                            let b_str = match &b {
+                                Value::String(s) => s.clone(),
+                                Value::Number(n) => n.to_string(),
+                                Value::Boolean(b) => b.to_string(),
+                                Value::Null => "null".to_string(),
+                            };
+                            Value::String(format!("{}{}", a_str, b_str))
+                        }
+                    };
+
+                    self.push(result)?;
                     self.advance_pc();
                 }
 
@@ -360,6 +433,20 @@ impl<'a> VirtualMachine<'a> {
                     });
                 }
             }
+        }
+    }
+
+    /// Compare two values for equality according to Jsonnet semantics
+    fn values_equal(&self, a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            // Same type comparisons
+            (Value::Null, Value::Null) => true,
+            (Value::Boolean(a), Value::Boolean(b)) => a == b,
+            (Value::Number(a), Value::Number(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+
+            // Different types are never equal
+            _ => false,
         }
     }
 }

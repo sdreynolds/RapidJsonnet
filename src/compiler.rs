@@ -6,6 +6,16 @@ use parser::Parser;
 
 pub type CompilerError = ScanError;
 
+// Expression type tracking for compile-time optimizations
+#[derive(Debug, Clone, PartialEq)]
+enum ExpressionType {
+    String,
+    Number,
+    Boolean,
+    Null,
+    Unknown,
+}
+
 // Precedence constants
 const PRECEDENCE_POSTFIX: u8 = 90;
 const PRECEDENCE_UNARY: u8 = 80;
@@ -13,6 +23,7 @@ const PRECEDENCE_EXPONENTIATION: u8 = 70;
 const PRECEDENCE_MULTIPLICATIVE: u8 = 60;
 const PRECEDENCE_ADDITIVE: u8 = 50;
 const PRECEDENCE_COMPARISON: u8 = 40;
+const PRECEDENCE_EQUALITY: u8 = 35;
 const PRECEDENCE_BITAND: u8 = 30;
 const PRECEDENCE_BITXOR: u8 = 25;
 const PRECEDENCE_BITOR: u8 = 20;
@@ -23,6 +34,7 @@ const PRECEDENCE_TERNARY: u8 = 5;
 pub struct Compiler<'a> {
     compiling_chunk: Chunk<'a>,
     parser: Parser<'a>,
+    type_stack: Vec<ExpressionType>,
 }
 
 impl<'a> Compiler<'a> {
@@ -33,6 +45,7 @@ impl<'a> Compiler<'a> {
         Self {
             compiling_chunk,
             parser,
+            type_stack: Vec::new(),
         }
     }
 
@@ -106,50 +119,82 @@ impl<'a> Compiler<'a> {
         match &token.token {
             Token::Number(value) => {
                 self.emit_constant(*value)?;
+                self.push_type(ExpressionType::Number);
                 self.parser.advance()?; // consume the number
             }
             Token::String(value) => {
                 self.emit_string_constant(value.clone())?;
+                self.push_type(ExpressionType::String);
                 self.parser.advance()?; // consume the string
             }
             Token::True => {
                 self.emit_opcode(Opcode::LoadTrue, token.span);
+                self.push_type(ExpressionType::Boolean);
                 self.parser.advance()?; // consume the true
             }
             Token::False => {
                 self.emit_opcode(Opcode::LoadFalse, token.span);
+                self.push_type(ExpressionType::Boolean);
                 self.parser.advance()?; // consume the false
             }
             Token::Null => {
                 self.emit_opcode(Opcode::LoadNull, token.span);
+                self.push_type(ExpressionType::Null);
                 self.parser.advance()?; // consume the null
             }
             Token::Operator(op) if op == "-" => {
                 self.parser.advance()?; // consume the operator
                 self.parse_expr(PRECEDENCE_UNARY)?;
                 self.emit_opcode(Opcode::Neg, token.span);
+                // Unary minus: if operand was number, result is number; otherwise unknown
+                let operand_type = self.pop_type();
+                if operand_type == ExpressionType::Number {
+                    self.push_type(ExpressionType::Number);
+                } else {
+                    self.push_type(ExpressionType::Unknown);
+                }
             }
             Token::Operator(op) if op == "+" => {
                 self.parser.advance()?; // consume the operator
                 self.parse_expr(PRECEDENCE_UNARY)?;
                 self.emit_opcode(Opcode::Pos, token.span);
+                // Unary plus: if operand was number, result is number; otherwise unknown
+                let operand_type = self.pop_type();
+                if operand_type == ExpressionType::Number {
+                    self.push_type(ExpressionType::Number);
+                } else {
+                    self.push_type(ExpressionType::Unknown);
+                }
             }
             Token::Operator(op) if op == "!" => {
                 self.parser.advance()?; // consume the operator
                 self.parse_expr(PRECEDENCE_UNARY)?;
                 self.emit_opcode(Opcode::Not, token.span);
+                // Logical NOT always produces boolean
+                self.pop_type();
+                self.push_type(ExpressionType::Boolean);
             }
             Token::Operator(op) if op == "~" => {
                 self.parser.advance()?; // consume the operator
                 self.parse_expr(PRECEDENCE_UNARY)?;
                 self.emit_opcode(Opcode::BitNot, token.span);
+                // Bitwise NOT: if operand was number, result is number; otherwise unknown
+                let operand_type = self.pop_type();
+                if operand_type == ExpressionType::Number {
+                    self.push_type(ExpressionType::Number);
+                } else {
+                    self.push_type(ExpressionType::Unknown);
+                }
             }
             Token::LeftParen => {
                 self.parser.advance()?; // consume '('
                 self.parse_expr(0)?;
                 self.parser.consume(Token::RightParen, "Expected closing parenthesis")?;
+                // Parentheses don't change the type
             }
             _ => {
+                // Unknown expression type
+                self.push_type(ExpressionType::Unknown);
                 return Err(self.invalid_expression_error(&token));
             }
         }
@@ -173,16 +218,95 @@ impl<'a> Compiler<'a> {
         self.parse_expr(left_bp)?;
 
         match &token.token {
-            Token::Operator(op) if op == "+" => self.emit_opcode(Opcode::Add, token.span),
-            Token::Operator(op) if op == "-" => self.emit_opcode(Opcode::Sub, token.span),
-            Token::Operator(op) if op == "*" => self.emit_opcode(Opcode::Mul, token.span),
-            Token::Operator(op) if op == "/" => self.emit_opcode(Opcode::Div, token.span),
-            Token::Operator(op) if op == "<" => self.emit_opcode(Opcode::Lt, token.span),
-            Token::Operator(op) if op == "<=" => self.emit_opcode(Opcode::Le, token.span),
-            Token::Operator(op) if op == ">" => self.emit_opcode(Opcode::Gt, token.span),
-            Token::Operator(op) if op == ">=" => self.emit_opcode(Opcode::Ge, token.span),
-            Token::Operator(op) if op == "&" => self.emit_opcode(Opcode::BitAnd, token.span),
-            Token::Operator(op) if op == "|" => self.emit_opcode(Opcode::BitOr, token.span),
+            Token::Operator(op) if op == "+" => {
+                // Check operand types for optimization
+                let right_type = self.pop_type();
+                let left_type = self.pop_type();
+                
+                // If both operands are known to be strings, use StringConcat
+                if left_type == ExpressionType::String && right_type == ExpressionType::String {
+                    self.emit_opcode(Opcode::StringConcat, token.span);
+                    self.push_type(ExpressionType::String);
+                } else {
+                    // Fall back to Add for mixed/unknown types
+                    self.emit_opcode(Opcode::Add, token.span);
+                    
+                    // Determine result type
+                    if left_type == ExpressionType::String || right_type == ExpressionType::String {
+                        self.push_type(ExpressionType::String);
+                    } else if left_type == ExpressionType::Number && right_type == ExpressionType::Number {
+                        self.push_type(ExpressionType::Number);
+                    } else {
+                        self.push_type(ExpressionType::Unknown);
+                    }
+                }
+            }
+            Token::Operator(op) if op == "-" => {
+                self.emit_opcode(Opcode::Sub, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Number); // subtraction always produces number
+            }
+            Token::Operator(op) if op == "*" => {
+                self.emit_opcode(Opcode::Mul, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Number); // multiplication always produces number
+            }
+            Token::Operator(op) if op == "/" => {
+                self.emit_opcode(Opcode::Div, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Number); // division always produces number
+            }
+            Token::Operator(op) if op == "<" => {
+                self.emit_opcode(Opcode::Lt, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Boolean); // comparison always produces boolean
+            }
+            Token::Operator(op) if op == "<=" => {
+                self.emit_opcode(Opcode::Le, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Boolean); // comparison always produces boolean
+            }
+            Token::Operator(op) if op == ">" => {
+                self.emit_opcode(Opcode::Gt, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Boolean); // comparison always produces boolean
+            }
+            Token::Operator(op) if op == ">=" => {
+                self.emit_opcode(Opcode::Ge, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Boolean); // comparison always produces boolean
+            }
+            Token::Operator(op) if op == "==" => {
+                self.emit_opcode(Opcode::Eq, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Boolean); // equality always produces boolean
+            }
+            Token::Operator(op) if op == "!=" => {
+                self.emit_opcode(Opcode::Ne, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Boolean); // inequality always produces boolean
+            }
+            Token::Operator(op) if op == "&" => {
+                self.emit_opcode(Opcode::BitAnd, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Number); // bitwise ops produce numbers
+            }
+            Token::Operator(op) if op == "|" => {
+                self.emit_opcode(Opcode::BitOr, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Number); // bitwise ops produce numbers
+            }
             _ => return Err(self.invalid_expression_error(&token)),
         }
 
@@ -238,6 +362,18 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    // Type stack management for compile-time optimizations
+    fn push_type(&mut self, expr_type: ExpressionType) {
+        self.type_stack.push(expr_type);
+    }
+
+    fn pop_type(&mut self) -> ExpressionType {
+        self.type_stack.pop().unwrap_or(ExpressionType::Unknown)
+    }
+
+    fn peek_type(&self) -> ExpressionType {
+        self.type_stack.last().cloned().unwrap_or(ExpressionType::Unknown)
+    }
 
     fn unexpected_eof_error(&self, span: Range<usize>) -> CompilerError {
         self.make_error(span, "Unexpected end of input".to_string())
@@ -289,6 +425,10 @@ impl<'a> Compiler<'a> {
             // Comparison (non-associative)
             Token::Operator(op) if matches!(op.as_str(), "<" | "<=" | ">" | ">=") =>
                 Some((PRECEDENCE_COMPARISON, PRECEDENCE_COMPARISON + 1)),
+
+            // Equality (left associative)
+            Token::Operator(op) if matches!(op.as_str(), "==" | "!=") =>
+                Some((PRECEDENCE_EQUALITY, PRECEDENCE_EQUALITY + 1)),
 
             // Bitwise AND (left associative)
             Token::Operator(op) if op == "&" =>
