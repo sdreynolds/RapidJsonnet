@@ -1,0 +1,6 @@
+{
+  name: "Alice",           // identifier key
+  "first-name": "Alice",   // string key (with dash)
+  age: 30,                 // identifier key  
+  "is-active": true        // string key (with dash)
+}

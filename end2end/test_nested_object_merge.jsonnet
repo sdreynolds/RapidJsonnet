@@ -1,0 +1,7 @@
+{
+  person: {name: "Alice", age: 30},
+  location: "home"
+} + {
+  person: {age: 31, job: "engineer"},
+  status: "active"
+}
