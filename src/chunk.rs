@@ -1,10 +1,58 @@
 use std::ops::Range;
+use std::collections::HashMap;
 use ariadne::{Report, ReportKind, Label};
 use scanner::ScanError;
 use string_pool::InternedString;
+use slotmap::DefaultKey;
 
 /// Runtime error type - alias for ScanError to reuse existing infrastructure
 pub type RuntimeError = ScanError;
+
+/// A Jsonnet object containing property key-value pairs
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonnetObject {
+    /// Object properties mapping interned string keys to values
+    pub properties: HashMap<InternedString, Value>,
+}
+
+impl JsonnetObject {
+    /// Create a new empty Jsonnet object
+    pub fn new() -> Self {
+        Self {
+            properties: HashMap::new(),
+        }
+    }
+
+    /// Create a Jsonnet object with the given properties
+    pub fn with_properties(properties: HashMap<InternedString, Value>) -> Self {
+        Self { properties }
+    }
+
+    /// Get a property value by key
+    pub fn get(&self, key: &InternedString) -> Option<&Value> {
+        self.properties.get(key)
+    }
+
+    /// Set a property value
+    pub fn set(&mut self, key: InternedString, value: Value) {
+        self.properties.insert(key, value);
+    }
+
+    /// Check if object has a property
+    pub fn has_property(&self, key: &InternedString) -> bool {
+        self.properties.contains_key(key)
+    }
+
+    /// Get number of properties
+    pub fn len(&self) -> usize {
+        self.properties.len()
+    }
+
+    /// Check if object is empty
+    pub fn is_empty(&self) -> bool {
+        self.properties.is_empty()
+    }
+}
 
 /// Value type for the Jsonnet virtual machine
 #[derive(Debug, Clone, PartialEq)]
@@ -13,6 +61,7 @@ pub enum Value {
     Boolean(bool),
     Number(f64),
     String(InternedString),
+    Object(DefaultKey),
 }
 
 impl std::fmt::Display for Value {
@@ -22,6 +71,7 @@ impl std::fmt::Display for Value {
             Value::Boolean(b) => write!(f, "{}", b),
             Value::Number(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "\"{}\"", s.as_str()),
+            Value::Object(_key) => write!(f, "{{object}}"), // Placeholder - actual formatting requires SlotMap access
         }
     }
 }
@@ -34,6 +84,7 @@ impl Value {
             Value::Boolean(b) => *b,
             Value::Number(n) => *n != 0.0,
             Value::String(s) => !s.as_str().is_empty(),
+            Value::Object(_key) => true, // Objects are always truthy
         }
     }
 

@@ -1,6 +1,7 @@
 use std::ops::Range;
-use chunk::{Chunk, Opcode, Value, RuntimeError};
+use chunk::{Chunk, Opcode, Value, RuntimeError, JsonnetObject};
 use string_pool::{intern_string, InternedString, with_string_pool};
+use slotmap::{SlotMap, DefaultKey};
 
 /// Virtual machine for executing Jsonnet bytecode
 pub struct VirtualMachine<'a> {
@@ -12,6 +13,8 @@ pub struct VirtualMachine<'a> {
     program_counter: usize,
     /// Execution stack
     stack: Vec<Value>,
+    /// Object storage using SlotMap for stable references
+    objects: SlotMap<DefaultKey, JsonnetObject>,
 }
 
 impl<'a> VirtualMachine<'a> {
@@ -22,6 +25,7 @@ impl<'a> VirtualMachine<'a> {
             current_chunk: 0,
             program_counter: 0,
             stack: Vec::with_capacity(1024),
+            objects: SlotMap::new(),
         };
 
         vm.chunks.push(chunk);
@@ -99,6 +103,32 @@ impl<'a> VirtualMachine<'a> {
         self.program_counter += 1;
     }
 
+    /// Allocate a new object in the SlotMap and return its key
+    pub fn allocate_object(&mut self, object: JsonnetObject) -> DefaultKey {
+        self.objects.insert(object)
+    }
+
+    /// Get an object from the SlotMap by its key
+    pub fn get_object(&self, key: DefaultKey) -> Option<&JsonnetObject> {
+        self.objects.get(key)
+    }
+
+    /// Get a mutable reference to an object from the SlotMap by its key
+    pub fn get_object_mut(&mut self, key: DefaultKey) -> Option<&mut JsonnetObject> {
+        self.objects.get_mut(key)
+    }
+
+    /// Check if an object key is valid
+    pub fn is_valid_object(&self, key: DefaultKey) -> bool {
+        self.objects.contains_key(key)
+    }
+
+    /// Create an empty object and return its key
+    pub fn create_empty_object(&mut self) -> DefaultKey {
+        let object = JsonnetObject::new();
+        self.allocate_object(object)
+    }
+
     /// Main interpretation loop
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
         loop {
@@ -159,20 +189,45 @@ impl<'a> VirtualMachine<'a> {
                     let b = self.pop()?;
                     let a = self.pop()?;
 
-                    // String concatenation if either operand is a string
+                    // Check for different addition types
                     match (&a, &b) {
+                        // Object merging (according to Jsonnet spec)
+                        (Value::Object(left_key), Value::Object(right_key)) => {
+                            if let (Some(left_object), Some(right_object)) = (self.get_object(*left_key), self.get_object(*right_key)) {
+                                // Create merged properties starting with left object
+                                let mut merged_properties = left_object.properties.clone();
+                                
+                                // Override/add properties from right object
+                                for (key, value) in &right_object.properties {
+                                    merged_properties.insert(*key, value.clone());
+                                }
+                                
+                                let merged_object = JsonnetObject::with_properties(merged_properties);
+                                let merged_key = self.allocate_object(merged_object);
+                                self.push(Value::Object(merged_key))?;
+                            } else {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "Invalid object reference in merge".to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        }
+                        // String concatenation if either operand is a string  
                         (Value::String(_), _) | (_, Value::String(_)) => {
                             let a_str = match &a {
                                 Value::String(s) => s.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
+                                Value::Object(_) => "{object}".to_string(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => s.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
+                                Value::Object(_) => "{object}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             self.push(Value::String(intern_string(&result_str)))?;
@@ -288,12 +343,14 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
+                                Value::Object(_) => "{object}".to_string(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => s.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
+                                Value::Object(_) => "{object}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             Value::String(intern_string(&result_str))
@@ -426,6 +483,107 @@ impl<'a> VirtualMachine<'a> {
                     self.advance_pc();
                 }
 
+                Opcode::CreateObject => {
+                    let field_count = self.read_u16_operand()?;
+                    
+                    // Pop field_count pairs of (key, value) from the stack
+                    let mut properties = std::collections::HashMap::new();
+                    
+                    for _ in 0..field_count {
+                        let value = self.pop()?;
+                        let key = self.pop()?;
+                        
+                        // Ensure key is a string
+                        if let Value::String(key_str) = key {
+                            properties.insert(key_str, value);
+                        } else {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!("Object key must be a string, got {:?}", key),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+                    
+                    let object = JsonnetObject::with_properties(properties);
+                    let object_key = self.allocate_object(object);
+                    self.push(Value::Object(object_key))?;
+                }
+
+                Opcode::ObjectIndex => {
+                    let field_name = self.pop()?;  // Property name to access
+                    let object_value = self.pop()?;  // Object to index into
+                    
+                    // Ensure we have an object
+                    if let Value::Object(object_key) = object_value {
+                        // Ensure field name is a string
+                        if let Value::String(field_key) = field_name {
+                            if let Some(object) = self.get_object(object_key) {
+                                if let Some(value) = object.get(&field_key) {
+                                    self.push(value.clone())?;
+                                } else {
+                                    // Property doesn't exist, push null
+                                    self.push(Value::Null)?;
+                                }
+                            } else {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "Invalid object reference".to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        } else {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!("Object index must be a string, got {:?}", field_name),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    } else {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!("Cannot index into non-object value: {:?}", object_value),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+                    self.advance_pc();
+                }
+
+                Opcode::ObjectMerge => {
+                    let right_value = self.pop()?;  // Right-hand side object
+                    let left_value = self.pop()?;   // Left-hand side object
+                    
+                    // Ensure both values are objects
+                    if let (Value::Object(left_key), Value::Object(right_key)) = (left_value, right_value) {
+                        if let (Some(left_object), Some(right_object)) = (self.get_object(left_key), self.get_object(right_key)) {
+                            // Create merged properties starting with left object
+                            let mut merged_properties = left_object.properties.clone();
+                            
+                            // Override/add properties from right object
+                            for (key, value) in &right_object.properties {
+                                merged_properties.insert(*key, value.clone());
+                            }
+                            
+                            let merged_object = JsonnetObject::with_properties(merged_properties);
+                            let merged_key = self.allocate_object(merged_object);
+                            self.push(Value::Object(merged_key))?;
+                        } else {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Invalid object reference in merge".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    } else {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Object merge requires two objects".to_string(),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+                    self.advance_pc();
+                }
+
                 Opcode::Return => {
                     // Return the top value and halt execution
                     return self.pop();
@@ -457,40 +615,168 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
-    /// Collect all string roots from the VM stack for garbage collection
-    pub fn collect_string_roots(&self) -> Vec<InternedString> {
-        let mut roots = Vec::new();
+    /// Collect all GC roots from the VM for garbage collection
+    pub fn collect_gc_roots(&self) -> (Vec<InternedString>, Vec<DefaultKey>) {
+        let mut string_roots = Vec::new();
+        let mut object_roots = Vec::new();
         
         // Collect from value stack
         for value in &self.stack {
-            if let Value::String(interned_string) = value {
-                roots.push(*interned_string);
+            match value {
+                Value::String(interned_string) => string_roots.push(*interned_string),
+                Value::Object(object_key) => object_roots.push(*object_key),
+                _ => {}
             }
         }
         
         // Collect from constants in all loaded chunks
         for chunk in &self.chunks {
             for constant in &chunk.constants {
-                if let Value::String(interned_string) = constant {
-                    roots.push(*interned_string);
+                match constant {
+                    Value::String(interned_string) => string_roots.push(*interned_string),
+                    Value::Object(object_key) => object_roots.push(*object_key),
+                    _ => {}
                 }
             }
         }
         
+        // Collect strings from object properties
+        self.collect_strings_from_objects(&object_roots, &mut string_roots);
+        
         // Future: Collect from other VM roots:
         // - Local variables
-        // - Global variables
+        // - Global variables  
         // - Call frames
         
-        roots
+        (string_roots, object_roots)
+    }
+
+    /// Recursively collect string roots from objects and their properties
+    fn collect_strings_from_objects(&self, object_keys: &[DefaultKey], string_roots: &mut Vec<InternedString>) {
+        let mut visited_objects = std::collections::HashSet::new();
+        let mut objects_to_visit = object_keys.to_vec();
+        
+        while let Some(object_key) = objects_to_visit.pop() {
+            if visited_objects.contains(&object_key) {
+                continue;
+            }
+            visited_objects.insert(object_key);
+            
+            if let Some(object) = self.get_object(object_key) {
+                for (property_key, property_value) in &object.properties {
+                    // Add property key (which is an InternedString)
+                    string_roots.push(*property_key);
+                    
+                    // If property value is a string, add it
+                    // If property value is an object, add it to visit queue
+                    match property_value {
+                        Value::String(interned_string) => string_roots.push(*interned_string),
+                        Value::Object(nested_object_key) => {
+                            if !visited_objects.contains(nested_object_key) {
+                                objects_to_visit.push(*nested_object_key);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
     
     /// Trigger garbage collection if needed
     pub fn maybe_collect_garbage(&mut self) {
-        let roots = self.collect_string_roots();
+        let (string_roots, object_roots) = self.collect_gc_roots();
+        
+        // Run string garbage collection
         with_string_pool(|pool| {
-            pool.maybe_collect(roots);
+            pool.maybe_collect(string_roots);
         });
+        
+        // Run object garbage collection
+        self.maybe_collect_objects(&object_roots);
+    }
+
+    /// Perform object garbage collection
+    fn maybe_collect_objects(&mut self, roots: &[DefaultKey]) {
+        // Simple mark-and-sweep for objects
+        let mut reachable_objects = std::collections::HashSet::new();
+        let mut objects_to_visit = roots.to_vec();
+        
+        // Mark phase: find all reachable objects
+        while let Some(object_key) = objects_to_visit.pop() {
+            if reachable_objects.contains(&object_key) {
+                continue;
+            }
+            
+            if let Some(object) = self.get_object(object_key) {
+                reachable_objects.insert(object_key);
+                
+                // Add nested objects to visit queue
+                for (_, value) in &object.properties {
+                    if let Value::Object(nested_key) = value {
+                        if !reachable_objects.contains(nested_key) {
+                            objects_to_visit.push(*nested_key);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Sweep phase: remove unreachable objects
+        let all_keys: Vec<DefaultKey> = self.objects.keys().collect();
+        for key in all_keys {
+            if !reachable_objects.contains(&key) {
+                self.objects.remove(key);
+            }
+        }
+    }
+
+    /// Convert a VM Value to serde_json::Value for JSON output
+    fn value_to_json(&self, value: &Value, visited: &mut std::collections::HashSet<DefaultKey>) -> Result<serde_json::Value, RuntimeError> {
+        match value {
+            Value::Null => Ok(serde_json::Value::Null),
+            Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
+            Value::Number(n) => {
+                serde_json::Number::from_f64(*n)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| RuntimeError {
+                        span: 0..0,
+                        message: "Invalid number for JSON conversion".to_string(),
+                        source_id: "serialization".to_string(),
+                    })
+            },
+            Value::String(s) => Ok(serde_json::Value::String(s.as_str().to_owned())),
+            Value::Object(object_key) => {
+                // Check for circular references
+                if visited.contains(object_key) {
+                    return Err(RuntimeError {
+                        span: 0..0,
+                        message: "Circular reference detected in object".to_string(),
+                        source_id: "serialization".to_string(),
+                    });
+                }
+                
+                visited.insert(*object_key);
+                
+                if let Some(object) = self.get_object(*object_key) {
+                    let mut json_object = serde_json::Map::new();
+                    
+                    for (key, value) in &object.properties {
+                        let json_value = self.value_to_json(value, visited)?;
+                        json_object.insert(key.as_str().to_owned(), json_value);
+                    }
+                    
+                    visited.remove(object_key); // Remove after processing
+                    Ok(serde_json::Value::Object(json_object))
+                } else {
+                    Err(RuntimeError {
+                        span: 0..0,
+                        message: "Invalid object reference during JSON conversion".to_string(),
+                        source_id: "serialization".to_string(),
+                    })
+                }
+            }
+        }
     }
 }
 
@@ -500,21 +786,9 @@ pub fn execute(chunk: Chunk) -> Result<serde_json::Value, RuntimeError> {
 
     let value = vm.interpret()?;
 
-    // Convert VM value to JSON value
-    let json_value = match value {
-        Value::Null => serde_json::Value::Null,
-        Value::Boolean(b) => serde_json::Value::Bool(b),
-        Value::Number(n) => serde_json::Value::Number(
-            serde_json::Number::from_f64(n)
-                .ok_or_else(|| RuntimeError {
-                    span: vm.get_current_span(),
-                    message: "Invalid number".to_string(),
-                    source_id: vm.current_chunk().source_id.to_string(),
-                })?
-        ),
-        Value::String(s) => serde_json::Value::String(s.as_str().to_owned()),
-    };
-    Ok(json_value)
+    // Convert VM value to JSON value with circular reference detection
+    let mut visited = std::collections::HashSet::new();
+    vm.value_to_json(&value, &mut visited)
 }
 
 #[cfg(test)]

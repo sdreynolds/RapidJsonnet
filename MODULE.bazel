@@ -23,5 +23,10 @@ crate.spec(
     version = "1.0.143"
 )
 
+crate.spec(
+    package = "slotmap",
+    version = "1.0.7"
+)
+
 crate.from_specs()
 use_repo(crate, "crates")

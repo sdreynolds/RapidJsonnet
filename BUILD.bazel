@@ -12,8 +12,7 @@ rust_binary(
         ":scanner",
         ":string_pool",
         "@crates//:ariadne",
-    ],
-    features = ["stress_gc"]
+    ]
 )
 
 rust_library(
@@ -40,7 +39,8 @@ rust_library(
     deps = [
         "@crates//:ariadne",
         ":scanner",
-        ":string_pool"
+        ":string_pool",
+        "@crates//:slotmap"
     ]
 )
 
@@ -51,7 +51,8 @@ rust_library(
         ":chunk",
         ":scanner",
         ":string_pool",
-        "@crates//:serde_json"
+        "@crates//:serde_json",
+        "@crates//:slotmap"
     ]
 )
 

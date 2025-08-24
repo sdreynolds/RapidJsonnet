@@ -14,6 +14,7 @@ enum ExpressionType {
     Number,
     Boolean,
     Null,
+    Object,
     Unknown,
 }
 
@@ -97,6 +98,29 @@ impl<'a> Compiler<'a> {
                 }
 
                 self.parse_infix(right_bp)?;
+            } else {
+                break;
+            }
+        }
+
+        // Parse postfix operators
+        loop {
+            // Check if we're at the end or if there's no current token
+            if self.parser.is_at_end() {
+                break;
+            }
+
+            let current = match self.parser.current_token() {
+                Some(token) => token,
+                None => break,
+            };
+
+            if let Some(postfix_bp) = self.get_postfix_binding_power(&current.token) {
+                if postfix_bp <= min_bp {
+                    break;
+                }
+
+                self.parse_postfix()?;
             } else {
                 break;
             }
@@ -192,6 +216,11 @@ impl<'a> Compiler<'a> {
                 self.parse_expr(0)?;
                 self.parser.consume(Token::RightParen, "Expected closing parenthesis")?;
                 // Parentheses don't change the type
+            }
+            Token::LeftBrace => {
+                self.parse_object_literal(&token)?;
+                // Object literal produces Object type
+                self.push_type(ExpressionType::Object);
             }
             _ => {
                 // Unknown expression type
@@ -441,6 +470,180 @@ impl<'a> Compiler<'a> {
 
             _ => None,
         }
+    }
+
+    fn get_postfix_binding_power(&self, token: &Token) -> Option<u8> {
+        match token {
+            Token::Dot => Some(PRECEDENCE_POSTFIX),
+            Token::LeftBracket => Some(PRECEDENCE_POSTFIX),
+            _ => None,
+        }
+    }
+
+    fn parse_postfix(&mut self) -> Result<(), CompilerError> {
+        let token = self.parser.current_token().cloned()
+            .ok_or_else(|| {
+                // Use the previous token's span end as the EOF location
+                let span = if let Some(previous) = self.parser.previous_token() {
+                    previous.span.end..previous.span.end
+                } else {
+                    0..0
+                };
+                self.unexpected_eof_error(span)
+            })?;
+
+        match &token.token {
+            Token::Dot => {
+                self.parser.advance()?; // consume '.'
+                
+                // Expect an identifier for property name
+                let property_token = self.parser.current_token().cloned()
+                    .ok_or_else(|| {
+                        let span = token.span.end..token.span.end;
+                        self.unexpected_eof_error(span)
+                    })?;
+
+                match &property_token.token {
+                    Token::Identifier(name) => {
+                        self.parser.advance()?; // consume identifier
+                        
+                        // Emit string constant for property name
+                        let interned_name = intern_string(name);
+                        let _index = self.emit_string_constant(interned_name)?;
+                        
+                        // Emit ObjectIndex opcode to access property
+                        self.emit_opcode(Opcode::ObjectIndex, property_token.span);
+                        
+                        // Property access can return any type
+                        self.push_type(ExpressionType::Unknown);
+                    }
+                    _ => {
+                        return Err(self.make_error(
+                            property_token.span,
+                            "Expected property name after '.'".to_string(),
+                        ));
+                    }
+                }
+            }
+            Token::LeftBracket => {
+                self.parser.advance()?; // consume '['
+                
+                // Parse the expression inside brackets
+                self.parse_expr(0)?;
+                
+                // Expect closing bracket
+                self.parser.consume(Token::RightBracket, "Expected ']' after property expression")?;
+                
+                // Emit ObjectIndex opcode to access property
+                self.emit_opcode(Opcode::ObjectIndex, token.span);
+                
+                // Property access can return any type
+                self.push_type(ExpressionType::Unknown);
+            }
+            _ => {
+                return Err(self.make_error(
+                    token.span,
+                    format!("Unexpected postfix operator: {:?}", token.token),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Parse an object literal: { key1: value1, key2: value2, ... }
+    fn parse_object_literal(&mut self, start_token: &TokenInfo) -> Result<(), CompilerError> {
+        self.parser.advance()?; // consume '{'
+        
+        let mut field_count = 0u16;
+        
+        // Handle empty object: {}
+        if let Some(current) = self.parser.current_token() {
+            if current.token == Token::RightBrace {
+                self.parser.advance()?; // consume '}'
+                self.compiling_chunk.write_opcode_u16(Opcode::CreateObject, 0, start_token.span.clone());
+                return Ok(());
+            }
+        }
+        
+        // Parse field pairs: key: value
+        loop {
+            // Parse the key (can be a string literal or identifier)
+            if let Some(key_token) = self.parser.current_token() {
+                match &key_token.token {
+                    Token::String(key_value) => {
+                        // Push the key as a string constant  
+                        let _key_index = self.emit_string_constant(*key_value)?;
+                        self.push_type(ExpressionType::String);
+                        
+                        self.parser.advance()?; // consume the key
+                    }
+                    Token::Identifier(key_name) => {
+                        // Convert identifier to interned string and push as constant
+                        let interned_key = intern_string(key_name);
+                        let _key_index = self.emit_string_constant(interned_key)?;
+                        self.push_type(ExpressionType::String);
+                        
+                        self.parser.advance()?; // consume the key
+                    }
+                    _ => {
+                        return Err(self.make_error(
+                            key_token.span.clone(),
+                            "Object key must be a string literal or identifier".to_string()
+                        ));
+                    }
+                }
+            } else {
+                return Err(self.unexpected_eof_error(start_token.span.clone()));
+            }
+            
+            // Expect ':' after key
+            self.parser.consume(
+                Token::Operator(":".to_string()),
+                "Expected ':' after object key"
+            )?;
+            
+            // Parse the value expression
+            self.parse_expr(0)?;
+            
+            field_count += 1;
+            
+            // Check for more fields or end of object
+            if let Some(current) = self.parser.current_token() {
+                match &current.token {
+                    Token::Comma => {
+                        self.parser.advance()?; // consume ','
+                        
+                        // Check for trailing comma followed by '}'
+                        if let Some(next) = self.parser.current_token() {
+                            if next.token == Token::RightBrace {
+                                break;
+                            }
+                        }
+                        // Continue parsing next field
+                    }
+                    Token::RightBrace => {
+                        break; // End of object
+                    }
+                    _ => {
+                        return Err(self.make_error(
+                            current.span.clone(),
+                            "Expected ',' or '}' in object literal".to_string()
+                        ));
+                    }
+                }
+            } else {
+                return Err(self.unexpected_eof_error(start_token.span.clone()));
+            }
+        }
+        
+        // Consume the closing '}'
+        self.parser.consume(Token::RightBrace, "Expected '}' to close object literal")?;
+        
+        // Emit CreateObject opcode with field count
+        self.compiling_chunk.write_opcode_u16(Opcode::CreateObject, field_count, start_token.span.clone());
+        
+        Ok(())
     }
 }
 
