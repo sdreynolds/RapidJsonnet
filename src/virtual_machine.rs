@@ -15,6 +15,10 @@ pub struct VirtualMachine<'a> {
     stack: Vec<Value>,
     /// Object storage using SlotMap for stable references
     objects: SlotMap<DefaultKey, JsonnetObject>,
+    /// Bytes allocated for object storage (for GC threshold tracking)
+    objects_allocated_bytes: usize,
+    /// Threshold for triggering object garbage collection
+    next_object_garbage_collection: usize,
 }
 
 impl<'a> VirtualMachine<'a> {
@@ -26,6 +30,8 @@ impl<'a> VirtualMachine<'a> {
             program_counter: 0,
             stack: Vec::with_capacity(1024),
             objects: SlotMap::new(),
+            objects_allocated_bytes: 0,
+            next_object_garbage_collection: 1024 * 1024, // Initial 1MB threshold
         };
 
         vm.chunks.push(chunk);
@@ -105,6 +111,8 @@ impl<'a> VirtualMachine<'a> {
 
     /// Allocate a new object in the SlotMap and return its key
     pub fn allocate_object(&mut self, object: JsonnetObject) -> DefaultKey {
+        let object_size = object.allocated_bytes();
+        self.objects_allocated_bytes += object_size;
         self.objects.insert(object)
     }
 
@@ -690,6 +698,23 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
+    /// Check if object garbage collection should be triggered
+    fn should_collect_objects(&self) -> bool {
+        #[cfg(feature = "stress_gc")]
+        {
+            eprintln!("[VM GC] Stress GC enabled - triggering object collection ({} objects, {} bytes)",
+                     self.objects.len(), self.objects_allocated_bytes);
+            return true;
+        }
+
+        let should_collect = self.objects_allocated_bytes >= self.next_object_garbage_collection;
+        if should_collect {
+            eprintln!("[VM GC] Threshold exceeded - triggering object collection ({} bytes >= {} bytes, {} objects)",
+                     self.objects_allocated_bytes, self.next_object_garbage_collection, self.objects.len());
+        }
+        should_collect
+    }
+
     /// Trigger garbage collection if needed
     pub fn maybe_collect_garbage(&mut self) {
         let (string_roots, object_roots) = self.collect_gc_roots();
@@ -699,12 +724,21 @@ impl<'a> VirtualMachine<'a> {
             pool.maybe_collect(string_roots);
         });
 
-        // Run object garbage collection
-        self.maybe_collect_objects(&object_roots);
+        // Run object garbage collection if threshold exceeded
+        if self.should_collect_objects() {
+            eprintln!("[VM GC] Starting object collection with {} roots", object_roots.len());
+            self.collect_objects(&object_roots);
+        }
     }
 
-    /// Perform object garbage collection
-    fn maybe_collect_objects(&mut self, roots: &[DefaultKey]) {
+    /// Perform object garbage collection with threshold updating
+    fn collect_objects(&mut self, roots: &[DefaultKey]) {
+        let initial_count = self.objects.len();
+        let initial_bytes = self.objects_allocated_bytes;
+
+        eprintln!("[VM GC] Mark phase: Processing {} roots from {} total objects ({} bytes)",
+                 roots.len(), initial_count, initial_bytes);
+
         // Simple mark-and-sweep for objects
         let mut reachable_objects = std::collections::HashSet::new();
         let mut objects_to_visit = roots.to_vec();
@@ -729,13 +763,40 @@ impl<'a> VirtualMachine<'a> {
             }
         }
 
-        // Sweep phase: remove unreachable objects
+        // Sweep phase: remove unreachable objects and update byte accounting
         let all_keys: Vec<DefaultKey> = self.objects.keys().collect();
         for key in all_keys {
             if !reachable_objects.contains(&key) {
+                if let Some(object) = self.objects.get(key) {
+                    let object_size = object.allocated_bytes();
+                    self.objects_allocated_bytes -= object_size;
+                }
                 self.objects.remove(key);
             }
         }
+
+        let final_count = self.objects.len();
+        let final_bytes = self.objects_allocated_bytes;
+        let old_threshold = self.next_object_garbage_collection;
+
+        // Update threshold: current size * 2, minimum 1MB
+        self.next_object_garbage_collection = std::cmp::max(
+            self.objects_allocated_bytes * 2,
+            1024 * 1024 // Minimum 1MB threshold
+        );
+
+        eprintln!("[VM GC] Complete: {} -> {} objects, {} -> {} bytes, threshold: {} -> {} bytes",
+                 initial_count, final_count, initial_bytes, final_bytes,
+                 old_threshold, self.next_object_garbage_collection);
+    }
+
+    /// Get object allocation statistics
+    pub fn object_stats(&self) -> (usize, usize, usize) {
+        (
+            self.objects_allocated_bytes,
+            self.next_object_garbage_collection,
+            self.objects.len()
+        )
     }
 
     /// Convert a VM Value to serde_json::Value for JSON output

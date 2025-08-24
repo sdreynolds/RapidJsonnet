@@ -13,19 +13,40 @@ pub type RuntimeError = ScanError;
 pub struct JsonnetObject {
     /// Object properties mapping interned string keys to values
     pub properties: HashMap<InternedString, Value>,
+    /// Allocated bytes for GC accounting (includes HashMap capacity overhead)
+    allocated_bytes: usize,
 }
 
 impl JsonnetObject {
+    /// Calculate the actual size of this object including HashMap overhead
+    fn calculate_size(&self) -> usize {
+        let base_size = std::mem::size_of::<Self>();
+        // HashMap capacity accounts for actual allocated memory, not just length
+        let map_capacity_bytes = self.properties.capacity() * (
+            std::mem::size_of::<InternedString>() + std::mem::size_of::<Value>()
+        );
+        base_size + map_capacity_bytes
+    }
+
     /// Create a new empty Jsonnet object
     pub fn new() -> Self {
-        Self {
-            properties: HashMap::new(),
-        }
+        let properties = HashMap::new();
+        let mut obj = Self {
+            properties,
+            allocated_bytes: 0,
+        };
+        obj.allocated_bytes = obj.calculate_size();
+        obj
     }
 
     /// Create a Jsonnet object with the given properties
     pub fn with_properties(properties: HashMap<InternedString, Value>) -> Self {
-        Self { properties }
+        let mut obj = Self { 
+            properties,
+            allocated_bytes: 0,
+        };
+        obj.allocated_bytes = obj.calculate_size();
+        obj
     }
 
     /// Get a property value by key
@@ -33,9 +54,15 @@ impl JsonnetObject {
         self.properties.get(key)
     }
 
-    /// Set a property value
+    /// Set a property value and recalculate size
     pub fn set(&mut self, key: InternedString, value: Value) {
         self.properties.insert(key, value);
+        self.allocated_bytes = self.calculate_size();
+    }
+
+    /// Get the allocated byte size of this object
+    pub fn allocated_bytes(&self) -> usize {
+        self.allocated_bytes
     }
 
     /// Check if object has a property

@@ -86,7 +86,7 @@ impl StringPool {
 
     /// Check if garbage collection should be triggered
     pub fn should_collect(&self) -> bool {
-        #[cfg(env_var_value = "stress_gc")]
+        #[cfg(feature = "stress_gc")]
         {
             eprintln!("[GC] Stress GC enabled - triggering collection (allocated: {} bytes, {} strings)",
                      self.bytes_allocated, self.all_strings.len());

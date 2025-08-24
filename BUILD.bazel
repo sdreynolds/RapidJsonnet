@@ -2,7 +2,6 @@ load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
-
 rust_binary(
     name = "main",
     srcs = ["src/main.rs"],
@@ -12,6 +11,9 @@ rust_binary(
         ":scanner",
         ":string_pool",
         "@crates//:ariadne",
+    ],
+    crate_features = [
+        "stress_gc"
     ]
 )
 
@@ -21,6 +23,9 @@ rust_library(
     deps = [
         "@crates//:ariadne",
         ":string_pool"
+    ],
+    crate_features = [
+        "stress_gc"
     ]
 )
 
@@ -30,6 +35,9 @@ rust_library(
     deps = [
         ":scanner",
         ":string_pool",
+    ],
+    crate_features = [
+        "stress_gc"
     ]
 )
 
@@ -41,6 +49,9 @@ rust_library(
         ":scanner",
         ":string_pool",
         "@crates//:slotmap"
+    ],
+    crate_features = [
+        "stress_gc"
     ]
 )
 
@@ -53,6 +64,9 @@ rust_library(
         ":string_pool",
         "@crates//:serde_json",
         "@crates//:slotmap"
+    ],
+    crate_features = [
+        "stress_gc"
     ]
 )
 
@@ -60,7 +74,9 @@ rust_library(
     name = "string_pool",
     srcs = ["src/string_pool.rs"],
     deps = [],
-    features = ["stress_gc"]
+    crate_features = [
+        "stress_gc"
+    ]
 )
 
 rust_library(
@@ -71,6 +87,9 @@ rust_library(
         ":scanner",
         ":parser",
         ":string_pool",
+    ],
+    crate_features = [
+        "stress_gc"
     ]
 )
 
