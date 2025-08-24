@@ -1,6 +1,7 @@
 use std::ops::Range;
 use ariadne::{Report, ReportKind, Label};
 use scanner::ScanError;
+use string_pool::InternedString;
 
 /// Runtime error type - alias for ScanError to reuse existing infrastructure
 pub type RuntimeError = ScanError;
@@ -11,7 +12,7 @@ pub enum Value {
     Null,
     Boolean(bool),
     Number(f64),
-    String(String),
+    String(InternedString),
 }
 
 impl std::fmt::Display for Value {
@@ -20,7 +21,7 @@ impl std::fmt::Display for Value {
             Value::Null => write!(f, "null"),
             Value::Boolean(b) => write!(f, "{}", b),
             Value::Number(n) => write!(f, "{}", n),
-            Value::String(s) => write!(f, "\"{}\"", s),
+            Value::String(s) => write!(f, "\"{}\"", s.as_str()),
         }
     }
 }
@@ -32,7 +33,7 @@ impl Value {
             Value::Null => false,
             Value::Boolean(b) => *b,
             Value::Number(n) => *n != 0.0,
-            Value::String(s) => !s.is_empty(),
+            Value::String(s) => !s.as_str().is_empty(),
         }
     }
 
@@ -41,9 +42,9 @@ impl Value {
         match self {
             Value::Number(n) => Ok(*n),
             Value::String(s) => {
-                s.parse::<f64>().map_err(|_| RuntimeError {
+                s.as_str().parse::<f64>().map_err(|_| RuntimeError {
                     span,
-                    message: format!("Cannot convert string '{}' to number", s),
+                    message: format!("Cannot convert string '{}' to number", s.as_str()),
                     source_id: source_id.to_string(),
                 })
             },
@@ -70,7 +71,7 @@ impl Value {
                 }
             }
             Value::String(s) => {
-                match s.parse::<f64>() {
+                match s.as_str().parse::<f64>() {
                     Ok(n) => {
                         if n.is_nan() || n.is_infinite() {
                             Err(RuntimeError {
@@ -84,7 +85,7 @@ impl Value {
                     }
                     Err(_) => Err(RuntimeError {
                         span,
-                        message: format!("Cannot convert string '{}' to integer", s),
+                        message: format!("Cannot convert string '{}' to integer", s.as_str()),
                         source_id: source_id.to_string(),
                     })
                 }

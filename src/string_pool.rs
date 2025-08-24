@@ -1,0 +1,283 @@
+use std::collections::HashMap;
+use std::cell::Cell;
+use std::sync::{Mutex, OnceLock};
+
+/// An interned string that points to shared string data
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InternedString {
+    ptr: *const InternedStringData,
+}
+
+/// Internal string data with GC marking support
+struct InternedStringData {
+    content: Box<str>,
+    marked: Cell<bool>,  // GC mark bit
+    size: usize,         // String byte size for accounting
+}
+
+impl InternedStringData {
+    fn new(content: &str) -> Self {
+        Self {
+            content: content.into(),
+            marked: Cell::new(false),
+            size: content.len(),
+        }
+    }
+}
+
+/// Global string pool with Mark & Sweep garbage collection
+pub struct StringPool {
+    strings: HashMap<String, InternedString>,
+    all_strings: Vec<InternedString>,
+    bytes_allocated: usize,
+    next_garbage_collection: usize,
+    gray_list: Vec<InternedString>,
+}
+
+impl StringPool {
+    pub fn new() -> Self {
+        Self {
+            strings: HashMap::new(),
+            all_strings: Vec::new(),
+            bytes_allocated: 0,
+            next_garbage_collection: 1024 * 1024, // Initial 1MB threshold
+            gray_list: Vec::new(),
+        }
+    }
+
+    /// Intern a string, returning an InternedString reference
+    pub fn intern(&mut self, content: &str) -> InternedString {
+        // Check if already interned
+        if let Some(&interned) = self.strings.get(content) {
+            return interned;
+        }
+
+        // Create new interned string
+        let size = content.len();
+        let data = Box::new(InternedStringData::new(content));
+        let interned = InternedString {
+            ptr: Box::leak(data) as *const InternedStringData
+        };
+
+        // Track in collections
+        self.strings.insert(content.to_string(), interned);
+        self.all_strings.push(interned);
+        self.bytes_allocated += size;
+
+        interned
+    }
+
+    /// Remove a string from the pool (used during GC sweep)
+    pub fn deallocate_string(&mut self, string: InternedString) {
+        let data = unsafe { &*string.ptr };
+        self.bytes_allocated -= data.size;
+
+        // Remove from collections
+        let content_key = data.content.to_string();
+        self.strings.remove(&content_key);
+        self.all_strings.retain(|&s| s.ptr != string.ptr);
+
+        // Actually deallocate the box
+        unsafe {
+            let _boxed = Box::from_raw(string.ptr as *mut InternedStringData);
+            // Box automatically drops when it goes out of scope
+        };
+    }
+
+    /// Check if garbage collection should be triggered
+    pub fn should_collect(&self) -> bool {
+        #[cfg(feature = "stress_gc")]
+        {
+            eprintln!("[GC] Stress GC enabled - triggering collection (allocated: {} bytes, {} strings)",
+                     self.bytes_allocated, self.all_strings.len());
+            return true;
+        }
+
+        let should_collect = self.bytes_allocated >= self.next_garbage_collection;
+        if should_collect {
+            eprintln!("[GC] Threshold exceeded - triggering collection (allocated: {} bytes >= threshold: {} bytes, {} strings)",
+                     self.bytes_allocated, self.next_garbage_collection, self.all_strings.len());
+        }
+        should_collect
+    }
+
+    /// Trigger garbage collection if threshold is exceeded
+    pub fn maybe_collect(&mut self, roots: Vec<InternedString>) {
+        if self.should_collect() {
+            eprintln!("[GC] Starting collection with {} roots", roots.len());
+            self.collect_garbage(roots);
+        }
+    }
+
+    /// Perform Mark & Sweep garbage collection
+    pub fn collect_garbage(&mut self, roots: Vec<InternedString>) {
+        let initial_count = self.all_strings.len();
+        let initial_bytes = self.bytes_allocated;
+
+        eprintln!("[GC] Mark phase: Processing {} roots from {} total strings ({} bytes)",
+                 roots.len(), initial_count, initial_bytes);
+
+        // Mark phase: Start with roots (gray list)
+        self.gray_list.clear();
+        for root in roots {
+            self.mark_gray(root);
+        }
+
+        let marked_count = self.gray_list.len();
+        eprintln!("[GC] Mark phase: {} strings marked as reachable", marked_count);
+
+        // Process gray list until empty (mark black)
+        while let Some(string) = self.gray_list.pop() {
+            self.mark_black(string);
+        }
+
+        // Sweep phase: Deallocate unmarked strings
+        let mut to_deallocate = Vec::new();
+        for &string in &self.all_strings {
+            let data = unsafe { &*string.ptr };
+            if !data.marked.get() {
+                to_deallocate.push(string);
+            } else {
+                // Reset mark for next collection
+                data.marked.set(false);
+            }
+        }
+
+        let deallocate_count = to_deallocate.len();
+        eprintln!("[GC] Sweep phase: Deallocating {} unmarked strings", deallocate_count);
+
+        for string in to_deallocate {
+            self.deallocate_string(string);
+        }
+
+        let final_count = self.all_strings.len();
+        let final_bytes = self.bytes_allocated;
+        let old_threshold = self.next_garbage_collection;
+
+        // Update threshold: current size * 2
+        self.next_garbage_collection = std::cmp::max(
+            self.bytes_allocated * 2,
+            1024 * 1024 // Minimum 1MB threshold
+        );
+
+        eprintln!("[GC] Complete: {} -> {} strings, {} -> {} bytes, threshold: {} -> {} bytes",
+                 initial_count, final_count, initial_bytes, final_bytes,
+                 old_threshold, self.next_garbage_collection);
+    }
+
+    /// Add string to gray list if not already marked
+    fn mark_gray(&mut self, string: InternedString) {
+        let data = unsafe { &*string.ptr };
+        if !data.marked.get() {
+            self.gray_list.push(string);
+        }
+    }
+
+    /// Mark string as black (reachable)
+    fn mark_black(&self, string: InternedString) {
+        let data = unsafe { &*string.ptr };
+        data.marked.set(true);
+
+        // Future: Mark referenced objects when we have composite types
+        // For strings, there are no references to other objects
+    }
+
+    /// Get string content (for debugging/display)
+    pub fn get_content(&self, string: InternedString) -> &str {
+        let data = unsafe { &*string.ptr };
+        &data.content
+    }
+
+    /// Get allocation statistics
+    pub fn stats(&self) -> (usize, usize, usize) {
+        (
+            self.bytes_allocated,
+            self.next_garbage_collection,
+            self.all_strings.len()
+        )
+    }
+}
+
+// Global string pool instance
+static STRING_POOL: OnceLock<Mutex<StringPool>> = OnceLock::new();
+
+/// Get access to the global string pool
+pub fn with_string_pool<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut StringPool) -> R,
+{
+    let pool = STRING_POOL.get_or_init(|| Mutex::new(StringPool::new()));
+    let mut guard = pool.lock().unwrap();
+    f(&mut guard)
+}
+
+/// Convenience function to intern a string
+pub fn intern_string(content: &str) -> InternedString {
+    with_string_pool(|pool| pool.intern(content))
+}
+
+// Safety: InternedString is safe to send between threads as long as
+// the string pool is properly synchronized (which it is via Mutex)
+unsafe impl Send for InternedString {}
+unsafe impl Sync for InternedString {}
+
+impl InternedString {
+    /// Get the string content
+    pub fn as_str(self) -> &'static str {
+        let data = unsafe { &*self.ptr };
+        // SAFETY: The string data lives as long as it's in the intern pool,
+        // and we never deallocate while references exist (thanks to GC)
+        unsafe { std::mem::transmute::<&str, &'static str>(&data.content) }
+    }
+
+    /// Check if two interned strings are equal (O(1) pointer comparison)
+    pub fn ptr_eq(self, other: InternedString) -> bool {
+        self.ptr == other.ptr
+    }
+}
+
+impl std::fmt::Display for InternedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_string_interning() {
+        let mut pool = StringPool::new();
+
+        let s1 = pool.intern("hello");
+        let s2 = pool.intern("hello");
+        let s3 = pool.intern("world");
+
+        // Same content should give same interned string
+        assert!(s1.ptr_eq(s2));
+        assert!(!s1.ptr_eq(s3));
+
+        // Content should be accessible
+        assert_eq!(pool.get_content(s1), "hello");
+        assert_eq!(pool.get_content(s3), "world");
+    }
+
+    #[test]
+    fn test_garbage_collection() {
+        let mut pool = StringPool::new();
+
+        let s1 = pool.intern("keep");
+        let _s2 = pool.intern("discard");
+
+        // Only keep s1 as root
+        pool.collect_garbage(vec![s1]);
+
+        // s1 should still be accessible, s2 should be gone
+        assert_eq!(pool.get_content(s1), "keep");
+
+        // Pool should only contain the kept string
+        let (_, _, count) = pool.stats();
+        assert_eq!(count, 1);
+    }
+}

@@ -10,15 +10,18 @@ rust_binary(
         ":compiler",
         ":virtual_machine",
         ":scanner",
+        ":string_pool",
         "@crates//:ariadne",
     ],
+    features = ["stress_gc"]
 )
 
 rust_library(
     name = "scanner",
     srcs = ["src/scanner.rs"],
     deps = [
-        "@crates//:ariadne"
+        "@crates//:ariadne",
+        ":string_pool"
     ]
 )
 
@@ -27,6 +30,7 @@ rust_library(
     srcs = ["src/parser.rs"],
     deps = [
         ":scanner",
+        ":string_pool",
     ]
 )
 
@@ -35,7 +39,8 @@ rust_library(
     srcs = ["src/chunk.rs"],
     deps = [
         "@crates//:ariadne",
-        ":scanner"
+        ":scanner",
+        ":string_pool"
     ]
 )
 
@@ -45,8 +50,16 @@ rust_library(
     deps = [
         ":chunk",
         ":scanner",
+        ":string_pool",
         "@crates//:serde_json"
     ]
+)
+
+rust_library(
+    name = "string_pool",
+    srcs = ["src/string_pool.rs"],
+    deps = [],
+    features = ["stress_gc"]
 )
 
 rust_library(
@@ -56,6 +69,7 @@ rust_library(
         ":chunk",
         ":scanner",
         ":parser",
+        ":string_pool",
     ]
 )
 
@@ -82,4 +96,9 @@ rust_test(
 rust_test(
     name = "compiler_test",
     crate = ":compiler"
+)
+
+rust_test(
+    name = "string_pool_test",
+    crate = ":string_pool"
 )

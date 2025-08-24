@@ -1,5 +1,6 @@
 use std::ops::Range;
 use chunk::{Chunk, Opcode, Value, RuntimeError};
+use string_pool::{intern_string, InternedString, with_string_pool};
 
 /// Virtual machine for executing Jsonnet bytecode
 pub struct VirtualMachine<'a> {
@@ -101,6 +102,9 @@ impl<'a> VirtualMachine<'a> {
     /// Main interpretation loop
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
         loop {
+            // Periodically trigger garbage collection
+            self.maybe_collect_garbage();
+            
             let chunk = self.current_chunk();
 
             // Check if we've reached the end
@@ -159,18 +163,19 @@ impl<'a> VirtualMachine<'a> {
                     match (&a, &b) {
                         (Value::String(_), _) | (_, Value::String(_)) => {
                             let a_str = match &a {
-                                Value::String(s) => s.clone(),
+                                Value::String(s) => s.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                             };
                             let b_str = match &b {
-                                Value::String(s) => s.clone(),
+                                Value::String(s) => s.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                             };
-                            self.push(Value::String(format!("{}{}", a_str, b_str)))?;
+                            let result_str = format!("{}{}", a_str, b_str);
+                            self.push(Value::String(intern_string(&result_str)))?;
                         }
                         // Numeric addition for all other cases
                         _ => {
@@ -272,24 +277,26 @@ impl<'a> VirtualMachine<'a> {
                     // Optimized string concatenation - assumes both are strings
                     let result = match (&a, &b) {
                         (Value::String(s1), Value::String(s2)) => {
-                            Value::String(format!("{}{}", s1, s2))
+                            let result_str = format!("{}{}", s1.as_str(), s2.as_str());
+                            Value::String(intern_string(&result_str))
                         }
                         _ => {
                             // This should not happen if compiler type tracking is correct
                             // Fall back to safe conversion
                             let a_str = match &a {
-                                Value::String(s) => s.clone(),
+                                Value::String(s) => s.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                             };
                             let b_str = match &b {
-                                Value::String(s) => s.clone(),
+                                Value::String(s) => s.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                             };
-                            Value::String(format!("{}{}", a_str, b_str))
+                            let result_str = format!("{}{}", a_str, b_str);
+                            Value::String(intern_string(&result_str))
                         }
                     };
 
@@ -443,11 +450,47 @@ impl<'a> VirtualMachine<'a> {
             (Value::Null, Value::Null) => true,
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::Number(a), Value::Number(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a.ptr_eq(*b), // O(1) pointer comparison!
 
             // Different types are never equal
             _ => false,
         }
+    }
+
+    /// Collect all string roots from the VM stack for garbage collection
+    pub fn collect_string_roots(&self) -> Vec<InternedString> {
+        let mut roots = Vec::new();
+        
+        // Collect from value stack
+        for value in &self.stack {
+            if let Value::String(interned_string) = value {
+                roots.push(*interned_string);
+            }
+        }
+        
+        // Collect from constants in all loaded chunks
+        for chunk in &self.chunks {
+            for constant in &chunk.constants {
+                if let Value::String(interned_string) = constant {
+                    roots.push(*interned_string);
+                }
+            }
+        }
+        
+        // Future: Collect from other VM roots:
+        // - Local variables
+        // - Global variables
+        // - Call frames
+        
+        roots
+    }
+    
+    /// Trigger garbage collection if needed
+    pub fn maybe_collect_garbage(&mut self) {
+        let roots = self.collect_string_roots();
+        with_string_pool(|pool| {
+            pool.maybe_collect(roots);
+        });
     }
 }
 
@@ -469,7 +512,7 @@ pub fn execute(chunk: Chunk) -> Result<serde_json::Value, RuntimeError> {
                     source_id: vm.current_chunk().source_id.to_string(),
                 })?
         ),
-        Value::String(s) => serde_json::Value::String(s),
+        Value::String(s) => serde_json::Value::String(s.as_str().to_owned()),
     };
     Ok(json_value)
 }

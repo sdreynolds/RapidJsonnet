@@ -1,4 +1,5 @@
 use scanner::{Scanner, Token, TokenInfo, ScanError};
+use string_pool::intern_string;
 
 // Using ScanError from scanner module instead of duplicate ParseError
 
@@ -198,7 +199,7 @@ mod tests {
         parser.advance().unwrap();
         parser.consume(Token::LeftBrace, "Expected {").unwrap();
 
-        parser.consume(Token::String("key".to_string()), "Expected string").unwrap();
+        parser.consume(Token::String(intern_string("key")), "Expected string").unwrap();
 
         parser.consume(Token::Operator(":".to_string()), "Expected :").unwrap();
 

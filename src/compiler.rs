@@ -3,6 +3,7 @@ use std::ops::Range;
 use chunk::{Chunk, Opcode, Value};
 use scanner::{Scanner, ScanError, Token, TokenInfo};
 use parser::Parser;
+use string_pool::{InternedString, intern_string};
 
 pub type CompilerError = ScanError;
 
@@ -123,7 +124,7 @@ impl<'a> Compiler<'a> {
                 self.parser.advance()?; // consume the number
             }
             Token::String(value) => {
-                self.emit_string_constant(value.clone())?;
+                self.emit_string_constant(*value)?;
                 self.push_type(ExpressionType::String);
                 self.parser.advance()?; // consume the string
             }
@@ -331,7 +332,7 @@ impl<'a> Compiler<'a> {
         Ok(index as u16)
     }
 
-    fn emit_string_constant(&mut self, value: String) -> Result<u16, CompilerError> {
+    fn emit_string_constant(&mut self, value: InternedString) -> Result<u16, CompilerError> {
         let index = self.compiling_chunk.add_constant(Value::String(value));
         if index > u16::MAX as usize {
             return Err(self.too_many_constants_error());
@@ -563,7 +564,7 @@ mod tests {
         let chunk = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 1);
-        assert_eq!(chunk.constants[0], Value::String("hello world".to_string()));
+        assert_eq!(chunk.constants[0], Value::String(intern_string("hello world")));
         assert_eq!(chunk.code.len(), 4); // LoadConst (3 bytes) + Return (1 byte)
     }
 
@@ -574,7 +575,7 @@ mod tests {
         let chunk = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 1);
-        assert_eq!(chunk.constants[0], Value::String("".to_string()));
+        assert_eq!(chunk.constants[0], Value::String(intern_string("")));
         assert_eq!(chunk.code.len(), 4); // LoadConst (3 bytes) + Return (1 byte)
     }
 
@@ -585,7 +586,7 @@ mod tests {
         let chunk = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 1);
-        assert_eq!(chunk.constants[0], Value::String("test".to_string()));
+        assert_eq!(chunk.constants[0], Value::String(intern_string("test")));
         assert_eq!(chunk.code.len(), 5); // LoadConst (3 bytes) + Not (1 byte) + Return (1 byte)
         assert_eq!(chunk.code[0], Opcode::LoadConst as u8);
         assert_eq!(chunk.code[3], Opcode::Not as u8);

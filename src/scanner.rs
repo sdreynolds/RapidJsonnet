@@ -1,12 +1,13 @@
 use ariadne::{Label, Report, ReportKind};
 use std::ops::Range;
+use string_pool::{InternedString, intern_string};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Literals
     Identifier(String),
     Number(f64),
-    String(String),
+    String(InternedString),
 
     // Keywords
     Assert,
@@ -357,7 +358,7 @@ impl<'a> Scanner<'a> {
         self.advance(); // closing quote
 
         Ok(TokenInfo {
-            token: Token::String(value),
+            token: Token::String(intern_string(&value)),
             span: start..self.position,
         })
     }
@@ -445,7 +446,7 @@ impl<'a> Scanner<'a> {
         }
 
         Ok(TokenInfo {
-            token: Token::String(result),
+            token: Token::String(intern_string(&result)),
             span: start..self.position,
         })
     }
@@ -618,9 +619,9 @@ mod tests {
 
     #[test]
     fn test_strings() {
-        assert_eq!(scan_single_token("\"hello\"").unwrap(), Token::String("hello".to_string()));
-        assert_eq!(scan_single_token("'world'").unwrap(), Token::String("world".to_string()));
-        assert_eq!(scan_single_token("@\"verbatim\"").unwrap(), Token::String("verbatim".to_string()));
+        assert_eq!(scan_single_token("\"hello\"").unwrap(), Token::String(intern_string("hello")));
+        assert_eq!(scan_single_token("'world'").unwrap(), Token::String(intern_string("world")));
+        assert_eq!(scan_single_token("@\"verbatim\"").unwrap(), Token::String(intern_string("verbatim")));
     }
 
     #[test]
