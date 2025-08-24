@@ -134,7 +134,7 @@ impl<'a> VirtualMachine<'a> {
         loop {
             // Periodically trigger garbage collection
             self.maybe_collect_garbage();
-            
+
             let chunk = self.current_chunk();
 
             // Check if we've reached the end
@@ -196,12 +196,12 @@ impl<'a> VirtualMachine<'a> {
                             if let (Some(left_object), Some(right_object)) = (self.get_object(*left_key), self.get_object(*right_key)) {
                                 // Create merged properties starting with left object
                                 let mut merged_properties = left_object.properties.clone();
-                                
+
                                 // Override/add properties from right object
                                 for (key, value) in &right_object.properties {
                                     merged_properties.insert(*key, value.clone());
                                 }
-                                
+
                                 let merged_object = JsonnetObject::with_properties(merged_properties);
                                 let merged_key = self.allocate_object(merged_object);
                                 self.push(Value::Object(merged_key))?;
@@ -213,21 +213,28 @@ impl<'a> VirtualMachine<'a> {
                                 });
                             }
                         }
-                        // String concatenation if either operand is a string  
+                        (Value::Object(_), _) | (_, Value::Object(_)) => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Must concatenate objects with other objects".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            })
+                        }
+                        // String concatenation if either operand is a string
                         (Value::String(_), _) | (_, Value::String(_)) => {
                             let a_str = match &a {
                                 Value::String(s) => s.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
-                                Value::Object(_) => "{object}".to_string(),
+                                Value::Object(_) => unreachable!(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => s.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
-                                Value::Object(_) => "{object}".to_string(),
+                                Value::Object(_) => unreachable!(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             self.push(Value::String(intern_string(&result_str)))?;
@@ -485,14 +492,14 @@ impl<'a> VirtualMachine<'a> {
 
                 Opcode::CreateObject => {
                     let field_count = self.read_u16_operand()?;
-                    
+
                     // Pop field_count pairs of (key, value) from the stack
                     let mut properties = std::collections::HashMap::new();
-                    
+
                     for _ in 0..field_count {
                         let value = self.pop()?;
                         let key = self.pop()?;
-                        
+
                         // Ensure key is a string
                         if let Value::String(key_str) = key {
                             properties.insert(key_str, value);
@@ -504,7 +511,7 @@ impl<'a> VirtualMachine<'a> {
                             });
                         }
                     }
-                    
+
                     let object = JsonnetObject::with_properties(properties);
                     let object_key = self.allocate_object(object);
                     self.push(Value::Object(object_key))?;
@@ -513,7 +520,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::ObjectIndex => {
                     let field_name = self.pop()?;  // Property name to access
                     let object_value = self.pop()?;  // Object to index into
-                    
+
                     // Ensure we have an object
                     if let Value::Object(object_key) = object_value {
                         // Ensure field name is a string
@@ -552,18 +559,18 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::ObjectMerge => {
                     let right_value = self.pop()?;  // Right-hand side object
                     let left_value = self.pop()?;   // Left-hand side object
-                    
+
                     // Ensure both values are objects
                     if let (Value::Object(left_key), Value::Object(right_key)) = (left_value, right_value) {
                         if let (Some(left_object), Some(right_object)) = (self.get_object(left_key), self.get_object(right_key)) {
                             // Create merged properties starting with left object
                             let mut merged_properties = left_object.properties.clone();
-                            
+
                             // Override/add properties from right object
                             for (key, value) in &right_object.properties {
                                 merged_properties.insert(*key, value.clone());
                             }
-                            
+
                             let merged_object = JsonnetObject::with_properties(merged_properties);
                             let merged_key = self.allocate_object(merged_object);
                             self.push(Value::Object(merged_key))?;
@@ -619,7 +626,7 @@ impl<'a> VirtualMachine<'a> {
     pub fn collect_gc_roots(&self) -> (Vec<InternedString>, Vec<DefaultKey>) {
         let mut string_roots = Vec::new();
         let mut object_roots = Vec::new();
-        
+
         // Collect from value stack
         for value in &self.stack {
             match value {
@@ -628,7 +635,7 @@ impl<'a> VirtualMachine<'a> {
                 _ => {}
             }
         }
-        
+
         // Collect from constants in all loaded chunks
         for chunk in &self.chunks {
             for constant in &chunk.constants {
@@ -639,15 +646,15 @@ impl<'a> VirtualMachine<'a> {
                 }
             }
         }
-        
+
         // Collect strings from object properties
         self.collect_strings_from_objects(&object_roots, &mut string_roots);
-        
+
         // Future: Collect from other VM roots:
         // - Local variables
-        // - Global variables  
+        // - Global variables
         // - Call frames
-        
+
         (string_roots, object_roots)
     }
 
@@ -655,18 +662,18 @@ impl<'a> VirtualMachine<'a> {
     fn collect_strings_from_objects(&self, object_keys: &[DefaultKey], string_roots: &mut Vec<InternedString>) {
         let mut visited_objects = std::collections::HashSet::new();
         let mut objects_to_visit = object_keys.to_vec();
-        
+
         while let Some(object_key) = objects_to_visit.pop() {
             if visited_objects.contains(&object_key) {
                 continue;
             }
             visited_objects.insert(object_key);
-            
+
             if let Some(object) = self.get_object(object_key) {
                 for (property_key, property_value) in &object.properties {
                     // Add property key (which is an InternedString)
                     string_roots.push(*property_key);
-                    
+
                     // If property value is a string, add it
                     // If property value is an object, add it to visit queue
                     match property_value {
@@ -682,16 +689,16 @@ impl<'a> VirtualMachine<'a> {
             }
         }
     }
-    
+
     /// Trigger garbage collection if needed
     pub fn maybe_collect_garbage(&mut self) {
         let (string_roots, object_roots) = self.collect_gc_roots();
-        
+
         // Run string garbage collection
         with_string_pool(|pool| {
             pool.maybe_collect(string_roots);
         });
-        
+
         // Run object garbage collection
         self.maybe_collect_objects(&object_roots);
     }
@@ -701,16 +708,16 @@ impl<'a> VirtualMachine<'a> {
         // Simple mark-and-sweep for objects
         let mut reachable_objects = std::collections::HashSet::new();
         let mut objects_to_visit = roots.to_vec();
-        
+
         // Mark phase: find all reachable objects
         while let Some(object_key) = objects_to_visit.pop() {
             if reachable_objects.contains(&object_key) {
                 continue;
             }
-            
+
             if let Some(object) = self.get_object(object_key) {
                 reachable_objects.insert(object_key);
-                
+
                 // Add nested objects to visit queue
                 for (_, value) in &object.properties {
                     if let Value::Object(nested_key) = value {
@@ -721,7 +728,7 @@ impl<'a> VirtualMachine<'a> {
                 }
             }
         }
-        
+
         // Sweep phase: remove unreachable objects
         let all_keys: Vec<DefaultKey> = self.objects.keys().collect();
         for key in all_keys {
@@ -755,17 +762,17 @@ impl<'a> VirtualMachine<'a> {
                         source_id: "serialization".to_string(),
                     });
                 }
-                
+
                 visited.insert(*object_key);
-                
+
                 if let Some(object) = self.get_object(*object_key) {
                     let mut json_object = serde_json::Map::new();
-                    
+
                     for (key, value) in &object.properties {
                         let json_value = self.value_to_json(value, visited)?;
                         json_object.insert(key.as_str().to_owned(), json_value);
                     }
-                    
+
                     visited.remove(object_key); // Remove after processing
                     Ok(serde_json::Value::Object(json_object))
                 } else {
