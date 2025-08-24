@@ -29,7 +29,7 @@ impl<'a> Compiler<'a> {
     pub fn new(scanner: &'a mut Scanner<'a>, source_id: &'a str) -> Self {
         let parser = Parser::new(scanner);
         let compiling_chunk = Chunk::new(source_id);
-        
+
         Self {
             compiling_chunk,
             parser,
@@ -47,47 +47,47 @@ impl<'a> Compiler<'a> {
     pub fn compile(mut self) -> Result<Chunk<'a>, CompilerError> {
         // Advance to get the first token
         self.parser.advance()?;
-        
+
         // Parse the entire expression
         self.parse_expr(0)?;
-        
+
         // Validate that no unexpected tokens remain after parsing the expression
         self.check_end_of_input()?;
-        
+
         // Emit return opcode at the end - use the span of the last token or end of input
         let span = self.current_span();
         self.emit_opcode(Opcode::Return, span);
-        
+
         Ok(self.compiling_chunk)
     }
 
     fn parse_expr(&mut self, min_bp: u8) -> Result<(), CompilerError> {
         // Parse left-hand side (prefix)
         self.parse_prefix()?;
-        
+
         // Parse infix operators
         loop {
             // Check if we're at the end or if there's no current token
             if self.parser.is_at_end() {
                 break;
             }
-            
+
             let current = match self.parser.current_token() {
                 Some(token) => token,
                 None => break,
             };
-            
+
             if let Some((left_bp, right_bp)) = self.get_binding_power(&current.token) {
                 if left_bp <= min_bp {
                     break;
                 }
-                
+
                 self.parse_infix(right_bp)?;
             } else {
                 break;
             }
         }
-        
+
         Ok(())
     }
 
@@ -102,11 +102,23 @@ impl<'a> Compiler<'a> {
                 };
                 self.unexpected_eof_error(span)
             })?;
-        
+
         match &token.token {
             Token::Number(value) => {
                 self.emit_constant(*value)?;
                 self.parser.advance()?; // consume the number
+            }
+            Token::True => {
+                self.emit_opcode(Opcode::LoadTrue, token.span);
+                self.parser.advance()?; // consume the true
+            }
+            Token::False => {
+                self.emit_opcode(Opcode::LoadFalse, token.span);
+                self.parser.advance()?; // consume the false
+            }
+            Token::Null => {
+                self.emit_opcode(Opcode::LoadNull, token.span);
+                self.parser.advance()?; // consume the null
             }
             Token::Operator(op) if op == "-" => {
                 self.parser.advance()?; // consume the operator
@@ -131,21 +143,13 @@ impl<'a> Compiler<'a> {
             Token::LeftParen => {
                 self.parser.advance()?; // consume '('
                 self.parse_expr(0)?;
-                
-                // Expect closing paren
-                let current = self.parser.current_token().cloned()
-                    .ok_or_else(|| self.unexpected_eof_error(token.span.clone()))?;
-                
-                if current.token != Token::RightParen {
-                    return Err(self.unexpected_token_error(&current, "closing parenthesis"));
-                }
-                self.parser.advance()?; // consume ')'
+                self.parser.consume(Token::RightParen, "Expected closing parenthesis")?;
             }
             _ => {
                 return Err(self.invalid_expression_error(&token));
             }
         }
-        
+
         Ok(())
     }
 
@@ -160,10 +164,10 @@ impl<'a> Compiler<'a> {
                 };
                 self.unexpected_eof_error(span)
             })?;
-        
+
         self.parser.advance()?; // consume operator
         self.parse_expr(left_bp)?;
-        
+
         match &token.token {
             Token::Operator(op) if op == "+" => self.emit_opcode(Opcode::Add, token.span),
             Token::Operator(op) if op == "-" => self.emit_opcode(Opcode::Sub, token.span),
@@ -177,7 +181,7 @@ impl<'a> Compiler<'a> {
             Token::Operator(op) if op == "|" => self.emit_opcode(Opcode::BitOr, token.span),
             _ => return Err(self.invalid_expression_error(&token)),
         }
-        
+
         Ok(())
     }
 
@@ -191,10 +195,10 @@ impl<'a> Compiler<'a> {
         if index > u16::MAX as usize {
             return Err(self.too_many_constants_error());
         }
-        
+
         // Use the current token's span for the constant
         let span = self.current_span();
-        
+
         self.compiling_chunk.write_opcode_u16(Opcode::LoadConst, index as u16, span);
         Ok(index as u16)
     }
@@ -217,12 +221,6 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn unexpected_token_error(&self, token: &TokenInfo, expected: &str) -> CompilerError {
-        self.make_error(
-            token.span.clone(),
-            format!("Expected {}, found {:?}", expected, token.token)
-        )
-    }
 
     fn unexpected_eof_error(&self, span: Range<usize>) -> CompilerError {
         self.make_error(span, "Unexpected end of input".to_string())
@@ -245,7 +243,7 @@ impl<'a> Compiler<'a> {
     fn unexpected_token_after_expression_error(&self, token: &TokenInfo) -> CompilerError {
         let message = match &token.token {
             Token::RightParen => "Unexpected ')' - no matching opening parenthesis".to_string(),
-            Token::RightBrace => "Unexpected '}' - no matching opening brace".to_string(), 
+            Token::RightBrace => "Unexpected '}' - no matching opening brace".to_string(),
             Token::RightBracket => "Unexpected ']' - no matching opening bracket".to_string(),
             _ => format!("Unexpected token {:?} after complete expression", token.token),
         };
@@ -264,25 +262,25 @@ impl<'a> Compiler<'a> {
     fn get_binding_power(&self, token: &Token) -> Option<(u8, u8)> {
         match token {
             // Multiplicative (left associative)
-            Token::Operator(op) if op == "*" || op == "/" => 
+            Token::Operator(op) if op == "*" || op == "/" =>
                 Some((PRECEDENCE_MULTIPLICATIVE, PRECEDENCE_MULTIPLICATIVE + 1)),
-            
+
             // Additive (left associative)
-            Token::Operator(op) if op == "+" || op == "-" => 
+            Token::Operator(op) if op == "+" || op == "-" =>
                 Some((PRECEDENCE_ADDITIVE, PRECEDENCE_ADDITIVE + 1)),
-            
+
             // Comparison (non-associative)
-            Token::Operator(op) if matches!(op.as_str(), "<" | "<=" | ">" | ">=") => 
+            Token::Operator(op) if matches!(op.as_str(), "<" | "<=" | ">" | ">=") =>
                 Some((PRECEDENCE_COMPARISON, PRECEDENCE_COMPARISON + 1)),
-            
+
             // Bitwise AND (left associative)
-            Token::Operator(op) if op == "&" => 
+            Token::Operator(op) if op == "&" =>
                 Some((PRECEDENCE_BITAND, PRECEDENCE_BITAND + 1)),
-            
+
             // Bitwise OR (left associative)
-            Token::Operator(op) if op == "|" => 
+            Token::Operator(op) if op == "|" =>
                 Some((PRECEDENCE_BITOR, PRECEDENCE_BITOR + 1)),
-            
+
             _ => None,
         }
     }
@@ -297,7 +295,7 @@ mod tests {
         let mut scanner = Scanner::new("42", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let chunk = compiler.compile().unwrap();
-        
+
         assert_eq!(chunk.constants.len(), 1);
         assert_eq!(chunk.constants[0], Value::Number(42.0));
         assert_eq!(chunk.code.len(), 4); // LoadConst (3 bytes) + Return (1 byte)
@@ -308,7 +306,7 @@ mod tests {
         let mut scanner = Scanner::new("3 + 4", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let chunk = compiler.compile().unwrap();
-        
+
         assert_eq!(chunk.constants.len(), 2);
         assert_eq!(chunk.constants[0], Value::Number(3.0));
         assert_eq!(chunk.constants[1], Value::Number(4.0));
@@ -321,7 +319,7 @@ mod tests {
         let mut scanner = Scanner::new("-42", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let chunk = compiler.compile().unwrap();
-        
+
         assert_eq!(chunk.constants.len(), 1);
         assert_eq!(chunk.constants[0], Value::Number(42.0));
         // LoadConst (3) + Neg (1) + Return (1) = 5 bytes
@@ -333,7 +331,7 @@ mod tests {
         let mut scanner = Scanner::new("(1 + 2) * 3", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let chunk = compiler.compile().unwrap();
-        
+
         assert_eq!(chunk.constants.len(), 3);
         // LoadConst (3) + LoadConst (3) + Add (1) + LoadConst (3) + Mul (1) + Return (1) = 12 bytes
         assert_eq!(chunk.code.len(), 12);
@@ -344,11 +342,60 @@ mod tests {
         let mut scanner = Scanner::new("2 + 3 * 4", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let chunk = compiler.compile().unwrap();
-        
+
         // Should parse as 2 + (3 * 4), so constants should be in order 2, 3, 4
         assert_eq!(chunk.constants.len(), 3);
         assert_eq!(chunk.constants[0], Value::Number(2.0));
         assert_eq!(chunk.constants[1], Value::Number(3.0));
         assert_eq!(chunk.constants[2], Value::Number(4.0));
+    }
+
+    #[test]
+    fn test_true_literal() {
+        let mut scanner = Scanner::new("true", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let chunk = compiler.compile().unwrap();
+
+        assert_eq!(chunk.constants.len(), 0); // No constants for literals
+        assert_eq!(chunk.code.len(), 2); // LoadTrue (1 byte) + Return (1 byte)
+        assert_eq!(chunk.code[0], Opcode::LoadTrue as u8);
+        assert_eq!(chunk.code[1], Opcode::Return as u8);
+    }
+
+    #[test]
+    fn test_false_literal() {
+        let mut scanner = Scanner::new("false", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let chunk = compiler.compile().unwrap();
+
+        assert_eq!(chunk.constants.len(), 0); // No constants for literals
+        assert_eq!(chunk.code.len(), 2); // LoadFalse (1 byte) + Return (1 byte)
+        assert_eq!(chunk.code[0], Opcode::LoadFalse as u8);
+        assert_eq!(chunk.code[1], Opcode::Return as u8);
+    }
+
+    #[test]
+    fn test_null_literal() {
+        let mut scanner = Scanner::new("null", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let chunk = compiler.compile().unwrap();
+
+        assert_eq!(chunk.constants.len(), 0); // No constants for literals
+        assert_eq!(chunk.code.len(), 2); // LoadNull (1 byte) + Return (1 byte)
+        assert_eq!(chunk.code[0], Opcode::LoadNull as u8);
+        assert_eq!(chunk.code[1], Opcode::Return as u8);
+    }
+
+    #[test]
+    fn test_logical_not_with_true() {
+        let mut scanner = Scanner::new("!true", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let chunk = compiler.compile().unwrap();
+
+        assert_eq!(chunk.constants.len(), 0); // No constants for literals
+        assert_eq!(chunk.code.len(), 3); // LoadTrue (1 byte) + Not (1 byte) + Return (1 byte)
+        assert_eq!(chunk.code[0], Opcode::LoadTrue as u8);
+        assert_eq!(chunk.code[1], Opcode::Not as u8);
+        assert_eq!(chunk.code[2], Opcode::Return as u8);
     }
 }
