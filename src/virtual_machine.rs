@@ -1,62 +1,5 @@
 use std::ops::Range;
-use chunk::{Chunk, Opcode};
-use scanner::ScanError;
-
-/// Expanded value type for the virtual machine
-#[derive(Debug, Clone, PartialEq)]
-pub enum Value {
-    Null,
-    Boolean(bool),
-    Number(f64),
-}
-
-impl Value {
-    /// Check if value is truthy according to Jsonnet rules
-    pub fn is_truthy(&self) -> bool {
-        match self {
-            Value::Null => false,
-            Value::Boolean(b) => *b,
-            Value::Number(n) => *n != 0.0,
-        }
-    }
-
-    /// Convert value to f64 for numeric operations
-    pub fn to_number<'a>(&self, span: Range<usize>, source_id: &'a str) -> Result<f64, RuntimeError> {
-        match self {
-            Value::Number(n) => Ok(*n),
-            _ => Err(RuntimeError {
-                span,
-                message: format!("Cannot convert {:?} to number", self),
-                source_id: source_id.to_string(),
-            }),
-        }
-    }
-
-    /// Convert to integer for bitwise operations (per Jsonnet spec)
-    pub fn to_integer<'a>(&self, span: Range<usize>, source_id: &'a str) -> Result<i64, RuntimeError> {
-        match self {
-            Value::Number(n) => {
-                if n.is_nan() || n.is_infinite() {
-                    Err(RuntimeError {
-                        span,
-                        message: "Cannot convert NaN or Infinity to integer".to_string(),
-                        source_id: source_id.to_string(),
-                    })
-                } else {
-                    Ok(*n as i64)
-                }
-            }
-            _ => Err(RuntimeError {
-                span,
-                message: format!("Cannot convert {:?} to integer", self),
-                source_id: source_id.to_string(),
-            }),
-        }
-    }
-}
-
-/// Runtime error type - alias for ScanError to reuse existing infrastructure
-pub type RuntimeError = ScanError;
+use chunk::{Chunk, Opcode, Value, RuntimeError};
 
 /// Virtual machine for executing Jsonnet bytecode
 pub struct VirtualMachine<'a> {
@@ -203,8 +146,8 @@ impl<'a> VirtualMachine<'a> {
                         });
                     }
 
-                    let constant = chunk.constants[index as usize];
-                    self.push(Value::Number(constant))?;
+                    let constant = chunk.constants[index as usize].clone();
+                    self.push(constant)?;
                 }
 
                 // Binary arithmetic operations
@@ -512,7 +455,7 @@ mod tests {
     #[test]
     fn test_load_const() {
         let mut chunk = create_test_chunk();
-        let const_index = chunk.add_constant(42.0);
+        let const_index = chunk.add_constant(Value::Number(42.0));
         chunk.write_opcode_u16(Opcode::LoadConst, const_index as u16, 0..5);
         chunk.write_opcode(Opcode::Return, 5..10);
 
@@ -525,8 +468,8 @@ mod tests {
     #[test]
     fn test_add() {
         let mut chunk = create_test_chunk();
-        let idx1 = chunk.add_constant(10.0);
-        let idx2 = chunk.add_constant(5.0);
+        let idx1 = chunk.add_constant(Value::Number(10.0));
+        let idx2 = chunk.add_constant(Value::Number(5.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx1 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx2 as u16, 5..10);
@@ -542,8 +485,8 @@ mod tests {
     #[test]
     fn test_subtract() {
         let mut chunk = create_test_chunk();
-        let idx1 = chunk.add_constant(10.0);
-        let idx2 = chunk.add_constant(3.0);
+        let idx1 = chunk.add_constant(Value::Number(10.0));
+        let idx2 = chunk.add_constant(Value::Number(3.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx1 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx2 as u16, 5..10);
@@ -559,8 +502,8 @@ mod tests {
     #[test]
     fn test_multiply() {
         let mut chunk = create_test_chunk();
-        let idx1 = chunk.add_constant(6.0);
-        let idx2 = chunk.add_constant(7.0);
+        let idx1 = chunk.add_constant(Value::Number(6.0));
+        let idx2 = chunk.add_constant(Value::Number(7.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx1 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx2 as u16, 5..10);
@@ -576,8 +519,8 @@ mod tests {
     #[test]
     fn test_divide() {
         let mut chunk = create_test_chunk();
-        let idx1 = chunk.add_constant(15.0);
-        let idx2 = chunk.add_constant(3.0);
+        let idx1 = chunk.add_constant(Value::Number(15.0));
+        let idx2 = chunk.add_constant(Value::Number(3.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx1 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx2 as u16, 5..10);
@@ -593,8 +536,8 @@ mod tests {
     #[test]
     fn test_divide_by_zero() {
         let mut chunk = create_test_chunk();
-        let idx1 = chunk.add_constant(10.0);
-        let idx2 = chunk.add_constant(0.0);
+        let idx1 = chunk.add_constant(Value::Number(10.0));
+        let idx2 = chunk.add_constant(Value::Number(0.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx1 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx2 as u16, 5..10);
@@ -611,8 +554,8 @@ mod tests {
     #[test]
     fn test_comparison_lt() {
         let mut chunk = create_test_chunk();
-        let idx1 = chunk.add_constant(5.0);
-        let idx2 = chunk.add_constant(10.0);
+        let idx1 = chunk.add_constant(Value::Number(5.0));
+        let idx2 = chunk.add_constant(Value::Number(10.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx1 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx2 as u16, 5..10);
@@ -628,8 +571,8 @@ mod tests {
     #[test]
     fn test_bitwise_shl() {
         let mut chunk = create_test_chunk();
-        let idx1 = chunk.add_constant(8.0);
-        let idx2 = chunk.add_constant(2.0);
+        let idx1 = chunk.add_constant(Value::Number(8.0));
+        let idx2 = chunk.add_constant(Value::Number(2.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx1 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx2 as u16, 5..10);
@@ -673,7 +616,7 @@ mod tests {
     #[test]
     fn test_neg() {
         let mut chunk = create_test_chunk();
-        let idx = chunk.add_constant(42.0);
+        let idx = chunk.add_constant(Value::Number(42.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx as u16, 0..5);
         chunk.write_opcode(Opcode::Neg, 5..10);
@@ -701,8 +644,8 @@ mod tests {
     #[test]
     fn test_pop() {
         let mut chunk = create_test_chunk();
-        let idx1 = chunk.add_constant(1.0);
-        let idx2 = chunk.add_constant(2.0);
+        let idx1 = chunk.add_constant(Value::Number(1.0));
+        let idx2 = chunk.add_constant(Value::Number(2.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx1 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx2 as u16, 5..10);
@@ -718,7 +661,7 @@ mod tests {
     #[test]
     fn test_dup() {
         let mut chunk = create_test_chunk();
-        let idx = chunk.add_constant(42.0);
+        let idx = chunk.add_constant(Value::Number(42.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx as u16, 0..5);
         chunk.write_opcode(Opcode::Dup, 5..10);
@@ -734,8 +677,8 @@ mod tests {
     #[test]
     fn test_swap() {
         let mut chunk = create_test_chunk();
-        let idx1 = chunk.add_constant(10.0);
-        let idx2 = chunk.add_constant(3.0);
+        let idx1 = chunk.add_constant(Value::Number(10.0));
+        let idx2 = chunk.add_constant(Value::Number(3.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx1 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx2 as u16, 5..10);
@@ -805,10 +748,10 @@ mod tests {
     fn test_complex_expression() {
         // Test: (10 + 5) * 2 - 3 = 27
         let mut chunk = create_test_chunk();
-        let idx_10 = chunk.add_constant(10.0);
-        let idx_5 = chunk.add_constant(5.0);
-        let idx_2 = chunk.add_constant(2.0);
-        let idx_3 = chunk.add_constant(3.0);
+        let idx_10 = chunk.add_constant(Value::Number(10.0));
+        let idx_5 = chunk.add_constant(Value::Number(5.0));
+        let idx_2 = chunk.add_constant(Value::Number(2.0));
+        let idx_3 = chunk.add_constant(Value::Number(3.0));
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx_10 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx_5 as u16, 5..10);

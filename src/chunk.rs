@@ -1,8 +1,72 @@
 use std::ops::Range;
 use ariadne::{Report, ReportKind, Label};
+use scanner::ScanError;
 
-/// A type alias for values in the chunk - currently only f64
-pub type Value = f64;
+/// Runtime error type - alias for ScanError to reuse existing infrastructure
+pub type RuntimeError = ScanError;
+
+/// Value type for the Jsonnet virtual machine
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Null,
+    Boolean(bool),
+    Number(f64),
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Null => write!(f, "null"),
+            Value::Boolean(b) => write!(f, "{}", b),
+            Value::Number(n) => write!(f, "{}", n),
+        }
+    }
+}
+
+impl Value {
+    /// Check if value is truthy according to Jsonnet rules
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Value::Null => false,
+            Value::Boolean(b) => *b,
+            Value::Number(n) => *n != 0.0,
+        }
+    }
+
+    /// Convert value to f64 for numeric operations
+    pub fn to_number<'a>(&self, span: Range<usize>, source_id: &'a str) -> Result<f64, RuntimeError> {
+        match self {
+            Value::Number(n) => Ok(*n),
+            _ => Err(RuntimeError {
+                span,
+                message: format!("Cannot convert {:?} to number", self),
+                source_id: source_id.to_string(),
+            }),
+        }
+    }
+
+    /// Convert to integer for bitwise operations (per Jsonnet spec)
+    pub fn to_integer<'a>(&self, span: Range<usize>, source_id: &'a str) -> Result<i64, RuntimeError> {
+        match self {
+            Value::Number(n) => {
+                if n.is_nan() || n.is_infinite() {
+                    Err(RuntimeError {
+                        span,
+                        message: "Cannot convert NaN or Infinity to integer".to_string(),
+                        source_id: source_id.to_string(),
+                    })
+                } else {
+                    Ok(*n as i64)
+                }
+            }
+            _ => Err(RuntimeError {
+                span,
+                message: format!("Cannot convert {:?} to integer", self),
+                source_id: source_id.to_string(),
+            }),
+        }
+    }
+}
 
 /// Opcodes for the Jsonnet virtual machine
 #[repr(u8)]
@@ -577,17 +641,17 @@ mod tests {
     fn test_add_constant() {
         let mut chunk = Chunk::new("test.jsonnet");
 
-        let index1 = chunk.add_constant(1.5);
-        let index2 = chunk.add_constant(2.7);
-        let index3 = chunk.add_constant(3.14);
+        let index1 = chunk.add_constant(Value::Number(1.5));
+        let index2 = chunk.add_constant(Value::Number(2.7));
+        let index3 = chunk.add_constant(Value::Number(3.14));
 
         assert_eq!(index1, 0);
         assert_eq!(index2, 1);
         assert_eq!(index3, 2);
 
-        assert_eq!(chunk.constants[0], 1.5);
-        assert_eq!(chunk.constants[1], 2.7);
-        assert_eq!(chunk.constants[2], 3.14);
+        assert_eq!(chunk.constants[0], Value::Number(1.5));
+        assert_eq!(chunk.constants[1], Value::Number(2.7));
+        assert_eq!(chunk.constants[2], Value::Number(3.14));
     }
 
     #[test]

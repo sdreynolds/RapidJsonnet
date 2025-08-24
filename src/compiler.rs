@@ -1,6 +1,6 @@
 use std::fs;
 use std::ops::Range;
-use chunk::{Chunk, Opcode};
+use chunk::{Chunk, Opcode, Value};
 use scanner::{Scanner, ScanError, Token, TokenInfo};
 use parser::Parser;
 
@@ -187,7 +187,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn emit_constant(&mut self, value: f64) -> Result<u16, CompilerError> {
-        let index = self.compiling_chunk.add_constant(value);
+        let index = self.compiling_chunk.add_constant(Value::Number(value));
         if index > u16::MAX as usize {
             return Err(self.too_many_constants_error());
         }
@@ -299,7 +299,7 @@ mod tests {
         let chunk = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 1);
-        assert_eq!(chunk.constants[0], 42.0);
+        assert_eq!(chunk.constants[0], Value::Number(42.0));
         assert_eq!(chunk.code.len(), 4); // LoadConst (3 bytes) + Return (1 byte)
     }
 
@@ -310,8 +310,8 @@ mod tests {
         let chunk = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 2);
-        assert_eq!(chunk.constants[0], 3.0);
-        assert_eq!(chunk.constants[1], 4.0);
+        assert_eq!(chunk.constants[0], Value::Number(3.0));
+        assert_eq!(chunk.constants[1], Value::Number(4.0));
         // LoadConst (3) + LoadConst (3) + Add (1) + Return (1) = 8 bytes
         assert_eq!(chunk.code.len(), 8);
     }
@@ -323,7 +323,7 @@ mod tests {
         let chunk = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 1);
-        assert_eq!(chunk.constants[0], 42.0);
+        assert_eq!(chunk.constants[0], Value::Number(42.0));
         // LoadConst (3) + Neg (1) + Return (1) = 5 bytes
         assert_eq!(chunk.code.len(), 5);
     }
@@ -347,8 +347,8 @@ mod tests {
         
         // Should parse as 2 + (3 * 4), so constants should be in order 2, 3, 4
         assert_eq!(chunk.constants.len(), 3);
-        assert_eq!(chunk.constants[0], 2.0);
-        assert_eq!(chunk.constants[1], 3.0);
-        assert_eq!(chunk.constants[2], 4.0);
+        assert_eq!(chunk.constants[0], Value::Number(2.0));
+        assert_eq!(chunk.constants[1], Value::Number(3.0));
+        assert_eq!(chunk.constants[2], Value::Number(4.0));
     }
 }

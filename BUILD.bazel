@@ -41,7 +41,8 @@ rust_library(
     name = "chunk",
     srcs = ["src/chunk.rs"],
     deps = [
-        "@crates//:ariadne"
+        "@crates//:ariadne",
+        ":scanner"
     ]
 )
 
