@@ -52,6 +52,16 @@ rust_library(
     ]
 )
 
+rust_library(
+    name = "compiler",
+    srcs = ["src/compiler.rs", "src/compiler_integration_test.rs"],
+    deps = [
+        ":chunk",
+        ":scanner",
+        ":parser",
+    ]
+)
+
 rust_test(
     name = "scanner_test",
     crate = ":scanner"
@@ -70,4 +80,9 @@ rust_test(
 rust_test(
     name = "virtual_machine_test",
     crate = ":virtual_machine"
+)
+
+rust_test(
+    name = "compiler_test",
+    crate = ":compiler"
 )
