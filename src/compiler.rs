@@ -1,5 +1,6 @@
 use std::fs;
 use std::ops::Range;
+use std::collections::HashMap;
 use chunk::{Chunk, Opcode, Value};
 use scanner::{Scanner, ScanError, Token, TokenInfo};
 use parser::Parser;
@@ -37,6 +38,7 @@ pub struct Compiler<'a> {
     compiling_chunk: Chunk<'a>,
     parser: Parser<'a>,
     type_stack: Vec<ExpressionType>,
+    constant_pool: HashMap<Value, u16>,
 }
 
 impl<'a> Compiler<'a> {
@@ -48,6 +50,7 @@ impl<'a> Compiler<'a> {
             compiling_chunk,
             parser,
             type_stack: Vec::new(),
+            constant_pool: HashMap::new(),
         }
     }
 
@@ -57,6 +60,25 @@ impl<'a> Compiler<'a> {
         let input: &'static str = Box::leak(contents.into_boxed_str());
         let scanner: &'static mut Scanner = Box::leak(Box::new(Scanner::new(input, file_name)));
         Ok(Compiler::new(scanner, file_name))
+    }
+
+    /// Add a constant to the chunk, reusing existing constants if they have the same value
+    fn add_constant_pooled(&mut self, value: Value) -> Result<u16, CompilerError> {
+        // Check if we already have this constant
+        if let Some(&existing_index) = self.constant_pool.get(&value) {
+            return Ok(existing_index);
+        }
+
+        // Add the new constant to the chunk
+        let index = self.compiling_chunk.add_constant(value.clone());
+        if index > u16::MAX as usize {
+            return Err(self.too_many_constants_error());
+        }
+
+        let index_u16 = index as u16;
+        // Store in our constant pool for future deduplication
+        self.constant_pool.insert(value, index_u16);
+        Ok(index_u16)
     }
 
     pub fn compile(mut self) -> Result<Chunk<'a>, CompilerError> {
@@ -349,29 +371,23 @@ impl<'a> Compiler<'a> {
     }
 
     fn emit_constant(&mut self, value: f64) -> Result<u16, CompilerError> {
-        let index = self.compiling_chunk.add_constant(Value::Number(value));
-        if index > u16::MAX as usize {
-            return Err(self.too_many_constants_error());
-        }
+        let index = self.add_constant_pooled(Value::Number(value))?;
 
         // Use the current token's span for the constant
         let span = self.current_span();
 
-        self.compiling_chunk.write_opcode_u16(Opcode::LoadConst, index as u16, span);
-        Ok(index as u16)
+        self.compiling_chunk.write_opcode_u16(Opcode::LoadConst, index, span);
+        Ok(index)
     }
 
     fn emit_string_constant(&mut self, value: InternedString) -> Result<u16, CompilerError> {
-        let index = self.compiling_chunk.add_constant(Value::String(value));
-        if index > u16::MAX as usize {
-            return Err(self.too_many_constants_error());
-        }
+        let index = self.add_constant_pooled(Value::String(value))?;
 
         // Use the current token's span for the constant
         let span = self.current_span();
 
-        self.compiling_chunk.write_opcode_u16(Opcode::LoadConst, index as u16, span);
-        Ok(index as u16)
+        self.compiling_chunk.write_opcode_u16(Opcode::LoadConst, index, span);
+        Ok(index)
     }
 
     fn current_span(&self) -> Range<usize> {

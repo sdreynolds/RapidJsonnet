@@ -150,6 +150,43 @@ impl Value {
     }
 }
 
+// Manual implementation of Eq for Value
+impl Eq for Value {}
+
+// Manual implementation of Hash for Value
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Value::Null => {
+                0u8.hash(state);
+            }
+            Value::Boolean(b) => {
+                1u8.hash(state);
+                b.hash(state);
+            }
+            Value::Number(n) => {
+                2u8.hash(state);
+                // For f64, we need to handle the hash carefully
+                // We'll use the byte representation, but handle special cases
+                if n.is_nan() {
+                    // All NaN values hash the same
+                    f64::NAN.to_bits().hash(state);
+                } else {
+                    n.to_bits().hash(state);
+                }
+            }
+            Value::String(s) => {
+                3u8.hash(state);
+                s.hash(state);
+            }
+            Value::Object(key) => {
+                4u8.hash(state);
+                key.hash(state);
+            }
+        }
+    }
+}
+
 /// Opcodes for the Jsonnet virtual machine
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
