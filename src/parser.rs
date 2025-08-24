@@ -95,6 +95,10 @@ impl<'a> Parser<'a> {
     pub fn is_at_end(&self) -> bool {
         matches!(self.current_token, Some(ref token) if matches!(token.token, Token::Eof))
     }
+
+    pub fn source_id(&self) -> &str {
+        self.scanner.source_id
+    }
 }
 
 #[cfg(test)]

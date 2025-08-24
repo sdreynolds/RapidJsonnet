@@ -2,41 +2,9 @@ use std::fs;
 use std::ops::Range;
 use chunk::{Chunk, Opcode};
 use scanner::{Scanner, ScanError, Token, TokenInfo};
+use parser::Parser;
 
 pub type CompilerError = ScanError;
-
-// Helper functions for creating compiler errors
-pub fn unexpected_token(token: &TokenInfo, expected: &str) -> CompilerError {
-    ScanError {
-        span: token.span.clone(),
-        message: format!("Expected {}, found {:?}", expected, token.token),
-        source_id: "compiler".to_string(),
-    }
-}
-
-pub fn unexpected_eof(span: Range<usize>) -> CompilerError {
-    ScanError {
-        span,
-        message: "Unexpected end of input".to_string(),
-        source_id: "compiler".to_string(),
-    }
-}
-
-pub fn invalid_expression(token: &TokenInfo) -> CompilerError {
-    ScanError {
-        span: token.span.clone(),
-        message: format!("Invalid expression starting with {:?}", token.token),
-        source_id: "compiler".to_string(),
-    }
-}
-
-pub fn too_many_constants() -> CompilerError {
-    ScanError {
-        span: 0..0,
-        message: "Too many constants (maximum 65535)".to_string(),
-        source_id: "compiler".to_string(),
-    }
-}
 
 // Precedence constants
 const PRECEDENCE_POSTFIX: u8 = 90;
@@ -54,19 +22,17 @@ const PRECEDENCE_TERNARY: u8 = 5;
 
 pub struct Compiler<'a> {
     compiling_chunk: Chunk<'a>,
-    scanner: Scanner<'a>,
-    current_token: Option<TokenInfo>,
+    parser: Parser<'a>,
 }
 
 impl<'a> Compiler<'a> {
-    pub fn new(input: &'a str, source_id: &'a str) -> Self {
-        let scanner = Scanner::new(input, source_id);
+    pub fn new(scanner: &'a mut Scanner<'a>, source_id: &'a str) -> Self {
+        let parser = Parser::new(scanner);
         let compiling_chunk = Chunk::new(source_id);
         
         Self {
             compiling_chunk,
-            scanner,
-            current_token: None,
+            parser,
         }
     }
 
@@ -74,15 +40,19 @@ impl<'a> Compiler<'a> {
         let contents = fs::read_to_string(file_name)?;
         // We need to leak the string to get a 'static lifetime for the compiler
         let input: &'static str = Box::leak(contents.into_boxed_str());
-        Ok(Compiler::new(input, file_name))
+        let scanner: &'static mut Scanner = Box::leak(Box::new(Scanner::new(input, file_name)));
+        Ok(Compiler::new(scanner, file_name))
     }
 
     pub fn compile(mut self) -> Result<Chunk<'a>, CompilerError> {
+        // Advance to get the first token
+        self.parser.advance()?;
+        
         // Parse the entire expression
         self.parse_expr(0)?;
         
-        // Emit return opcode at the end
-        let span = 0..0; // Simple span for now
+        // Emit return opcode at the end - use the span of the last token or end of input
+        let span = self.current_span();
         self.emit_opcode(Opcode::Return, span);
         
         Ok(self.compiling_chunk)
@@ -94,7 +64,12 @@ impl<'a> Compiler<'a> {
         
         // Parse infix operators
         loop {
-            let current = match self.peek_token()? {
+            // Check if we're at the end or if there's no current token
+            if self.parser.is_at_end() {
+                break;
+            }
+            
+            let current = match self.parser.current_token() {
                 Some(token) => token,
                 None => break,
             };
@@ -114,38 +89,57 @@ impl<'a> Compiler<'a> {
     }
 
     fn parse_prefix(&mut self) -> Result<(), CompilerError> {
-        let token = self.advance_token()?;
+        let token = self.parser.current_token().cloned()
+            .ok_or_else(|| {
+                // Use the previous token's span end as the EOF location, or 0..0 if no previous token
+                let span = if let Some(previous) = self.parser.previous_token() {
+                    previous.span.end..previous.span.end
+                } else {
+                    0..0
+                };
+                self.unexpected_eof_error(span)
+            })?;
         
         match &token.token {
             Token::Number(value) => {
                 self.emit_constant(*value)?;
+                self.parser.advance()?; // consume the number
             }
             Token::Operator(op) if op == "-" => {
+                self.parser.advance()?; // consume the operator
                 self.parse_expr(PRECEDENCE_UNARY)?;
                 self.emit_opcode(Opcode::Neg, token.span);
             }
             Token::Operator(op) if op == "+" => {
+                self.parser.advance()?; // consume the operator
                 self.parse_expr(PRECEDENCE_UNARY)?;
                 self.emit_opcode(Opcode::Pos, token.span);
             }
             Token::Operator(op) if op == "!" => {
+                self.parser.advance()?; // consume the operator
                 self.parse_expr(PRECEDENCE_UNARY)?;
                 self.emit_opcode(Opcode::Not, token.span);
             }
             Token::Operator(op) if op == "~" => {
+                self.parser.advance()?; // consume the operator
                 self.parse_expr(PRECEDENCE_UNARY)?;
                 self.emit_opcode(Opcode::BitNot, token.span);
             }
             Token::LeftParen => {
+                self.parser.advance()?; // consume '('
                 self.parse_expr(0)?;
                 
-                let current = self.advance_token()?;
+                // Expect closing paren
+                let current = self.parser.current_token().cloned()
+                    .ok_or_else(|| self.unexpected_eof_error(token.span.clone()))?;
+                
                 if current.token != Token::RightParen {
-                    return Err(unexpected_token(&current, "closing parenthesis"));
+                    return Err(self.unexpected_token_error(&current, "closing parenthesis"));
                 }
+                self.parser.advance()?; // consume ')'
             }
             _ => {
-                return Err(invalid_expression(&token));
+                return Err(self.invalid_expression_error(&token));
             }
         }
         
@@ -153,7 +147,18 @@ impl<'a> Compiler<'a> {
     }
 
     fn parse_infix(&mut self, left_bp: u8) -> Result<(), CompilerError> {
-        let token = self.advance_token()?; // consume operator
+        let token = self.parser.current_token().cloned()
+            .ok_or_else(|| {
+                // Use the previous token's span end as the EOF location
+                let span = if let Some(previous) = self.parser.previous_token() {
+                    previous.span.end..previous.span.end
+                } else {
+                    0..0
+                };
+                self.unexpected_eof_error(span)
+            })?;
+        
+        self.parser.advance()?; // consume operator
         self.parse_expr(left_bp)?;
         
         match &token.token {
@@ -167,31 +172,12 @@ impl<'a> Compiler<'a> {
             Token::Operator(op) if op == ">=" => self.emit_opcode(Opcode::Ge, token.span),
             Token::Operator(op) if op == "&" => self.emit_opcode(Opcode::BitAnd, token.span),
             Token::Operator(op) if op == "|" => self.emit_opcode(Opcode::BitOr, token.span),
-            _ => return Err(invalid_expression(&token)),
+            _ => return Err(self.invalid_expression_error(&token)),
         }
         
         Ok(())
     }
 
-    fn advance_token(&mut self) -> Result<TokenInfo, CompilerError> {
-        if let Some(token) = self.current_token.take() {
-            Ok(token)
-        } else {
-            self.scanner.scan_next()
-        }
-    }
-    
-    fn peek_token(&mut self) -> Result<Option<TokenInfo>, CompilerError> {
-        if self.current_token.is_none() {
-            match self.scanner.scan_next() {
-                Ok(token) if matches!(token.token, Token::Eof) => return Ok(None),
-                Ok(token) => self.current_token = Some(token),
-                Err(e) => return Err(e),
-            }
-        }
-        
-        Ok(self.current_token.clone())
-    }
 
     fn emit_opcode(&mut self, opcode: Opcode, span: Range<usize>) {
         self.compiling_chunk.write_opcode(opcode, span);
@@ -200,12 +186,57 @@ impl<'a> Compiler<'a> {
     fn emit_constant(&mut self, value: f64) -> Result<u16, CompilerError> {
         let index = self.compiling_chunk.add_constant(value);
         if index > u16::MAX as usize {
-            return Err(too_many_constants());
+            return Err(self.too_many_constants_error());
         }
         
-        let span = 0..0; // Simple span for now
+        // Use the current token's span for the constant
+        let span = self.current_span();
+        
         self.compiling_chunk.write_opcode_u16(Opcode::LoadConst, index as u16, span);
         Ok(index as u16)
+    }
+
+    fn current_span(&self) -> Range<usize> {
+        if let Some(current) = self.parser.current_token() {
+            current.span.clone()
+        } else if let Some(previous) = self.parser.previous_token() {
+            previous.span.clone()
+        } else {
+            0..0
+        }
+    }
+
+    fn make_error(&self, span: Range<usize>, message: String) -> CompilerError {
+        ScanError {
+            span,
+            message,
+            source_id: self.parser.source_id().to_string(),
+        }
+    }
+
+    fn unexpected_token_error(&self, token: &TokenInfo, expected: &str) -> CompilerError {
+        self.make_error(
+            token.span.clone(),
+            format!("Expected {}, found {:?}", expected, token.token)
+        )
+    }
+
+    fn unexpected_eof_error(&self, span: Range<usize>) -> CompilerError {
+        self.make_error(span, "Unexpected end of input".to_string())
+    }
+
+    fn invalid_expression_error(&self, token: &TokenInfo) -> CompilerError {
+        self.make_error(
+            token.span.clone(),
+            format!("Invalid expression starting with {:?}", token.token)
+        )
+    }
+
+    fn too_many_constants_error(&self) -> CompilerError {
+        self.make_error(
+            0..0, // This error doesn't relate to a specific token location
+            "Too many constants (maximum 65535)".to_string()
+        )
     }
 
     fn get_binding_power(&self, token: &Token) -> Option<(u8, u8)> {
@@ -241,7 +272,8 @@ mod tests {
 
     #[test]
     fn test_simple_number() {
-        let compiler = Compiler::new("42", "test");
+        let mut scanner = Scanner::new("42", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
         let chunk = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 1);
@@ -251,7 +283,8 @@ mod tests {
 
     #[test]
     fn test_simple_addition() {
-        let compiler = Compiler::new("3 + 4", "test");
+        let mut scanner = Scanner::new("3 + 4", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
         let chunk = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 2);
@@ -263,7 +296,8 @@ mod tests {
 
     #[test]
     fn test_unary_minus() {
-        let compiler = Compiler::new("-42", "test");
+        let mut scanner = Scanner::new("-42", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
         let chunk = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 1);
@@ -274,7 +308,8 @@ mod tests {
 
     #[test]
     fn test_grouped_expression() {
-        let compiler = Compiler::new("(1 + 2) * 3", "test");
+        let mut scanner = Scanner::new("(1 + 2) * 3", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
         let chunk = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 3);
@@ -284,7 +319,8 @@ mod tests {
 
     #[test]
     fn test_precedence() {
-        let compiler = Compiler::new("2 + 3 * 4", "test");
+        let mut scanner = Scanner::new("2 + 3 * 4", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
         let chunk = compiler.compile().unwrap();
         
         // Should parse as 2 + (3 * 4), so constants should be in order 2, 3, 4

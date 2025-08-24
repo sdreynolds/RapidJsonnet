@@ -11,9 +11,12 @@ filegroup(
 
 rust_binary(
     name = "main",
-    srcs = ["src/main.rs", "src/scanner.rs"],
+    srcs = ["src/main.rs"],
     compile_data = [":sample_files"],
     deps = [
+        ":compiler",
+        ":virtual_machine",
+        ":scanner",
         "@crates//:ariadne",
     ],
 )

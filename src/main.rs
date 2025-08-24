@@ -1,5 +1,5 @@
-mod scanner;
-
+use compiler::Compiler;
+use virtual_machine::execute;
 use scanner::Scanner;
 use ariadne::Source;
 use std::env;
@@ -10,65 +10,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {
-        // File mode: read from file and tokenize
+        // File mode: read from file, compile, and execute
         let filename = &args[1];
         let content = fs::read_to_string(filename)?;
-        tokenize_and_print(&content, filename)?;
+        compile_and_execute(&content, filename)?;
     } else {
-        // REPL mode: read from stdin
+        // REPL mode: read from stdin, compile, and execute
         repl_mode()?;
     }
 
     Ok(())
 }
 
-fn tokenize_and_print(content: &str, source_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut scanner = Scanner::new(content, source_id);
-
+fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let source = Source::from(content);
 
-    match scanner.scan_all() {
-        Ok(tokens) => {
-            let success_report = ariadne::Report::build(ariadne::ReportKind::Advice, (source_id, 0..0))
-                .with_message(format!("Successfully tokenized {} tokens", tokens.len() - 1)) // -1 for EOF
-                .with_note("All tokens parsed successfully");
-
-            // Add labels for each token with different colors
-            let mut colored_report = success_report;
-            let mut color_gen = ariadne::ColorGenerator::new();
-
-            for token_info in &tokens {
-                if matches!(token_info.token, scanner::Token::Eof) {
-                    continue;
+    // Compile the input
+    let mut scanner = Scanner::new(content, source_id);
+    let compiler = Compiler::new(&mut scanner, source_id);
+    match compiler.compile() {
+        Ok(chunk) => {
+            println!("✅ Compilation successful!");
+            println!("📊 Generated {} bytes of bytecode with {} constants", 
+                     chunk.code.len(), chunk.constants.len());
+            
+            // Execute the compiled chunk
+            match execute(chunk) {
+                Ok(result) => {
+                    println!("🎯 Execution result: {}", result);
                 }
-
-                let color = color_gen.next();
-                let token_type = get_token_type_name(&token_info.token);
-
-                colored_report = colored_report.with_label(
-                    ariadne::Label::new((source_id, token_info.span.clone()))
-                        .with_message(format!("{}: {:?}", token_type, token_info.token))
-                        .with_color(color)
-                );
+                Err(runtime_error) => {
+                    println!("❌ Runtime error during execution:");
+                    let report = runtime_error.into_report();
+                    report.print((source_id, &source))?;
+                }
             }
-
-            colored_report.finish().print((source_id, &source))?;
         }
-        Err(errors) => {
-            for error in errors {
-                let report = error.into_report();
-                report.print((error.source_id.as_str(), &source))?;
-            }
-            return Err("Tokenization failed".into());
+        Err(compile_error) => {
+            println!("❌ Compilation failed:");
+            let report = compile_error.into_report();
+            report.print((source_id, &source))?;
         }
     }
 
     Ok(())
 }
 
-
 fn repl_mode() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Jsonnet Scanner REPL - Enter Jsonnet code to tokenize (Ctrl+C to exit)");
+    println!("🚀 Jsonnet Compiler & VM REPL - Enter expressions to compile and execute (Ctrl+C to exit)");
+    println!("Examples: 42, 3 + 4, -5 * (10 + 2), (1 + 2) * 3");
 
     loop {
         print!("jsonnet> ");
@@ -83,7 +73,7 @@ fn repl_mode() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                tokenize_and_print_repl(input);
+                compile_and_execute_repl(input);
             }
             Err(e) => {
                 eprintln!("Error reading input: {}", e);
@@ -95,41 +85,8 @@ fn repl_mode() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn get_token_type_name(token: &scanner::Token) -> &'static str {
-    match token {
-        scanner::Token::Identifier(_) => "Identifier",
-        scanner::Token::Number(_) => "Number",
-        scanner::Token::String(_) => "String",
-        scanner::Token::Assert => "Keyword",
-        scanner::Token::Else => "Keyword",
-        scanner::Token::Error => "Keyword",
-        scanner::Token::False => "Keyword",
-        scanner::Token::For => "Keyword",
-        scanner::Token::Function => "Keyword",
-        scanner::Token::If => "Keyword",
-        scanner::Token::Import => "Keyword",
-        scanner::Token::ImportStr => "Keyword",
-        scanner::Token::ImportBin => "Keyword",
-        scanner::Token::In => "Keyword",
-        scanner::Token::Local => "Keyword",
-        scanner::Token::Null => "Keyword",
-        scanner::Token::TailStrict => "Keyword",
-        scanner::Token::Then => "Keyword",
-        scanner::Token::Self_ => "Keyword",
-        scanner::Token::Super => "Keyword",
-        scanner::Token::True => "Keyword",
-        scanner::Token::LeftBrace | scanner::Token::RightBrace |
-        scanner::Token::LeftBracket | scanner::Token::RightBracket |
-        scanner::Token::Comma | scanner::Token::Dot |
-        scanner::Token::LeftParen | scanner::Token::RightParen |
-        scanner::Token::Semicolon => "Symbol",
-        scanner::Token::Operator(_) => "Operator",
-        scanner::Token::Eof => "EOF",
-    }
-}
-
-fn tokenize_and_print_repl(input: &str) {
-    if let Err(e) = tokenize_and_print(input, "repl") {
-        eprintln!("Failed to print tokens: {}", e);
+fn compile_and_execute_repl(input: &str) {
+    if let Err(e) = compile_and_execute(input, "repl") {
+        eprintln!("Failed to process input: {}", e);
     }
 }
