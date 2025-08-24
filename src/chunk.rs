@@ -371,6 +371,105 @@ impl<'a> Chunk<'a> {
     pub fn read_opcode(&self, index: usize) -> Option<Opcode> {
         self.code.get(index).and_then(|&byte| Opcode::from_u8(byte))
     }
+
+    /// Creates a debug compilation report showing all opcodes with their spans in different colors
+    pub fn debug_compilation(&self) -> Report<(&str, Range<usize>)> {
+        // Build raw bytecode display
+        let mut raw_bytecode = String::from("Raw Bytecode:\n");
+        for (i, byte) in self.code.iter().enumerate() {
+            raw_bytecode.push_str(&format!("[{}]: {:02X} ", i, byte));
+            if (i + 1) % 8 == 0 {
+                raw_bytecode.push('\n');
+            }
+        }
+        if !self.code.is_empty() && self.code.len() % 8 != 0 {
+            raw_bytecode.push('\n');
+        }
+
+        let mut report = Report::build(ReportKind::Advice, (self.source_id, 0..0))
+            .with_message(format!("Debug: Compilation bytecode visualization\n\n{}", raw_bytecode));
+
+        // Color palette for different opcodes
+        let colors = [
+            ariadne::Color::Red,
+            ariadne::Color::Green,
+            ariadne::Color::Blue,
+            ariadne::Color::Cyan,
+            ariadne::Color::Magenta,
+            ariadne::Color::Yellow,
+        ];
+
+        let mut ip = 0; // instruction pointer
+        let mut color_index = 0;
+
+        while ip < self.code.len() {
+            if let Some(opcode) = self.read_opcode(ip) {
+                let span = self.get_span(ip);
+                let color = colors[color_index % colors.len()];
+                color_index += 1;
+
+                // Calculate instruction size and end position
+                let instruction_size = match opcode {
+                    Opcode::LoadConst => 3, // opcode + u16
+                    Opcode::LoadVar => 3,   // opcode + u16
+                    Opcode::CreateObject => 3, // opcode + u16
+                    Opcode::CreateArray => 3,  // opcode + u16
+                    Opcode::FieldDef => 4,     // opcode + u16 + u8
+                    Opcode::CreateFunction => 6, // opcode + u8 + u32
+                    Opcode::Call => 3,         // opcode + u8 + u8
+                    Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue => 5, // opcode + i32
+                    Opcode::LocalScope => 2,   // opcode + u8
+                    Opcode::StdCall => 4,      // opcode + u16 + u8
+                    Opcode::BindDefault => 3,  // opcode + u16
+                    // All other opcodes have no operands
+                    _ => 1,
+                };
+                let end_pos = ip + instruction_size - 1;
+
+                // Create a label for this opcode with bytecode range and operand details
+                let label_text = match opcode {
+                    Opcode::LoadConst => {
+                        if let Some(const_index) = self.read_u16(ip + 1) {
+                            if let Some(value) = self.constants.get(const_index as usize) {
+                                format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}, operand={:04X}@{}-{}, value={}", 
+                                    ip, end_pos, instruction_size, opcode as u8, ip, const_index, ip + 1, ip + 2, value)
+                            } else {
+                                format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}, operand={:04X}@{}-{}", 
+                                    ip, end_pos, instruction_size, opcode as u8, ip, const_index, ip + 1, ip + 2)
+                            }
+                        } else {
+                            format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}", 
+                                ip, end_pos, instruction_size, opcode as u8, ip)
+                        }
+                    }
+                    _ => {
+                        if instruction_size == 1 {
+                            format!("[{}] (1 byte) {}: opcode={:02X}@{}", ip, format!("{:?}", opcode), opcode as u8, ip)
+                        } else {
+                            format!("[{}-{}] ({} bytes) {}: opcode={:02X}@{}", 
+                                ip, end_pos, instruction_size, format!("{:?}", opcode), opcode as u8, ip)
+                        }
+                    }
+                };
+
+                if let Some(span) = span {
+                    report = report.with_label(
+                        Label::new((self.source_id, span.clone()))
+                            .with_message(label_text)
+                            .with_color(color)
+                    );
+                }
+
+                // Move instruction pointer by the instruction size
+                ip += instruction_size;
+            } else {
+                // Invalid opcode, skip
+                ip += 1;
+            }
+        }
+
+        report.finish()
+    }
 }
 
 impl<'a> Default for Chunk<'a> {

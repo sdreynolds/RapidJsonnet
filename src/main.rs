@@ -34,6 +34,10 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
             println!("📊 Generated {} bytes of bytecode with {} constants", 
                      chunk.code.len(), chunk.constants.len());
             
+            // Show debug compilation visualization
+            let debug_report = chunk.debug_compilation();
+            debug_report.print((source_id, &source))?;
+            
             // Execute the compiled chunk
             match execute(chunk) {
                 Ok(result) => {
