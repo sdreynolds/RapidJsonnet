@@ -11,6 +11,7 @@ pub enum Value {
     Null,
     Boolean(bool),
     Number(f64),
+    String(String),
 }
 
 impl std::fmt::Display for Value {
@@ -19,6 +20,7 @@ impl std::fmt::Display for Value {
             Value::Null => write!(f, "null"),
             Value::Boolean(b) => write!(f, "{}", b),
             Value::Number(n) => write!(f, "{}", n),
+            Value::String(s) => write!(f, "\"{}\"", s),
         }
     }
 }
@@ -30,6 +32,7 @@ impl Value {
             Value::Null => false,
             Value::Boolean(b) => *b,
             Value::Number(n) => *n != 0.0,
+            Value::String(s) => !s.is_empty(),
         }
     }
 
@@ -37,6 +40,13 @@ impl Value {
     pub fn to_number<'a>(&self, span: Range<usize>, source_id: &'a str) -> Result<f64, RuntimeError> {
         match self {
             Value::Number(n) => Ok(*n),
+            Value::String(s) => {
+                s.parse::<f64>().map_err(|_| RuntimeError {
+                    span,
+                    message: format!("Cannot convert string '{}' to number", s),
+                    source_id: source_id.to_string(),
+                })
+            },
             _ => Err(RuntimeError {
                 span,
                 message: format!("Cannot convert {:?} to number", self),
@@ -57,6 +67,26 @@ impl Value {
                     })
                 } else {
                     Ok(*n as i64)
+                }
+            }
+            Value::String(s) => {
+                match s.parse::<f64>() {
+                    Ok(n) => {
+                        if n.is_nan() || n.is_infinite() {
+                            Err(RuntimeError {
+                                span,
+                                message: format!("Cannot convert string '{}' (NaN or Infinity) to integer", s),
+                                source_id: source_id.to_string(),
+                            })
+                        } else {
+                            Ok(n as i64)
+                        }
+                    }
+                    Err(_) => Err(RuntimeError {
+                        span,
+                        message: format!("Cannot convert string '{}' to integer", s),
+                        source_id: source_id.to_string(),
+                    })
                 }
             }
             _ => Err(RuntimeError {
@@ -455,7 +485,7 @@ impl<'a> Chunk<'a> {
 
         // Color palette for different opcodes
         let colors = [
-            ariadne::Color::Red,
+            ariadne::Color::Primary,
             ariadne::Color::Green,
             ariadne::Color::Blue,
             ariadne::Color::Cyan,
@@ -495,14 +525,14 @@ impl<'a> Chunk<'a> {
                     Opcode::LoadConst => {
                         if let Some(const_index) = self.read_u16(ip + 1) {
                             if let Some(value) = self.constants.get(const_index as usize) {
-                                format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}, operand={:04X}@{}-{}, value={}", 
+                                format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}, operand={:04X}@{}-{}, value={}",
                                     ip, end_pos, instruction_size, opcode as u8, ip, const_index, ip + 1, ip + 2, value)
                             } else {
-                                format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}, operand={:04X}@{}-{}", 
+                                format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}, operand={:04X}@{}-{}",
                                     ip, end_pos, instruction_size, opcode as u8, ip, const_index, ip + 1, ip + 2)
                             }
                         } else {
-                            format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}", 
+                            format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}",
                                 ip, end_pos, instruction_size, opcode as u8, ip)
                         }
                     }
@@ -510,7 +540,7 @@ impl<'a> Chunk<'a> {
                         if instruction_size == 1 {
                             format!("[{}] (1 byte) {}: opcode={:02X}@{}", ip, format!("{:?}", opcode), opcode as u8, ip)
                         } else {
-                            format!("[{}-{}] ({} bytes) {}: opcode={:02X}@{}", 
+                            format!("[{}-{}] ({} bytes) {}: opcode={:02X}@{}",
                                 ip, end_pos, instruction_size, format!("{:?}", opcode), opcode as u8, ip)
                         }
                     }

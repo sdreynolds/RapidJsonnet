@@ -368,31 +368,23 @@ impl<'a> VirtualMachine<'a> {
 pub fn execute(chunk: Chunk) -> Result<serde_json::Value, RuntimeError> {
     let mut vm = VirtualMachine::new(chunk);
 
-    match vm.interpret() {
-        Ok(value) => {
-            // Convert VM value to JSON value
-            let json_value = match value {
-                Value::Null => serde_json::Value::Null,
-                Value::Boolean(b) => serde_json::Value::Bool(b),
-                Value::Number(n) => serde_json::Value::Number(
-                    serde_json::Number::from_f64(n)
-                        .ok_or_else(|| RuntimeError {
-                            span: vm.get_current_span(),
-                            message: "Invalid number".to_string(),
-                            source_id: vm.current_chunk().source_id.to_string(),
-                        })?
-                ),
-            };
-            Ok(json_value)
-        }
-        Err(error) => {
-            // Print error report using ariadne
-            let _report = error.into_report();
-            // TODO: Need source content for proper error display
-            eprintln!("Runtime Error: {}", error.message);
-            Err(error)
-        }
-    }
+    let value = vm.interpret()?;
+
+    // Convert VM value to JSON value
+    let json_value = match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Boolean(b) => serde_json::Value::Bool(b),
+        Value::Number(n) => serde_json::Value::Number(
+            serde_json::Number::from_f64(n)
+                .ok_or_else(|| RuntimeError {
+                    span: vm.get_current_span(),
+                    message: "Invalid number".to_string(),
+                    source_id: vm.current_chunk().source_id.to_string(),
+                })?
+        ),
+        Value::String(s) => serde_json::Value::String(s),
+    };
+    Ok(json_value)
 }
 
 #[cfg(test)]

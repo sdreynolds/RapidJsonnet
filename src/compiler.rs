@@ -108,6 +108,10 @@ impl<'a> Compiler<'a> {
                 self.emit_constant(*value)?;
                 self.parser.advance()?; // consume the number
             }
+            Token::String(value) => {
+                self.emit_string_constant(value.clone())?;
+                self.parser.advance()?; // consume the string
+            }
             Token::True => {
                 self.emit_opcode(Opcode::LoadTrue, token.span);
                 self.parser.advance()?; // consume the true
@@ -192,6 +196,19 @@ impl<'a> Compiler<'a> {
 
     fn emit_constant(&mut self, value: f64) -> Result<u16, CompilerError> {
         let index = self.compiling_chunk.add_constant(Value::Number(value));
+        if index > u16::MAX as usize {
+            return Err(self.too_many_constants_error());
+        }
+
+        // Use the current token's span for the constant
+        let span = self.current_span();
+
+        self.compiling_chunk.write_opcode_u16(Opcode::LoadConst, index as u16, span);
+        Ok(index as u16)
+    }
+
+    fn emit_string_constant(&mut self, value: String) -> Result<u16, CompilerError> {
+        let index = self.compiling_chunk.add_constant(Value::String(value));
         if index > u16::MAX as usize {
             return Err(self.too_many_constants_error());
         }
@@ -397,5 +414,41 @@ mod tests {
         assert_eq!(chunk.code[0], Opcode::LoadTrue as u8);
         assert_eq!(chunk.code[1], Opcode::Not as u8);
         assert_eq!(chunk.code[2], Opcode::Return as u8);
+    }
+
+    #[test]
+    fn test_string_literal() {
+        let mut scanner = Scanner::new("\"hello world\"", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let chunk = compiler.compile().unwrap();
+        
+        assert_eq!(chunk.constants.len(), 1);
+        assert_eq!(chunk.constants[0], Value::String("hello world".to_string()));
+        assert_eq!(chunk.code.len(), 4); // LoadConst (3 bytes) + Return (1 byte)
+    }
+
+    #[test]
+    fn test_empty_string_literal() {
+        let mut scanner = Scanner::new("\"\"", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let chunk = compiler.compile().unwrap();
+        
+        assert_eq!(chunk.constants.len(), 1);
+        assert_eq!(chunk.constants[0], Value::String("".to_string()));
+        assert_eq!(chunk.code.len(), 4); // LoadConst (3 bytes) + Return (1 byte)
+    }
+
+    #[test]
+    fn test_string_with_logical_not() {
+        let mut scanner = Scanner::new("!\"test\"", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let chunk = compiler.compile().unwrap();
+        
+        assert_eq!(chunk.constants.len(), 1);
+        assert_eq!(chunk.constants[0], Value::String("test".to_string()));
+        assert_eq!(chunk.code.len(), 5); // LoadConst (3 bytes) + Not (1 byte) + Return (1 byte)
+        assert_eq!(chunk.code[0], Opcode::LoadConst as u8);
+        assert_eq!(chunk.code[3], Opcode::Not as u8);
+        assert_eq!(chunk.code[4], Opcode::Return as u8);
     }
 }
