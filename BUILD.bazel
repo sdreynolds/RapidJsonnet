@@ -2,17 +2,10 @@ load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
-filegroup(
-    name = "sample_files",
-    srcs = ["src/sample.tao"],
-    visibility = ["//visibility:public"],
-)
-
 
 rust_binary(
     name = "main",
     srcs = ["src/main.rs"],
-    compile_data = [":sample_files"],
     deps = [
         ":compiler",
         ":virtual_machine",
