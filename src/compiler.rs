@@ -51,6 +51,9 @@ impl<'a> Compiler<'a> {
         // Parse the entire expression
         self.parse_expr(0)?;
         
+        // Validate that no unexpected tokens remain after parsing the expression
+        self.check_end_of_input()?;
+        
         // Emit return opcode at the end - use the span of the last token or end of input
         let span = self.current_span();
         self.emit_opcode(Opcode::Return, span);
@@ -237,6 +240,25 @@ impl<'a> Compiler<'a> {
             0..0, // This error doesn't relate to a specific token location
             "Too many constants (maximum 65535)".to_string()
         )
+    }
+
+    fn unexpected_token_after_expression_error(&self, token: &TokenInfo) -> CompilerError {
+        let message = match &token.token {
+            Token::RightParen => "Unexpected ')' - no matching opening parenthesis".to_string(),
+            Token::RightBrace => "Unexpected '}' - no matching opening brace".to_string(), 
+            Token::RightBracket => "Unexpected ']' - no matching opening bracket".to_string(),
+            _ => format!("Unexpected token {:?} after complete expression", token.token),
+        };
+        self.make_error(token.span.clone(), message)
+    }
+
+    fn check_end_of_input(&self) -> Result<(), CompilerError> {
+        if !self.parser.is_at_end() {
+            if let Some(current) = self.parser.current_token() {
+                return Err(self.unexpected_token_after_expression_error(current));
+            }
+        }
+        Ok(())
     }
 
     fn get_binding_power(&self, token: &Token) -> Option<(u8, u8)> {
