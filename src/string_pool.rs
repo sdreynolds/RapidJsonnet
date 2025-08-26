@@ -101,16 +101,10 @@ impl StringPool {
         should_collect
     }
 
-    /// Trigger garbage collection if threshold is exceeded
-    pub fn maybe_collect(&mut self, roots: Vec<InternedString>) {
-        if self.should_collect() {
-            eprintln!("[GC] Starting collection with {} roots", roots.len());
-            self.collect_garbage(roots);
-        }
-    }
-
     /// Perform Mark & Sweep garbage collection
     pub fn collect_garbage(&mut self, roots: Vec<InternedString>) {
+        eprintln!("[GC] Starting collection with {} roots", roots.len());
+
         let initial_count = self.all_strings.len();
         let initial_bytes = self.bytes_allocated;
 

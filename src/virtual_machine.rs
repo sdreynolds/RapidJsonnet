@@ -122,7 +122,7 @@ impl<'a> VirtualMachine<'a> {
     }
 
     /// Get a mutable reference to an object from the SlotMap by its key
-    pub fn get_object_mut(&mut self, key: DefaultKey) -> Option<&mut JsonnetObject> {
+    pub fn get_object_muts(&mut self, key: DefaultKey) -> Option<&mut JsonnetObject> {
         self.objects.get_mut(key)
     }
 
@@ -141,6 +141,8 @@ impl<'a> VirtualMachine<'a> {
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
         loop {
             // Periodically trigger garbage collection
+            // I dislike this, and would rather have this call happen  whenver an allocation happens.
+            // This is slow because it acquires a lock on the String pool.
             self.maybe_collect_garbage();
 
             let chunk = self.current_chunk();
@@ -717,18 +719,15 @@ impl<'a> VirtualMachine<'a> {
 
     /// Trigger garbage collection if needed
     pub fn maybe_collect_garbage(&mut self) {
-        let (string_roots, object_roots) = self.collect_gc_roots();
 
-        // Run string garbage collection
         with_string_pool(|pool| {
-            pool.maybe_collect(string_roots);
-        });
-
-        // Run object garbage collection if threshold exceeded
-        if self.should_collect_objects() {
-            eprintln!("[VM GC] Starting object collection with {} roots", object_roots.len());
-            self.collect_objects(&object_roots);
-        }
+            if self.should_collect_objects() || pool.should_collect() {
+                let (string_roots, object_roots) = self.collect_gc_roots();
+                pool.collect_garbage(string_roots);
+                eprintln!("[VM GC] Starting object collection with {} roots", object_roots.len());
+                self.collect_objects(&object_roots);
+            }
+        })
     }
 
     /// Perform object garbage collection with threshold updating
