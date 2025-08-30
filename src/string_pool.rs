@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::cell::Cell;
-use std::sync::{Mutex, OnceLock};
 
 /// An interned string that points to shared string data
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,6 +20,15 @@ impl InternedStringData {
             content: content.into(),
             marked: Cell::new(false),
             size: content.len(),
+        }
+    }
+
+    fn new_owned(content: String) -> Self {
+        let size = content.len();
+        Self {
+            content: content.into_boxed_str(),
+            marked: Cell::new(false),
+            size,
         }
     }
 }
@@ -61,6 +69,28 @@ impl StringPool {
 
         // Track in collections
         self.strings.insert(content.to_string(), interned);
+        self.all_strings.push(interned);
+        self.bytes_allocated += size;
+
+        interned
+    }
+
+    /// Intern a string by moving ownership, returning an InternedString reference
+    pub fn intern_owned(&mut self, content: String) -> InternedString {
+        // Check if already interned
+        if let Some(&interned) = self.strings.get(&content) {
+            return interned;
+        }
+
+        // Create new interned string using move semantics
+        let size = content.len();
+        let data = Box::new(InternedStringData::new_owned(content.clone()));
+        let interned = InternedString {
+            ptr: Box::leak(data) as *const InternedStringData
+        };
+
+        // Track in collections (move happens here)
+        self.strings.insert(content, interned);
         self.all_strings.push(interned);
         self.bytes_allocated += size;
 
@@ -192,26 +222,8 @@ impl StringPool {
     }
 }
 
-// Global string pool instance
-static STRING_POOL: OnceLock<Mutex<StringPool>> = OnceLock::new();
-
-/// Get access to the global string pool
-pub fn with_string_pool<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut StringPool) -> R,
-{
-    let pool = STRING_POOL.get_or_init(|| Mutex::new(StringPool::new()));
-    let mut guard = pool.lock().unwrap();
-    f(&mut guard)
-}
-
-/// Convenience function to intern a string
-pub fn intern_string(content: &str) -> InternedString {
-    with_string_pool(|pool| pool.intern(content))
-}
-
 // Safety: InternedString is safe to send between threads as long as
-// the string pool is properly synchronized (which it is via Mutex)
+// the string pool is properly synchronized
 unsafe impl Send for InternedString {}
 unsafe impl Sync for InternedString {}
 

@@ -29,7 +29,7 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
     let mut scanner = Scanner::new(content, source_id);
     let compiler = Compiler::new(&mut scanner, source_id);
     match compiler.compile() {
-        Ok(chunk) => {
+        Ok((chunk, string_pool)) => {
             println!("✅ Compilation successful!");
             println!("📊 Generated {} bytes of bytecode with {} constants",
                      chunk.code.len(), chunk.constants.len());
@@ -39,7 +39,7 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
             debug_report.print((source_id, &source))?;
 
             // Execute the compiled chunk
-            match execute(chunk) {
+            match execute(chunk, string_pool) {
                 Ok(result) => {
                     println!("🎯 Execution result: {}", result);
                 }

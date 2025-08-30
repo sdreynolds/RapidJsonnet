@@ -1,13 +1,12 @@
 use ariadne::{Label, Report, ReportKind};
 use std::ops::Range;
-use string_pool::{InternedString, intern_string};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Literals
     Identifier(String),
     Number(f64),
-    String(InternedString),
+    String(String),
 
     // Keywords
     Assert,
@@ -81,6 +80,7 @@ pub struct Scanner<'a> {
     line: usize,
     column: usize,
     pub source_id: &'a str,
+    collected_strings: Vec<String>,
 }
 
 impl<'a> Scanner<'a> {
@@ -91,7 +91,13 @@ impl<'a> Scanner<'a> {
             line: 1,
             column: 1,
             source_id,
+            collected_strings: Vec::new(),
         }
+    }
+
+    /// Get reference to all collected strings from scanning
+    pub fn collected_strings(&self) -> &Vec<String> {
+        &self.collected_strings
     }
 
     pub fn scan_all(&mut self) -> Result<Vec<TokenInfo>, Vec<ScanError>> {
@@ -357,8 +363,10 @@ impl<'a> Scanner<'a> {
 
         self.advance(); // closing quote
 
+        self.collected_strings.push(value.clone());
+
         Ok(TokenInfo {
-            token: Token::String(intern_string(&value)),
+            token: Token::String(value),
             span: start..self.position,
         })
     }
@@ -445,8 +453,10 @@ impl<'a> Scanner<'a> {
             result.pop();
         }
 
+        self.collected_strings.push(result.clone());
+
         Ok(TokenInfo {
-            token: Token::String(intern_string(&result)),
+            token: Token::String(result),
             span: start..self.position,
         })
     }
@@ -619,9 +629,9 @@ mod tests {
 
     #[test]
     fn test_strings() {
-        assert_eq!(scan_single_token("\"hello\"").unwrap(), Token::String(intern_string("hello")));
-        assert_eq!(scan_single_token("'world'").unwrap(), Token::String(intern_string("world")));
-        assert_eq!(scan_single_token("@\"verbatim\"").unwrap(), Token::String(intern_string("verbatim")));
+        assert_eq!(scan_single_token("\"hello\"").unwrap(), Token::String("hello".to_string()));
+        assert_eq!(scan_single_token("'world'").unwrap(), Token::String("world".to_string()));
+        assert_eq!(scan_single_token("@\"verbatim\"").unwrap(), Token::String("verbatim".to_string()));
     }
 
     #[test]

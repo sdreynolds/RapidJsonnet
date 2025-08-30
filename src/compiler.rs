@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use chunk::{Chunk, Opcode, Value};
 use scanner::{Scanner, ScanError, Token, TokenInfo};
 use parser::Parser;
-use string_pool::{InternedString, intern_string};
+use string_pool::{InternedString, StringPool};
 
 pub type CompilerError = ScanError;
 
@@ -39,10 +39,21 @@ pub struct Compiler<'a> {
     parser: Parser<'a>,
     type_stack: Vec<ExpressionType>,
     constant_pool: HashMap<Value, u16>,
+    string_pool: StringPool,
+    string_lookup: HashMap<String, InternedString>,
 }
 
 impl<'a> Compiler<'a> {
     pub fn new(scanner: &'a mut Scanner<'a>, source_id: &'a str) -> Self {
+        let mut string_pool = StringPool::new();
+        let mut string_lookup = HashMap::new();
+        
+        // Batch intern all collected strings using move semantics
+        for raw_string in scanner.collected_strings() {
+            let interned = string_pool.intern_owned(raw_string.clone());
+            string_lookup.insert(raw_string.clone(), interned);
+        }
+        
         let parser = Parser::new(scanner);
         let compiling_chunk = Chunk::new(source_id);
 
@@ -51,6 +62,8 @@ impl<'a> Compiler<'a> {
             parser,
             type_stack: Vec::new(),
             constant_pool: HashMap::new(),
+            string_pool,
+            string_lookup,
         }
     }
 
@@ -81,7 +94,7 @@ impl<'a> Compiler<'a> {
         Ok(index_u16)
     }
 
-    pub fn compile(mut self) -> Result<Chunk<'a>, CompilerError> {
+    pub fn compile(mut self) -> Result<(Chunk<'a>, StringPool), CompilerError> {
         // Advance to get the first token
         self.parser.advance()?;
 
@@ -95,7 +108,7 @@ impl<'a> Compiler<'a> {
         let span = self.current_span();
         self.emit_opcode(Opcode::Return, span);
 
-        Ok(self.compiling_chunk)
+        Ok((self.compiling_chunk, self.string_pool))
     }
 
     fn parse_expr(&mut self, min_bp: u8) -> Result<(), CompilerError> {
@@ -170,7 +183,15 @@ impl<'a> Compiler<'a> {
                 self.parser.advance()?; // consume the number
             }
             Token::String(value) => {
-                self.emit_string_constant(*value)?;
+                let interned = if let Some(&existing) = self.string_lookup.get(value) {
+                    existing
+                } else {
+                    // Handle strings not collected during scanning (e.g., in tests)
+                    let new_interned = self.string_pool.intern(value);
+                    self.string_lookup.insert(value.clone(), new_interned);
+                    new_interned
+                };
+                self.emit_string_constant(interned)?;
                 self.push_type(ExpressionType::String);
                 self.parser.advance()?; // consume the string
             }
@@ -524,7 +545,13 @@ impl<'a> Compiler<'a> {
                         self.parser.advance()?; // consume identifier
                         
                         // Emit string constant for property name
-                        let interned_name = intern_string(name);
+                        let interned_name = if let Some(&existing) = self.string_lookup.get(name) {
+                            existing
+                        } else {
+                            let new_interned = self.string_pool.intern(name);
+                            self.string_lookup.insert(name.clone(), new_interned);
+                            new_interned
+                        };
                         let _index = self.emit_string_constant(interned_name)?;
                         
                         // Emit ObjectIndex opcode to access property
@@ -589,14 +616,27 @@ impl<'a> Compiler<'a> {
                 match &key_token.token {
                     Token::String(key_value) => {
                         // Push the key as a string constant  
-                        let _key_index = self.emit_string_constant(*key_value)?;
+                        let interned_key = if let Some(&existing) = self.string_lookup.get(key_value) {
+                            existing
+                        } else {
+                            let new_interned = self.string_pool.intern(key_value);
+                            self.string_lookup.insert(key_value.clone(), new_interned);
+                            new_interned
+                        };
+                        let _key_index = self.emit_string_constant(interned_key)?;
                         self.push_type(ExpressionType::String);
                         
                         self.parser.advance()?; // consume the key
                     }
                     Token::Identifier(key_name) => {
                         // Convert identifier to interned string and push as constant
-                        let interned_key = intern_string(key_name);
+                        let interned_key = if let Some(&existing) = self.string_lookup.get(key_name) {
+                            existing
+                        } else {
+                            let new_interned = self.string_pool.intern(key_name);
+                            self.string_lookup.insert(key_name.clone(), new_interned);
+                            new_interned
+                        };
                         let _key_index = self.emit_string_constant(interned_key)?;
                         self.push_type(ExpressionType::String);
                         
@@ -671,7 +711,7 @@ mod tests {
     fn test_simple_number() {
         let mut scanner = Scanner::new("42", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, _string_pool) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 1);
         assert_eq!(chunk.constants[0], Value::Number(42.0));
@@ -682,7 +722,7 @@ mod tests {
     fn test_simple_addition() {
         let mut scanner = Scanner::new("3 + 4", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, _string_pool) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 2);
         assert_eq!(chunk.constants[0], Value::Number(3.0));
@@ -695,7 +735,7 @@ mod tests {
     fn test_unary_minus() {
         let mut scanner = Scanner::new("-42", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, _string_pool) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 1);
         assert_eq!(chunk.constants[0], Value::Number(42.0));
@@ -707,7 +747,7 @@ mod tests {
     fn test_grouped_expression() {
         let mut scanner = Scanner::new("(1 + 2) * 3", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, _string_pool) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 3);
         // LoadConst (3) + LoadConst (3) + Add (1) + LoadConst (3) + Mul (1) + Return (1) = 12 bytes
@@ -718,7 +758,7 @@ mod tests {
     fn test_precedence() {
         let mut scanner = Scanner::new("2 + 3 * 4", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, _string_pool) = compiler.compile().unwrap();
 
         // Should parse as 2 + (3 * 4), so constants should be in order 2, 3, 4
         assert_eq!(chunk.constants.len(), 3);
@@ -731,7 +771,7 @@ mod tests {
     fn test_true_literal() {
         let mut scanner = Scanner::new("true", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, _string_pool) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 2); // LoadTrue (1 byte) + Return (1 byte)
@@ -743,7 +783,7 @@ mod tests {
     fn test_false_literal() {
         let mut scanner = Scanner::new("false", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, _string_pool) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 2); // LoadFalse (1 byte) + Return (1 byte)
@@ -755,7 +795,7 @@ mod tests {
     fn test_null_literal() {
         let mut scanner = Scanner::new("null", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, _string_pool) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 2); // LoadNull (1 byte) + Return (1 byte)
@@ -767,7 +807,7 @@ mod tests {
     fn test_logical_not_with_true() {
         let mut scanner = Scanner::new("!true", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, _string_pool) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 3); // LoadTrue (1 byte) + Not (1 byte) + Return (1 byte)
@@ -780,10 +820,11 @@ mod tests {
     fn test_string_literal() {
         let mut scanner = Scanner::new("\"hello world\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, mut string_pool) = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 1);
-        assert_eq!(chunk.constants[0], Value::String(intern_string("hello world")));
+        let expected_interned = string_pool.intern("hello world");
+        assert_eq!(chunk.constants[0], Value::String(expected_interned));
         assert_eq!(chunk.code.len(), 4); // LoadConst (3 bytes) + Return (1 byte)
     }
 
@@ -791,10 +832,11 @@ mod tests {
     fn test_empty_string_literal() {
         let mut scanner = Scanner::new("\"\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, mut string_pool) = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 1);
-        assert_eq!(chunk.constants[0], Value::String(intern_string("")));
+        let expected_interned = string_pool.intern("");
+        assert_eq!(chunk.constants[0], Value::String(expected_interned));
         assert_eq!(chunk.code.len(), 4); // LoadConst (3 bytes) + Return (1 byte)
     }
 
@@ -802,10 +844,11 @@ mod tests {
     fn test_string_with_logical_not() {
         let mut scanner = Scanner::new("!\"test\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let chunk = compiler.compile().unwrap();
+        let (chunk, mut string_pool) = compiler.compile().unwrap();
         
         assert_eq!(chunk.constants.len(), 1);
-        assert_eq!(chunk.constants[0], Value::String(intern_string("test")));
+        let expected_interned = string_pool.intern("test");
+        assert_eq!(chunk.constants[0], Value::String(expected_interned));
         assert_eq!(chunk.code.len(), 5); // LoadConst (3 bytes) + Not (1 byte) + Return (1 byte)
         assert_eq!(chunk.code[0], Opcode::LoadConst as u8);
         assert_eq!(chunk.code[3], Opcode::Not as u8);

@@ -1,6 +1,6 @@
 use std::ops::Range;
 use chunk::{Chunk, Opcode, Value, RuntimeError, JsonnetObject};
-use string_pool::{intern_string, InternedString, with_string_pool};
+use string_pool::{InternedString, StringPool};
 use slotmap::{SlotMap, DefaultKey};
 
 /// Virtual machine for executing Jsonnet bytecode
@@ -19,11 +19,13 @@ pub struct VirtualMachine<'a> {
     objects_allocated_bytes: usize,
     /// Threshold for triggering object garbage collection
     next_object_garbage_collection: usize,
+    /// String pool for string interning and GC
+    string_pool: StringPool,
 }
 
 impl<'a> VirtualMachine<'a> {
-    /// Create a new virtual machine with the given starting chunk
-    pub fn new(chunk: Chunk<'a>) -> Self {
+    /// Create a new virtual machine with the given starting chunk and string pool
+    pub fn new(chunk: Chunk<'a>, string_pool: StringPool) -> Self {
         let mut vm = Self {
             chunks: Vec::new(),
             current_chunk: 0,
@@ -32,6 +34,7 @@ impl<'a> VirtualMachine<'a> {
             objects: SlotMap::new(),
             objects_allocated_bytes: 0,
             next_object_garbage_collection: 1024 * 1024, // Initial 1MB threshold
+            string_pool,
         };
 
         vm.chunks.push(chunk);
@@ -247,7 +250,8 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Object(_) => unreachable!(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
-                            self.push(Value::String(intern_string(&result_str)))?;
+                            let interned = self.string_pool.intern(&result_str);
+                            self.push(Value::String(interned))?;
                         }
                         // Numeric addition for all other cases
                         _ => {
@@ -350,7 +354,8 @@ impl<'a> VirtualMachine<'a> {
                     let result = match (&a, &b) {
                         (Value::String(s1), Value::String(s2)) => {
                             let result_str = format!("{}{}", s1.as_str(), s2.as_str());
-                            Value::String(intern_string(&result_str))
+                            let interned = self.string_pool.intern(&result_str);
+                            Value::String(interned)
                         }
                         _ => {
                             // This should not happen if compiler type tracking is correct
@@ -370,7 +375,8 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Object(_) => "{object}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
-                            Value::String(intern_string(&result_str))
+                            let interned = self.string_pool.intern(&result_str);
+                            Value::String(interned)
                         }
                     };
 
@@ -719,15 +725,12 @@ impl<'a> VirtualMachine<'a> {
 
     /// Trigger garbage collection if needed
     pub fn maybe_collect_garbage(&mut self) {
-
-        with_string_pool(|pool| {
-            if self.should_collect_objects() || pool.should_collect() {
-                let (string_roots, object_roots) = self.collect_gc_roots();
-                pool.collect_garbage(string_roots);
-                eprintln!("[VM GC] Starting object collection with {} roots", object_roots.len());
-                self.collect_objects(&object_roots);
-            }
-        })
+        if self.should_collect_objects() || self.string_pool.should_collect() {
+            let (string_roots, object_roots) = self.collect_gc_roots();
+            self.string_pool.collect_garbage(string_roots);
+            eprintln!("[VM GC] Starting object collection with {} roots", object_roots.len());
+            self.collect_objects(&object_roots);
+        }
     }
 
     /// Perform object garbage collection with threshold updating
@@ -848,8 +851,8 @@ impl<'a> VirtualMachine<'a> {
 }
 
 /// Main execution function - entry point for running Jsonnet bytecode
-pub fn execute(chunk: Chunk) -> Result<serde_json::Value, RuntimeError> {
-    let mut vm = VirtualMachine::new(chunk);
+pub fn execute(chunk: Chunk, string_pool: StringPool) -> Result<serde_json::Value, RuntimeError> {
+    let mut vm = VirtualMachine::new(chunk, string_pool);
 
     let value = vm.interpret()?;
 
@@ -885,7 +888,8 @@ mod tests {
         chunk.write_opcode(Opcode::LoadNull, 0..5);
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Null);
@@ -897,7 +901,8 @@ mod tests {
         chunk.write_opcode(Opcode::LoadTrue, 0..5);
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(true));
@@ -909,7 +914,8 @@ mod tests {
         chunk.write_opcode(Opcode::LoadFalse, 0..5);
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(false));
@@ -922,7 +928,8 @@ mod tests {
         chunk.write_opcode_u16(Opcode::LoadConst, const_index as u16, 0..5);
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(42.0));
@@ -939,7 +946,8 @@ mod tests {
         chunk.write_opcode(Opcode::Add, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(15.0));
@@ -956,7 +964,8 @@ mod tests {
         chunk.write_opcode(Opcode::Sub, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(7.0));
@@ -973,7 +982,8 @@ mod tests {
         chunk.write_opcode(Opcode::Mul, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(42.0));
@@ -990,7 +1000,8 @@ mod tests {
         chunk.write_opcode(Opcode::Div, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(5.0));
@@ -1007,7 +1018,8 @@ mod tests {
         chunk.write_opcode(Opcode::Div, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret();
 
         assert!(result.is_err());
@@ -1025,7 +1037,8 @@ mod tests {
         chunk.write_opcode(Opcode::Lt, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(true));
@@ -1042,7 +1055,8 @@ mod tests {
         chunk.write_opcode(Opcode::Shl, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(32.0)); // 8 << 2 = 32
@@ -1056,7 +1070,8 @@ mod tests {
         chunk.write_opcode(Opcode::LogicalAnd, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(false));
@@ -1070,7 +1085,8 @@ mod tests {
         chunk.write_opcode(Opcode::LogicalOr, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(true));
@@ -1085,7 +1101,8 @@ mod tests {
         chunk.write_opcode(Opcode::Neg, 5..10);
         chunk.write_opcode(Opcode::Return, 10..15);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(-42.0));
@@ -1098,7 +1115,8 @@ mod tests {
         chunk.write_opcode(Opcode::Not, 5..10);
         chunk.write_opcode(Opcode::Return, 10..15);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(false));
@@ -1115,7 +1133,8 @@ mod tests {
         chunk.write_opcode(Opcode::Pop, 10..15); // Pop 2.0
         chunk.write_opcode(Opcode::Return, 15..20); // Return 1.0
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(1.0));
@@ -1131,7 +1150,8 @@ mod tests {
         chunk.write_opcode(Opcode::Add, 10..15); // 42 + 42
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(84.0));
@@ -1149,7 +1169,8 @@ mod tests {
         chunk.write_opcode(Opcode::Sub, 15..20); // 3 - 10 = -7
         chunk.write_opcode(Opcode::Return, 20..25);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(-7.0));
@@ -1161,7 +1182,8 @@ mod tests {
         chunk.write_opcode(Opcode::Add, 0..5); // Try to add with empty stack
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret();
 
         assert!(result.is_err());
@@ -1174,7 +1196,8 @@ mod tests {
         chunk.write_opcode_u16(Opcode::LoadConst, 999, 0..5); // Invalid index
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret();
 
         assert!(result.is_err());
@@ -1187,7 +1210,8 @@ mod tests {
         chunk.write_opcode(Opcode::LoadNull, 0..5);
         // Missing Return opcode
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret();
 
         assert!(result.is_err());
@@ -1200,7 +1224,8 @@ mod tests {
         chunk.write_opcode(Opcode::CreateArray, 0..5); // Unimplemented opcode
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret();
 
         assert!(result.is_err());
@@ -1225,7 +1250,8 @@ mod tests {
         chunk.write_opcode(Opcode::Sub, 30..35);  // 27
         chunk.write_opcode(Opcode::Return, 35..40);
 
-        let mut vm = VirtualMachine::new(chunk);
+        let string_pool = StringPool::new();
+        let mut vm = VirtualMachine::new(chunk, string_pool);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(27.0));
