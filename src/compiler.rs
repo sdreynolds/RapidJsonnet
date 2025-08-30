@@ -47,13 +47,13 @@ impl<'a> Compiler<'a> {
     pub fn new(scanner: &'a mut Scanner<'a>, source_id: &'a str) -> Self {
         let mut string_pool = StringPool::new();
         let mut string_lookup = HashMap::new();
-        
-        // Batch intern all collected strings using move semantics
+
+        // Batch intern all collected strings using move semantics with GC awareness
         for raw_string in scanner.collected_strings() {
-            let interned = string_pool.intern_owned(raw_string.clone());
+            let interned = string_pool.intern_owned_with_gc(raw_string.clone(), Vec::new());
             string_lookup.insert(raw_string.clone(), interned);
         }
-        
+
         let parser = Parser::new(scanner);
         let compiling_chunk = Chunk::new(source_id);
 
@@ -187,7 +187,7 @@ impl<'a> Compiler<'a> {
                     existing
                 } else {
                     // Handle strings not collected during scanning (e.g., in tests)
-                    let new_interned = self.string_pool.intern(value);
+                    let new_interned = self.string_pool.intern_with_gc(value, Vec::new());
                     self.string_lookup.insert(value.clone(), new_interned);
                     new_interned
                 };
@@ -295,7 +295,7 @@ impl<'a> Compiler<'a> {
                 // Check operand types for optimization
                 let right_type = self.pop_type();
                 let left_type = self.pop_type();
-                
+
                 // If both operands are known to be strings, use StringConcat
                 if left_type == ExpressionType::String && right_type == ExpressionType::String {
                     self.emit_opcode(Opcode::StringConcat, token.span);
@@ -303,7 +303,7 @@ impl<'a> Compiler<'a> {
                 } else {
                     // Fall back to Add for mixed/unknown types
                     self.emit_opcode(Opcode::Add, token.span);
-                    
+
                     // Determine result type
                     if left_type == ExpressionType::String || right_type == ExpressionType::String {
                         self.push_type(ExpressionType::String);
@@ -532,7 +532,7 @@ impl<'a> Compiler<'a> {
         match &token.token {
             Token::Dot => {
                 self.parser.advance()?; // consume '.'
-                
+
                 // Expect an identifier for property name
                 let property_token = self.parser.current_token().cloned()
                     .ok_or_else(|| {
@@ -543,20 +543,21 @@ impl<'a> Compiler<'a> {
                 match &property_token.token {
                     Token::Identifier(name) => {
                         self.parser.advance()?; // consume identifier
-                        
+
                         // Emit string constant for property name
                         let interned_name = if let Some(&existing) = self.string_lookup.get(name) {
                             existing
                         } else {
-                            let new_interned = self.string_pool.intern(name);
+                            let new_interned = self.string_pool.intern_with_gc(name, Vec::new());
                             self.string_lookup.insert(name.clone(), new_interned);
                             new_interned
                         };
+
                         let _index = self.emit_string_constant(interned_name)?;
-                        
+
                         // Emit ObjectIndex opcode to access property
                         self.emit_opcode(Opcode::ObjectIndex, property_token.span);
-                        
+
                         // Property access can return any type
                         self.push_type(ExpressionType::Unknown);
                     }
@@ -570,16 +571,16 @@ impl<'a> Compiler<'a> {
             }
             Token::LeftBracket => {
                 self.parser.advance()?; // consume '['
-                
+
                 // Parse the expression inside brackets
                 self.parse_expr(0)?;
-                
+
                 // Expect closing bracket
                 self.parser.consume(Token::RightBracket, "Expected ']' after property expression")?;
-                
+
                 // Emit ObjectIndex opcode to access property
                 self.emit_opcode(Opcode::ObjectIndex, token.span);
-                
+
                 // Property access can return any type
                 self.push_type(ExpressionType::Unknown);
             }
@@ -597,9 +598,9 @@ impl<'a> Compiler<'a> {
     /// Parse an object literal: { key1: value1, key2: value2, ... }
     fn parse_object_literal(&mut self, start_token: &TokenInfo) -> Result<(), CompilerError> {
         self.parser.advance()?; // consume '{'
-        
+
         let mut field_count = 0u16;
-        
+
         // Handle empty object: {}
         if let Some(current) = self.parser.current_token() {
             if current.token == Token::RightBrace {
@@ -608,24 +609,24 @@ impl<'a> Compiler<'a> {
                 return Ok(());
             }
         }
-        
+
         // Parse field pairs: key: value
         loop {
             // Parse the key (can be a string literal or identifier)
             if let Some(key_token) = self.parser.current_token() {
                 match &key_token.token {
                     Token::String(key_value) => {
-                        // Push the key as a string constant  
+                        // Push the key as a string constant
                         let interned_key = if let Some(&existing) = self.string_lookup.get(key_value) {
                             existing
                         } else {
-                            let new_interned = self.string_pool.intern(key_value);
+                            let new_interned = self.string_pool.intern_with_gc(key_value, Vec::new());
                             self.string_lookup.insert(key_value.clone(), new_interned);
                             new_interned
                         };
                         let _key_index = self.emit_string_constant(interned_key)?;
                         self.push_type(ExpressionType::String);
-                        
+
                         self.parser.advance()?; // consume the key
                     }
                     Token::Identifier(key_name) => {
@@ -633,13 +634,13 @@ impl<'a> Compiler<'a> {
                         let interned_key = if let Some(&existing) = self.string_lookup.get(key_name) {
                             existing
                         } else {
-                            let new_interned = self.string_pool.intern(key_name);
+                            let new_interned = self.string_pool.intern_with_gc(key_name, Vec::new());
                             self.string_lookup.insert(key_name.clone(), new_interned);
                             new_interned
                         };
                         let _key_index = self.emit_string_constant(interned_key)?;
                         self.push_type(ExpressionType::String);
-                        
+
                         self.parser.advance()?; // consume the key
                     }
                     _ => {
@@ -652,24 +653,24 @@ impl<'a> Compiler<'a> {
             } else {
                 return Err(self.unexpected_eof_error(start_token.span.clone()));
             }
-            
+
             // Expect ':' after key
             self.parser.consume(
                 Token::Operator(":".to_string()),
                 "Expected ':' after object key"
             )?;
-            
+
             // Parse the value expression
             self.parse_expr(0)?;
-            
+
             field_count += 1;
-            
+
             // Check for more fields or end of object
             if let Some(current) = self.parser.current_token() {
                 match &current.token {
                     Token::Comma => {
                         self.parser.advance()?; // consume ','
-                        
+
                         // Check for trailing comma followed by '}'
                         if let Some(next) = self.parser.current_token() {
                             if next.token == Token::RightBrace {
@@ -692,13 +693,13 @@ impl<'a> Compiler<'a> {
                 return Err(self.unexpected_eof_error(start_token.span.clone()));
             }
         }
-        
+
         // Consume the closing '}'
         self.parser.consume(Token::RightBrace, "Expected '}' to close object literal")?;
-        
+
         // Emit CreateObject opcode with field count
         self.compiling_chunk.write_opcode_u16(Opcode::CreateObject, field_count, start_token.span.clone());
-        
+
         Ok(())
     }
 }
@@ -821,7 +822,7 @@ mod tests {
         let mut scanner = Scanner::new("\"hello world\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let (chunk, mut string_pool) = compiler.compile().unwrap();
-        
+
         assert_eq!(chunk.constants.len(), 1);
         let expected_interned = string_pool.intern("hello world");
         assert_eq!(chunk.constants[0], Value::String(expected_interned));
@@ -833,7 +834,7 @@ mod tests {
         let mut scanner = Scanner::new("\"\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let (chunk, mut string_pool) = compiler.compile().unwrap();
-        
+
         assert_eq!(chunk.constants.len(), 1);
         let expected_interned = string_pool.intern("");
         assert_eq!(chunk.constants[0], Value::String(expected_interned));
@@ -845,7 +846,7 @@ mod tests {
         let mut scanner = Scanner::new("!\"test\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let (chunk, mut string_pool) = compiler.compile().unwrap();
-        
+
         assert_eq!(chunk.constants.len(), 1);
         let expected_interned = string_pool.intern("test");
         assert_eq!(chunk.constants[0], Value::String(expected_interned));

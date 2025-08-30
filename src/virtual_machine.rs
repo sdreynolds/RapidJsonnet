@@ -119,6 +119,38 @@ impl<'a> VirtualMachine<'a> {
         self.objects.insert(object)
     }
 
+    /// GC-aware object allocation that triggers collection if needed
+    pub fn allocate_object_with_gc(&mut self, object: JsonnetObject, string_pool: &mut StringPool, string_roots: Vec<InternedString>) -> DefaultKey {
+        // Check if GC should run before allocation
+        if self.should_collect() || string_pool.should_collect() {
+            // Collect from object roots (get object keys from stack and all objects)
+            let mut object_roots = Vec::new();
+            
+            // Add objects from the stack as roots
+            for value in &self.stack {
+                if let Value::Object(key) = value {
+                    object_roots.push(*key);
+                }
+            }
+            
+            // Add all existing objects as roots (simplified approach)
+            for (key, _) in &self.objects {
+                object_roots.push(key);
+            }
+            
+            // Collect strings first (may free object references)  
+            string_pool.collect_garbage(string_roots);
+            
+            // Then collect objects
+            self.collect_objects(&object_roots);
+        }
+        
+        // Perform the allocation
+        let object_size = object.allocated_bytes();
+        self.objects_allocated_bytes += object_size;
+        self.objects.insert(object)
+    }
+
     /// Get an object from the SlotMap by its key
     pub fn get_object(&self, key: DefaultKey) -> Option<&JsonnetObject> {
         self.objects.get(key)
@@ -137,17 +169,13 @@ impl<'a> VirtualMachine<'a> {
     /// Create an empty object and return its key
     pub fn create_empty_object(&mut self) -> DefaultKey {
         let object = JsonnetObject::new();
+        // TODO: Use GC-aware allocation - requires StringPool refactoring
         self.allocate_object(object)
     }
 
     /// Main interpretation loop
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
         loop {
-            // Periodically trigger garbage collection
-            // I dislike this, and would rather have this call happen  whenver an allocation happens.
-            // This is slow because it acquires a lock on the String pool.
-            self.maybe_collect_garbage();
-
             let chunk = self.current_chunk();
 
             // Check if we've reached the end
@@ -216,6 +244,7 @@ impl<'a> VirtualMachine<'a> {
                                 }
 
                                 let merged_object = JsonnetObject::with_properties(merged_properties);
+                                // TODO: Use GC-aware allocation - requires StringPool refactoring
                                 let merged_key = self.allocate_object(merged_object);
                                 self.push(Value::Object(merged_key))?;
                             } else {
@@ -250,7 +279,8 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Object(_) => unreachable!(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
-                            let interned = self.string_pool.intern(&result_str);
+                            let roots = self.get_string_roots();
+                            let interned = self.string_pool.intern_with_gc(&result_str, roots);
                             self.push(Value::String(interned))?;
                         }
                         // Numeric addition for all other cases
@@ -354,7 +384,8 @@ impl<'a> VirtualMachine<'a> {
                     let result = match (&a, &b) {
                         (Value::String(s1), Value::String(s2)) => {
                             let result_str = format!("{}{}", s1.as_str(), s2.as_str());
-                            let interned = self.string_pool.intern(&result_str);
+                            let roots = self.get_string_roots();
+                            let interned = self.string_pool.intern_with_gc(&result_str, roots);
                             Value::String(interned)
                         }
                         _ => {
@@ -375,7 +406,8 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Object(_) => "{object}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
-                            let interned = self.string_pool.intern(&result_str);
+                            let roots = self.get_string_roots();
+                            let interned = self.string_pool.intern_with_gc(&result_str, roots);
                             Value::String(interned)
                         }
                     };
@@ -529,6 +561,7 @@ impl<'a> VirtualMachine<'a> {
                     }
 
                     let object = JsonnetObject::with_properties(properties);
+                    // TODO: Use GC-aware allocation - requires StringPool refactoring
                     let object_key = self.allocate_object(object);
                     self.push(Value::Object(object_key))?;
                 }
@@ -588,6 +621,7 @@ impl<'a> VirtualMachine<'a> {
                             }
 
                             let merged_object = JsonnetObject::with_properties(merged_properties);
+                            // TODO: Use GC-aware allocation - requires StringPool refactoring
                             let merged_key = self.allocate_object(merged_object);
                             self.push(Value::Object(merged_key))?;
                         } else {
@@ -706,31 +740,45 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
+    /// Get string roots for GC-aware string allocation
+    fn get_string_roots(&self) -> Vec<InternedString> {
+        let mut roots = Vec::new();
+        
+        // Add strings from the stack as roots
+        for value in &self.stack {
+            if let Value::String(s) = value {
+                roots.push(*s);
+            }
+        }
+        
+        // Add strings from object properties as roots
+        for (_, object) in &self.objects {
+            for (key, value) in &object.properties {
+                roots.push(*key); // Property key is an InternedString
+                if let Value::String(s) = value {
+                    roots.push(*s); // Property value if it's a string
+                }
+            }
+        }
+        
+        roots
+    }
+
     /// Check if object garbage collection should be triggered
-    fn should_collect_objects(&self) -> bool {
+    fn should_collect(&self) -> bool {
         #[cfg(feature = "stress_gc")]
         {
-            eprintln!("[VM GC] Stress GC enabled - triggering object collection ({} objects, {} bytes)",
+            eprintln!("[GC] Stress GC enabled - triggering object collection ({} objects, {} bytes)",
                      self.objects.len(), self.objects_allocated_bytes);
             return true;
         }
 
         let should_collect = self.objects_allocated_bytes >= self.next_object_garbage_collection;
         if should_collect {
-            eprintln!("[VM GC] Threshold exceeded - triggering object collection ({} bytes >= {} bytes, {} objects)",
+            eprintln!("[GC] Object threshold exceeded - triggering object collection ({} bytes >= {} bytes, {} objects)",
                      self.objects_allocated_bytes, self.next_object_garbage_collection, self.objects.len());
         }
         should_collect
-    }
-
-    /// Trigger garbage collection if needed
-    pub fn maybe_collect_garbage(&mut self) {
-        if self.should_collect_objects() || self.string_pool.should_collect() {
-            let (string_roots, object_roots) = self.collect_gc_roots();
-            self.string_pool.collect_garbage(string_roots);
-            eprintln!("[VM GC] Starting object collection with {} roots", object_roots.len());
-            self.collect_objects(&object_roots);
-        }
     }
 
     /// Perform object garbage collection with threshold updating
@@ -847,6 +895,22 @@ impl<'a> VirtualMachine<'a> {
                 }
             }
         }
+    }
+}
+
+impl<'a> Drop for VirtualMachine<'a> {
+    fn drop(&mut self) {
+        let object_count = self.objects.len();
+        let allocated_bytes = self.objects_allocated_bytes;
+        
+        eprintln!("[VirtualMachine] Deallocating {} objects ({} bytes) on drop", 
+                 object_count, allocated_bytes);
+        
+        // Explicitly clear to break any potential circular references
+        self.objects.clear();
+        
+        eprintln!("[VirtualMachine] Object cleanup complete");
+        // StringPool will handle its own cleanup via its Drop impl
     }
 }
 

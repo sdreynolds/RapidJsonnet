@@ -75,8 +75,20 @@ impl StringPool {
         interned
     }
 
+    /// GC-aware string interning that triggers collection if needed
+    pub fn intern_with_gc(&mut self, content: &str, additional_roots: Vec<InternedString>) -> InternedString {
+        // During compilation, be conservative about GC to avoid collecting needed strings
+        // Only collect if we have proper root information
+        if self.should_collect() && !additional_roots.is_empty() {
+            self.collect_garbage(additional_roots);
+        }
+
+        // Perform the allocation (allocation tracking is already done in intern)
+        self.intern(content)
+    }
+
     /// Intern a string by moving ownership, returning an InternedString reference
-    pub fn intern_owned(&mut self, content: String) -> InternedString {
+    fn intern_owned(&mut self, content: String) -> InternedString {
         // Check if already interned
         if let Some(&interned) = self.strings.get(&content) {
             return interned;
@@ -95,6 +107,18 @@ impl StringPool {
         self.bytes_allocated += size;
 
         interned
+    }
+
+    /// GC-aware string interning by moving ownership
+    pub fn intern_owned_with_gc(&mut self, content: String, additional_roots: Vec<InternedString>) -> InternedString {
+        // During compilation, be conservative about GC to avoid collecting needed strings
+        // Only collect if we have proper root information
+        if self.should_collect() && !additional_roots.is_empty() {
+            self.collect_garbage(additional_roots);
+        }
+
+        // Perform the allocation (allocation tracking is already done in intern_owned)
+        self.intern_owned(content)
     }
 
     /// Remove a string from the pool (used during GC sweep)
@@ -219,6 +243,23 @@ impl StringPool {
             self.next_garbage_collection,
             self.all_strings.len()
         )
+    }
+}
+
+impl Drop for StringPool {
+    fn drop(&mut self) {
+        eprintln!("[StringPool] Deallocating {} remaining strings on drop", self.all_strings.len());
+
+        // Deallocate all remaining interned strings to prevent memory leaks
+        for &string in &self.all_strings {
+            unsafe {
+                // Convert the raw pointer back to a Box and let it drop
+                let _boxed = Box::from_raw(string.ptr as *mut InternedStringData);
+                // Box automatically drops and deallocates when it goes out of scope
+            }
+        }
+
+        eprintln!("[StringPool] Cleanup complete - {} bytes deallocated", self.bytes_allocated);
     }
 }
 
