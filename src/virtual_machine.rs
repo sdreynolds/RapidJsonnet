@@ -163,25 +163,18 @@ impl<'a> VirtualMachine<'a> {
                     match (&a, &b) {
                         // Object merging (according to Jsonnet spec)
                         (Value::Object(left_key), Value::Object(right_key)) => {
-                            if let (Some(left_object), Some(right_object)) = (self.memory_manager.load_object(*left_key), self.memory_manager.load_object(*right_key)) {
-                                // Create merged properties starting with left object
-                                let mut merged_properties = left_object.properties.clone();
+                            let (left_object, right_object) = (self.memory_manager.load_object(*left_key), self.memory_manager.load_object(*right_key));
+                            // Create merged properties starting with left object
+                            let mut merged_properties = left_object.properties.clone();
 
-                                // Override/add properties from right object
-                                for (key, value) in &right_object.properties {
-                                    merged_properties.insert(*key, value.clone());
-                                }
-
-                                let merged_allocation = self.memory_manager.allocate_object_with_properties(merged_properties);
-
-                                self.push(Value::Object(merged_allocation.index))?;
-                            } else {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "Invalid object reference in merge".to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                            // Override/add properties from right object
+                            for (key, value) in &right_object.properties {
+                                merged_properties.insert(*key, value.clone());
                             }
+
+                            let merged_allocation = self.memory_manager.allocate_object_with_properties(merged_properties);
+
+                            self.push(Value::Object(merged_allocation.index))?;
                         }
                         (Value::Object(_), _) | (_, Value::Object(_)) => {
                             return Err(RuntimeError {
@@ -193,18 +186,14 @@ impl<'a> VirtualMachine<'a> {
                         // String concatenation if either operand is a string
                         (Value::String(_), _) | (_, Value::String(_)) => {
                             let a_str = match &a {
-                                Value::String(s) => self.memory_manager.load_string(*s)
-                                    .expect("Tried to reference {:?} which doesn't exist anymore")
-                                    .content.as_str().to_owned(),
+                                Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => unreachable!(),
                             };
                             let b_str = match &b {
-                                Value::String(s) => self.memory_manager.load_string(*s)
-                                    .expect("Tried to reference {:?} which doesn't exist anymore")
-                                    .content.as_str().to_owned(),
+                                Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
@@ -315,12 +304,8 @@ impl<'a> VirtualMachine<'a> {
                     let result = match (&a, &b) {
                         (Value::String(s1), Value::String(s2)) => {
                             let result_str = format!("{}{}",
-                                                     self.memory_manager.load_string(*s1)
-                                                     .expect("Attempted to load string {:?} that doesn't exist")
-                                                     .content.as_str(),
-                                                     self.memory_manager.load_string(*s2)
-                                                     .expect("Attempted to load string {:?} that doesn't exist")
-                                                     .content.as_str());
+                                                     self.memory_manager.load_string(*s1),
+                                                     self.memory_manager.load_string(*s2));
                             let interned = self.memory_manager.allocate_string(&result_str);
                             Value::String(interned.index)
                         }
@@ -328,17 +313,14 @@ impl<'a> VirtualMachine<'a> {
                             // This should not happen if compiler type tracking is correct
                             // Fall back to safe conversion
                             let a_str = match &a {
-                                Value::String(s) => self.memory_manager.load_string(*s)
-                                    .expect("String for {:?} should exist").content.as_str().to_owned(),
+                                Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                             };
                             let b_str = match &b {
-                                Value::String(s) => self.memory_manager.load_string(*s)
-                                    .expect("STring for {:?} should exist")
-                                    .content.as_str().to_owned(),
+                                Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
@@ -510,19 +492,12 @@ impl<'a> VirtualMachine<'a> {
                     if let Value::Object(object_key) = object_value {
                         // Ensure field name is a string
                         if let Value::String(field_key) = field_name {
-                            if let Some(object) = self.memory_manager.load_object(object_key) {
-                                if let Some(value) = object.get(&field_key) {
-                                    self.push(value.clone())?;
-                                } else {
-                                    // Property doesn't exist, push null
-                                    self.push(Value::Null)?;
-                                }
+                            let object = self.memory_manager.load_object(object_key);
+                            if let Some(value) = object.get(&field_key) {
+                                self.push(value.clone())?;
                             } else {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "Invalid object reference".to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                // Property doesn't exist, push null
+                                self.push(Value::Null)?;
                             }
                         } else {
                             return Err(RuntimeError {
@@ -547,24 +522,17 @@ impl<'a> VirtualMachine<'a> {
 
                     // Ensure both values are objects
                     if let (Value::Object(left_key), Value::Object(right_key)) = (left_value, right_value) {
-                        if let (Some(left_object), Some(right_object)) = (self.memory_manager.load_object(left_key), self.memory_manager.load_object(right_key)) {
-                            // Create merged properties starting with left object
-                            let mut merged_properties = left_object.properties.clone();
+                        let (left_object, right_object) = (self.memory_manager.load_object(left_key), self.memory_manager.load_object(right_key));
+                        // Create merged properties starting with left object
+                        let mut merged_properties = left_object.properties.clone();
 
-                            // Override/add properties from right object
-                            for (key, value) in &right_object.properties {
-                                merged_properties.insert(*key, value.clone());
-                            }
-
-                            let merged_allocation = self.memory_manager.allocate_object_with_properties(merged_properties);
-                            self.push(Value::Object(merged_allocation.index))?;
-                        } else {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Invalid object reference in merge".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                        // Override/add properties from right object
+                        for (key, value) in &right_object.properties {
+                            merged_properties.insert(*key, value.clone());
                         }
+
+                        let merged_allocation = self.memory_manager.allocate_object_with_properties(merged_properties);
+                        self.push(Value::Object(merged_allocation.index))?;
                     } else {
                         return Err(RuntimeError {
                             span: self.get_current_span(),
@@ -620,9 +588,7 @@ impl<'a> VirtualMachine<'a> {
                         source_id: "serialization".to_string(),
                     })
             },
-            Value::String(s) => Ok(serde_json::Value::String(self.memory_manager.load_string(*s)
-                                                             .expect("Attempted to load a string {:?} that no longer exists")
-                                                            .content.as_str().to_owned())),
+            Value::String(s) => Ok(serde_json::Value::String(self.memory_manager.load_string(*s).to_owned())),
             Value::Object(object_key) => {
                 // Check for circular references
                 if visited.contains(object_key) {
@@ -635,25 +601,16 @@ impl<'a> VirtualMachine<'a> {
 
                 visited.insert(*object_key);
 
-                if let Some(object) = self.memory_manager.load_object(*object_key) {
-                    let mut json_object = serde_json::Map::new();
+                let object = self.memory_manager.load_object(*object_key);
+                let mut json_object = serde_json::Map::new();
 
-                    for (key, value) in &object.properties {
-                        let json_value = self.value_to_json(value, visited)?;
-                        json_object.insert(self.memory_manager.load_string(*key)
-                                           .expect("Object property has been GC unexpectedly {:?}")
-                                           .content.as_str().to_owned(), json_value);
-                    }
-
-                    visited.remove(object_key); // Remove after processing
-                    Ok(serde_json::Value::Object(json_object))
-                } else {
-                    Err(RuntimeError {
-                        span: 0..0,
-                        message: "Invalid object reference during JSON conversion".to_string(),
-                        source_id: "serialization".to_string(),
-                    })
+                for (key, value) in &object.properties {
+                    let json_value = self.value_to_json(value, visited)?;
+                    json_object.insert(self.memory_manager.load_string(*key).to_owned(), json_value);
                 }
+
+                visited.remove(object_key); // Remove after processing
+                Ok(serde_json::Value::Object(json_object))
             }
         }
     }

@@ -152,12 +152,12 @@ impl MemoryManager {
     }
 
     fn deallocate_string(&mut self, string_key: StringIndex) -> Option<ManagedString> {
-        let content = self.load_string(string_key).map(|s| s.content.clone());
-        if let Some(content) = content {
-            self.interned_strings.remove(&content);
+        if let Some(managed_string) = self.strings.get(string_key) {
+            self.interned_strings.remove(&managed_string.content);
+            self.strings.remove(string_key)
+        } else {
+            None
         }
-
-        self.strings.remove(string_key)
     }
 
     pub fn allocate_object(&mut self) -> AllocationResult<ObjectIndex> {
@@ -265,12 +265,12 @@ impl MemoryManager {
         self.gc_threshold = self.allocated_bytes * 2;
     }
 
-    pub fn load_object(&self, key: ObjectIndex) -> Option<&ManagedObject> {
-        self.objects.get(key)
+    pub fn load_object(&self, key: ObjectIndex) -> &ManagedObject {
+        self.objects.get(key).expect("Object not found in SlotMap")
     }
 
-    pub fn load_string(&self, key: StringIndex) -> Option<&ManagedString> {
-        self.strings.get(key)
+    pub fn load_string(&self, key: StringIndex) -> &str {
+        &self.strings.get(key).expect("String not found in SlotMap").content
     }
 
     /// Get current statistics
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(s1, s2);
         assert_ne!(s1, s3);
 
-        assert_eq!(set.load_string(s1.index).map(|managed| managed.content.as_str()), Some("hello"));
+        assert_eq!(set.load_string(s1.index), "hello");
     }
 
     #[test]
@@ -339,8 +339,8 @@ mod tests {
                    .deallocate_string(repeated.index)
                    .map(|s| s.content.clone()).as_deref());
 
-        assert_eq!(manager.load_string(s.index), None);
-        assert_eq!(manager.load_string(repeated.index), None);
+        assert_eq!(manager.strings.get(s.index), None);
+        assert_eq!(manager.strings.get(repeated.index), None);
 
     }
 
@@ -355,11 +355,8 @@ mod tests {
         properties.insert(name, field_value);
         let object_index = manager.allocate_object_with_properties(properties).index;
 
-        if let Some(object) = manager.load_object(object_index) {
-            assert_eq!(Some(&Value::Boolean(true)), object.get(&name));
-        } else {
-            panic!("Failed to load the created object");
-        }
+        let object = manager.load_object(object_index);
+        assert_eq!(Some(&Value::Boolean(true)), object.get(&name));
     }
 
     #[test]
@@ -373,9 +370,8 @@ mod tests {
         properties.insert(name, field_value);
         let object_index = manager.allocate_object_with_properties(properties).index;
 
-        let object_size = manager.load_object(object_index)
-            .expect("Object was just created").size();
-        let string_size = manager.load_string(name)
+        let object_size = manager.load_object(object_index).size();
+        let string_size = manager.strings.get(name)
             .expect("String field1 was just created").size();
 
         let mut roots: Vec<Value> = Vec::new();
@@ -391,12 +387,13 @@ mod tests {
         assert_eq!(string_size, manager.allocated_bytes,
                    "GC should have collected the object but left the string around");
 
-        assert_eq!(None, manager.load_object(object_index),
-                   "GC should have removed the object from the slotmap");
+        // This would panic since the object was garbage collected:
+        assert_eq!(None, manager.objects.get(object_index));
 
         manager.run_garbage_collect(vec!());
         assert_eq!(0, manager.allocated_bytes);
-        assert_eq!(None, manager.load_string(name));
+        // This would panic since the string was garbage collected:
+        assert_eq!(None, manager.strings.get(name));
 
 
     }
