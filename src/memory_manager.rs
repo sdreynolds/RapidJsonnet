@@ -154,6 +154,15 @@ impl MemoryManager {
         }
     }
 
+    fn deallocate_string(&mut self, string_key: DefaultKey) -> Option<ManagedString> {
+        let content = self.load_string(string_key).map(|s| s.content.clone());
+        if let Some(content) = content {
+            self.interned_strings.remove(&content);
+        }
+
+        self.strings.remove(string_key)
+    }
+
     pub fn allocate_object(&mut self) -> DefaultKey {
         let obj = ManagedObject::new();
         self.allocated_bytes += obj.calculate_size();
@@ -245,6 +254,24 @@ mod tests {
 
         // Should reuse the same interned string
         assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn deallocate_string() {
+        let mut manager = MemoryManager::new();
+        let s = manager.allocate_string("hello");
+        let repeated = manager.allocate_string("hello");
+
+        assert_eq!(manager.load_string(s), manager.load_string(repeated));
+
+        assert_eq!(Some("hello"),
+                   manager
+                   .deallocate_string(repeated)
+                   .map(|s| s.content.clone()).as_deref());
+
+        assert_eq!(manager.load_string(s), None);
+        assert_eq!(manager.load_string(repeated), None);
+
     }
 
 }
