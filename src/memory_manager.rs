@@ -208,7 +208,6 @@ impl MemoryManager {
         while let Some(head) = values.pop_front() {
             match head {
                 Value::String(string_index) => {
-                    let ms = self.strings.get_mut(string_index);
                     self.strings.get_mut(string_index).map(|ms| ms.marked.set(true));
                     #[cfg(feature = "gc_debug")]
                     {
@@ -256,7 +255,7 @@ impl MemoryManager {
         }
 
         for string_idx in strings_to_delete {
-            self.strings.remove(string_idx);
+            self.deallocate_string(string_idx);
         }
 
         for obj_idx in objects_to_delete {

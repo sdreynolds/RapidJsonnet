@@ -1,7 +1,6 @@
 use std::ops::Range;
-use chunk::{Chunk, Opcode, Value, RuntimeError, JsonnetObject};
-use string_pool::{InternedString, StringPool};
-use slotmap::{SlotMap, DefaultKey};
+use chunk::{Chunk, Opcode, ObjectIndex, Value, RuntimeError};
+use memory_manager::MemoryManager;
 
 /// Virtual machine for executing Jsonnet bytecode
 pub struct VirtualMachine<'a> {
@@ -13,28 +12,19 @@ pub struct VirtualMachine<'a> {
     program_counter: usize,
     /// Execution stack
     stack: Vec<Value>,
-    /// Object storage using SlotMap for stable references
-    objects: SlotMap<DefaultKey, JsonnetObject>,
-    /// Bytes allocated for object storage (for GC threshold tracking)
-    objects_allocated_bytes: usize,
-    /// Threshold for triggering object garbage collection
-    next_object_garbage_collection: usize,
     /// String pool for string interning and GC
-    string_pool: StringPool,
+    memory_manager: MemoryManager,
 }
 
 impl<'a> VirtualMachine<'a> {
     /// Create a new virtual machine with the given starting chunk and string pool
-    pub fn new(chunk: Chunk<'a>, string_pool: StringPool) -> Self {
+    pub fn new(chunk: Chunk<'a>, memory_manager: MemoryManager) -> Self {
         let mut vm = Self {
             chunks: Vec::new(),
             current_chunk: 0,
             program_counter: 0,
             stack: Vec::with_capacity(1024),
-            objects: SlotMap::new(),
-            objects_allocated_bytes: 0,
-            next_object_garbage_collection: 1024 * 1024, // Initial 1MB threshold
-            string_pool,
+            memory_manager,
         };
 
         vm.chunks.push(chunk);
@@ -112,42 +102,9 @@ impl<'a> VirtualMachine<'a> {
         self.program_counter += 1;
     }
 
-    /// Allocate a new object in the SlotMap and return its key
-    pub fn allocate_object(&mut self, object: JsonnetObject) -> DefaultKey {
-        let object_size = object.allocated_bytes();
-        self.objects_allocated_bytes += object_size;
-        self.objects.insert(object)
-    }
-
-    /// Get an object from the SlotMap by its key
-    pub fn get_object(&self, key: DefaultKey) -> Option<&JsonnetObject> {
-        self.objects.get(key)
-    }
-
-    /// Get a mutable reference to an object from the SlotMap by its key
-    pub fn get_object_muts(&mut self, key: DefaultKey) -> Option<&mut JsonnetObject> {
-        self.objects.get_mut(key)
-    }
-
-    /// Check if an object key is valid
-    pub fn is_valid_object(&self, key: DefaultKey) -> bool {
-        self.objects.contains_key(key)
-    }
-
-    /// Create an empty object and return its key
-    pub fn create_empty_object(&mut self) -> DefaultKey {
-        let object = JsonnetObject::new();
-        self.allocate_object(object)
-    }
-
     /// Main interpretation loop
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
         loop {
-            // Periodically trigger garbage collection
-            // I dislike this, and would rather have this call happen  whenver an allocation happens.
-            // This is slow because it acquires a lock on the String pool.
-            self.maybe_collect_garbage();
-
             let chunk = self.current_chunk();
 
             // Check if we've reached the end
@@ -206,7 +163,7 @@ impl<'a> VirtualMachine<'a> {
                     match (&a, &b) {
                         // Object merging (according to Jsonnet spec)
                         (Value::Object(left_key), Value::Object(right_key)) => {
-                            if let (Some(left_object), Some(right_object)) = (self.get_object(*left_key), self.get_object(*right_key)) {
+                            if let (Some(left_object), Some(right_object)) = (self.memory_manager.load_object(*left_key), self.memory_manager.load_object(*right_key)) {
                                 // Create merged properties starting with left object
                                 let mut merged_properties = left_object.properties.clone();
 
@@ -215,9 +172,9 @@ impl<'a> VirtualMachine<'a> {
                                     merged_properties.insert(*key, value.clone());
                                 }
 
-                                let merged_object = JsonnetObject::with_properties(merged_properties);
-                                let merged_key = self.allocate_object(merged_object);
-                                self.push(Value::Object(merged_key))?;
+                                let merged_allocation = self.memory_manager.allocate_object_with_properties(merged_properties);
+
+                                self.push(Value::Object(merged_allocation.index))?;
                             } else {
                                 return Err(RuntimeError {
                                     span: self.get_current_span(),
@@ -236,22 +193,26 @@ impl<'a> VirtualMachine<'a> {
                         // String concatenation if either operand is a string
                         (Value::String(_), _) | (_, Value::String(_)) => {
                             let a_str = match &a {
-                                Value::String(s) => s.as_str().to_owned(),
+                                Value::String(s) => self.memory_manager.load_string(*s)
+                                    .expect("Tried to reference {:?} which doesn't exist anymore")
+                                    .content.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => unreachable!(),
                             };
                             let b_str = match &b {
-                                Value::String(s) => s.as_str().to_owned(),
+                                Value::String(s) => self.memory_manager.load_string(*s)
+                                    .expect("Tried to reference {:?} which doesn't exist anymore")
+                                    .content.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => unreachable!(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
-                            let interned = self.string_pool.intern(&result_str);
-                            self.push(Value::String(interned))?;
+                            let interned = self.memory_manager.allocate_string(&result_str);
+                            self.push(Value::String(interned.index))?;
                         }
                         // Numeric addition for all other cases
                         _ => {
@@ -353,30 +314,39 @@ impl<'a> VirtualMachine<'a> {
                     // Optimized string concatenation - assumes both are strings
                     let result = match (&a, &b) {
                         (Value::String(s1), Value::String(s2)) => {
-                            let result_str = format!("{}{}", s1.as_str(), s2.as_str());
-                            let interned = self.string_pool.intern(&result_str);
-                            Value::String(interned)
+                            let result_str = format!("{}{}",
+                                                     self.memory_manager.load_string(*s1)
+                                                     .expect("Attempted to load string {:?} that doesn't exist")
+                                                     .content.as_str(),
+                                                     self.memory_manager.load_string(*s2)
+                                                     .expect("Attempted to load string {:?} that doesn't exist")
+                                                     .content.as_str());
+                            let interned = self.memory_manager.allocate_string(&result_str);
+                            Value::String(interned.index)
                         }
                         _ => {
                             // This should not happen if compiler type tracking is correct
                             // Fall back to safe conversion
                             let a_str = match &a {
-                                Value::String(s) => s.as_str().to_owned(),
+                                Value::String(s) => self.memory_manager.load_string(*s)
+                                    .expect("String for {:?} should exist").content.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                             };
                             let b_str = match &b {
-                                Value::String(s) => s.as_str().to_owned(),
+                                Value::String(s) => self.memory_manager.load_string(*s)
+                                    .expect("STring for {:?} should exist")
+                                    .content.as_str().to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
-                            let interned = self.string_pool.intern(&result_str);
-                            Value::String(interned)
+                            let interned = self.memory_manager.allocate_string(&result_str);
+                            Value::String(interned.index)
                         }
                     };
 
@@ -528,9 +498,8 @@ impl<'a> VirtualMachine<'a> {
                         }
                     }
 
-                    let object = JsonnetObject::with_properties(properties);
-                    let object_key = self.allocate_object(object);
-                    self.push(Value::Object(object_key))?;
+                    let object_allocation = self.memory_manager.allocate_object_with_properties(properties);
+                    self.push(Value::Object(object_allocation.index))?;
                 }
 
                 Opcode::ObjectIndex => {
@@ -541,7 +510,7 @@ impl<'a> VirtualMachine<'a> {
                     if let Value::Object(object_key) = object_value {
                         // Ensure field name is a string
                         if let Value::String(field_key) = field_name {
-                            if let Some(object) = self.get_object(object_key) {
+                            if let Some(object) = self.memory_manager.load_object(object_key) {
                                 if let Some(value) = object.get(&field_key) {
                                     self.push(value.clone())?;
                                 } else {
@@ -578,7 +547,7 @@ impl<'a> VirtualMachine<'a> {
 
                     // Ensure both values are objects
                     if let (Value::Object(left_key), Value::Object(right_key)) = (left_value, right_value) {
-                        if let (Some(left_object), Some(right_object)) = (self.get_object(left_key), self.get_object(right_key)) {
+                        if let (Some(left_object), Some(right_object)) = (self.memory_manager.load_object(left_key), self.memory_manager.load_object(right_key)) {
                             // Create merged properties starting with left object
                             let mut merged_properties = left_object.properties.clone();
 
@@ -587,9 +556,8 @@ impl<'a> VirtualMachine<'a> {
                                 merged_properties.insert(*key, value.clone());
                             }
 
-                            let merged_object = JsonnetObject::with_properties(merged_properties);
-                            let merged_key = self.allocate_object(merged_object);
-                            self.push(Value::Object(merged_key))?;
+                            let merged_allocation = self.memory_manager.allocate_object_with_properties(merged_properties);
+                            self.push(Value::Object(merged_allocation.index))?;
                         } else {
                             return Err(RuntimeError {
                                 span: self.get_current_span(),
@@ -631,178 +599,15 @@ impl<'a> VirtualMachine<'a> {
             (Value::Null, Value::Null) => true,
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::Number(a), Value::Number(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a.ptr_eq(*b), // O(1) pointer comparison!
+            (Value::String(a), Value::String(b)) => a == b, // compares only the keys and so can be quick
 
             // Different types are never equal
             _ => false,
         }
     }
 
-    /// Collect all GC roots from the VM for garbage collection
-    pub fn collect_gc_roots(&self) -> (Vec<InternedString>, Vec<DefaultKey>) {
-        let mut string_roots = Vec::new();
-        let mut object_roots = Vec::new();
-
-        // Collect from value stack
-        for value in &self.stack {
-            match value {
-                Value::String(interned_string) => string_roots.push(*interned_string),
-                Value::Object(object_key) => object_roots.push(*object_key),
-                _ => {}
-            }
-        }
-
-        // Collect from constants in all loaded chunks
-        for chunk in &self.chunks {
-            for constant in &chunk.constants {
-                match constant {
-                    Value::String(interned_string) => string_roots.push(*interned_string),
-                    Value::Object(object_key) => object_roots.push(*object_key),
-                    _ => {}
-                }
-            }
-        }
-
-        // Collect strings from object properties
-        self.collect_strings_from_objects(&object_roots, &mut string_roots);
-
-        // Future: Collect from other VM roots:
-        // - Local variables
-        // - Global variables
-        // - Call frames
-
-        (string_roots, object_roots)
-    }
-
-    /// Recursively collect string roots from objects and their properties
-    fn collect_strings_from_objects(&self, object_keys: &[DefaultKey], string_roots: &mut Vec<InternedString>) {
-        let mut visited_objects = std::collections::HashSet::new();
-        let mut objects_to_visit = object_keys.to_vec();
-
-        while let Some(object_key) = objects_to_visit.pop() {
-            if visited_objects.contains(&object_key) {
-                continue;
-            }
-            visited_objects.insert(object_key);
-
-            if let Some(object) = self.get_object(object_key) {
-                for (property_key, property_value) in &object.properties {
-                    // Add property key (which is an InternedString)
-                    string_roots.push(*property_key);
-
-                    // If property value is a string, add it
-                    // If property value is an object, add it to visit queue
-                    match property_value {
-                        Value::String(interned_string) => string_roots.push(*interned_string),
-                        Value::Object(nested_object_key) => {
-                            if !visited_objects.contains(nested_object_key) {
-                                objects_to_visit.push(*nested_object_key);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    /// Check if object garbage collection should be triggered
-    fn should_collect_objects(&self) -> bool {
-        #[cfg(feature = "stress_gc")]
-        {
-            eprintln!("[VM GC] Stress GC enabled - triggering object collection ({} objects, {} bytes)",
-                     self.objects.len(), self.objects_allocated_bytes);
-            return true;
-        }
-
-        let should_collect = self.objects_allocated_bytes >= self.next_object_garbage_collection;
-        if should_collect {
-            eprintln!("[VM GC] Threshold exceeded - triggering object collection ({} bytes >= {} bytes, {} objects)",
-                     self.objects_allocated_bytes, self.next_object_garbage_collection, self.objects.len());
-        }
-        should_collect
-    }
-
-    /// Trigger garbage collection if needed
-    pub fn maybe_collect_garbage(&mut self) {
-        if self.should_collect_objects() || self.string_pool.should_collect() {
-            let (string_roots, object_roots) = self.collect_gc_roots();
-            self.string_pool.collect_garbage(string_roots);
-            eprintln!("[VM GC] Starting object collection with {} roots", object_roots.len());
-            self.collect_objects(&object_roots);
-        }
-    }
-
-    /// Perform object garbage collection with threshold updating
-    fn collect_objects(&mut self, roots: &[DefaultKey]) {
-        let initial_count = self.objects.len();
-        let initial_bytes = self.objects_allocated_bytes;
-
-        eprintln!("[VM GC] Mark phase: Processing {} roots from {} total objects ({} bytes)",
-                 roots.len(), initial_count, initial_bytes);
-
-        // Simple mark-and-sweep for objects
-        let mut reachable_objects = std::collections::HashSet::new();
-        let mut objects_to_visit = roots.to_vec();
-
-        // Mark phase: find all reachable objects
-        while let Some(object_key) = objects_to_visit.pop() {
-            if reachable_objects.contains(&object_key) {
-                continue;
-            }
-
-            if let Some(object) = self.get_object(object_key) {
-                reachable_objects.insert(object_key);
-
-                // Add nested objects to visit queue
-                for (_, value) in &object.properties {
-                    if let Value::Object(nested_key) = value {
-                        if !reachable_objects.contains(nested_key) {
-                            objects_to_visit.push(*nested_key);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Sweep phase: remove unreachable objects and update byte accounting
-        let all_keys: Vec<DefaultKey> = self.objects.keys().collect();
-        for key in all_keys {
-            if !reachable_objects.contains(&key) {
-                if let Some(object) = self.objects.get(key) {
-                    let object_size = object.allocated_bytes();
-                    self.objects_allocated_bytes -= object_size;
-                }
-                self.objects.remove(key);
-            }
-        }
-
-        let final_count = self.objects.len();
-        let final_bytes = self.objects_allocated_bytes;
-        let old_threshold = self.next_object_garbage_collection;
-
-        // Update threshold: current size * 2, minimum 1MB
-        self.next_object_garbage_collection = std::cmp::max(
-            self.objects_allocated_bytes * 2,
-            1024 * 1024 // Minimum 1MB threshold
-        );
-
-        eprintln!("[VM GC] Complete: {} -> {} objects, {} -> {} bytes, threshold: {} -> {} bytes",
-                 initial_count, final_count, initial_bytes, final_bytes,
-                 old_threshold, self.next_object_garbage_collection);
-    }
-
-    /// Get object allocation statistics
-    pub fn object_stats(&self) -> (usize, usize, usize) {
-        (
-            self.objects_allocated_bytes,
-            self.next_object_garbage_collection,
-            self.objects.len()
-        )
-    }
-
     /// Convert a VM Value to serde_json::Value for JSON output
-    fn value_to_json(&self, value: &Value, visited: &mut std::collections::HashSet<DefaultKey>) -> Result<serde_json::Value, RuntimeError> {
+    fn value_to_json(&self, value: &Value, visited: &mut std::collections::HashSet<ObjectIndex>) -> Result<serde_json::Value, RuntimeError> {
         match value {
             Value::Null => Ok(serde_json::Value::Null),
             Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
@@ -815,7 +620,9 @@ impl<'a> VirtualMachine<'a> {
                         source_id: "serialization".to_string(),
                     })
             },
-            Value::String(s) => Ok(serde_json::Value::String(s.as_str().to_owned())),
+            Value::String(s) => Ok(serde_json::Value::String(self.memory_manager.load_string(*s)
+                                                             .expect("Attempted to load a string {:?} that no longer exists")
+                                                            .content.as_str().to_owned())),
             Value::Object(object_key) => {
                 // Check for circular references
                 if visited.contains(object_key) {
@@ -828,12 +635,14 @@ impl<'a> VirtualMachine<'a> {
 
                 visited.insert(*object_key);
 
-                if let Some(object) = self.get_object(*object_key) {
+                if let Some(object) = self.memory_manager.load_object(*object_key) {
                     let mut json_object = serde_json::Map::new();
 
                     for (key, value) in &object.properties {
                         let json_value = self.value_to_json(value, visited)?;
-                        json_object.insert(key.as_str().to_owned(), json_value);
+                        json_object.insert(self.memory_manager.load_string(*key)
+                                           .expect("Object property has been GC unexpectedly {:?}")
+                                           .content.as_str().to_owned(), json_value);
                     }
 
                     visited.remove(object_key); // Remove after processing
@@ -851,8 +660,8 @@ impl<'a> VirtualMachine<'a> {
 }
 
 /// Main execution function - entry point for running Jsonnet bytecode
-pub fn execute(chunk: Chunk, string_pool: StringPool) -> Result<serde_json::Value, RuntimeError> {
-    let mut vm = VirtualMachine::new(chunk, string_pool);
+pub fn execute(chunk: Chunk, memory_manager: MemoryManager) -> Result<serde_json::Value, RuntimeError> {
+    let mut vm = VirtualMachine::new(chunk, memory_manager);
 
     let value = vm.interpret()?;
 
@@ -888,8 +697,8 @@ mod tests {
         chunk.write_opcode(Opcode::LoadNull, 0..5);
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Null);
@@ -901,8 +710,8 @@ mod tests {
         chunk.write_opcode(Opcode::LoadTrue, 0..5);
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(true));
@@ -914,8 +723,8 @@ mod tests {
         chunk.write_opcode(Opcode::LoadFalse, 0..5);
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(false));
@@ -928,8 +737,8 @@ mod tests {
         chunk.write_opcode_u16(Opcode::LoadConst, const_index as u16, 0..5);
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(42.0));
@@ -946,8 +755,8 @@ mod tests {
         chunk.write_opcode(Opcode::Add, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(15.0));
@@ -964,8 +773,8 @@ mod tests {
         chunk.write_opcode(Opcode::Sub, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(7.0));
@@ -982,8 +791,8 @@ mod tests {
         chunk.write_opcode(Opcode::Mul, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(42.0));
@@ -1000,8 +809,8 @@ mod tests {
         chunk.write_opcode(Opcode::Div, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(5.0));
@@ -1018,8 +827,8 @@ mod tests {
         chunk.write_opcode(Opcode::Div, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret();
 
         assert!(result.is_err());
@@ -1037,8 +846,8 @@ mod tests {
         chunk.write_opcode(Opcode::Lt, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(true));
@@ -1055,8 +864,8 @@ mod tests {
         chunk.write_opcode(Opcode::Shl, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(32.0)); // 8 << 2 = 32
@@ -1070,8 +879,8 @@ mod tests {
         chunk.write_opcode(Opcode::LogicalAnd, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(false));
@@ -1085,8 +894,8 @@ mod tests {
         chunk.write_opcode(Opcode::LogicalOr, 10..15);
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(true));
@@ -1101,8 +910,8 @@ mod tests {
         chunk.write_opcode(Opcode::Neg, 5..10);
         chunk.write_opcode(Opcode::Return, 10..15);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(-42.0));
@@ -1115,8 +924,8 @@ mod tests {
         chunk.write_opcode(Opcode::Not, 5..10);
         chunk.write_opcode(Opcode::Return, 10..15);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Boolean(false));
@@ -1133,8 +942,8 @@ mod tests {
         chunk.write_opcode(Opcode::Pop, 10..15); // Pop 2.0
         chunk.write_opcode(Opcode::Return, 15..20); // Return 1.0
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(1.0));
@@ -1150,8 +959,8 @@ mod tests {
         chunk.write_opcode(Opcode::Add, 10..15); // 42 + 42
         chunk.write_opcode(Opcode::Return, 15..20);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(84.0));
@@ -1169,8 +978,8 @@ mod tests {
         chunk.write_opcode(Opcode::Sub, 15..20); // 3 - 10 = -7
         chunk.write_opcode(Opcode::Return, 20..25);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(-7.0));
@@ -1182,8 +991,8 @@ mod tests {
         chunk.write_opcode(Opcode::Add, 0..5); // Try to add with empty stack
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret();
 
         assert!(result.is_err());
@@ -1196,8 +1005,8 @@ mod tests {
         chunk.write_opcode_u16(Opcode::LoadConst, 999, 0..5); // Invalid index
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret();
 
         assert!(result.is_err());
@@ -1210,8 +1019,8 @@ mod tests {
         chunk.write_opcode(Opcode::LoadNull, 0..5);
         // Missing Return opcode
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret();
 
         assert!(result.is_err());
@@ -1224,8 +1033,8 @@ mod tests {
         chunk.write_opcode(Opcode::CreateArray, 0..5); // Unimplemented opcode
         chunk.write_opcode(Opcode::Return, 5..10);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret();
 
         assert!(result.is_err());
@@ -1250,8 +1059,8 @@ mod tests {
         chunk.write_opcode(Opcode::Sub, 30..35);  // 27
         chunk.write_opcode(Opcode::Return, 35..40);
 
-        let string_pool = StringPool::new();
-        let mut vm = VirtualMachine::new(chunk, string_pool);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(27.0));
