@@ -80,6 +80,18 @@ rust_library(
 )
 
 rust_library(
+    name = "memory_manager",
+    srcs = ["src/memory_manager.rs"],
+    deps = [
+        "@crates//:slotmap",
+        ":chunk",
+    ],
+    crate_features = [
+        "stress_gc"
+    ]
+)
+
+rust_library(
     name = "compiler",
     srcs = ["src/compiler.rs", "src/compiler_integration_test.rs"],
     deps = [
@@ -121,4 +133,9 @@ rust_test(
 rust_test(
     name = "string_pool_test",
     crate = ":string_pool"
+)
+
+rust_test(
+    name = "memory_manager_test",
+    crate = ":memory_manager",
 )
