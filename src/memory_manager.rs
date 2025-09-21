@@ -208,10 +208,11 @@ impl MemoryManager {
         while let Some(head) = values.pop_front() {
             match head {
                 Value::String(string_index) => {
+                    let ms = self.strings.get_mut(string_index);
                     self.strings.get_mut(string_index).map(|ms| ms.marked.set(true));
                     #[cfg(feature = "gc_debug")]
                     {
-                        eprintln!("[MemoryManager] Marking String {}", self.load_string(string_index).content.as_str())
+                        eprintln!("[MemoryManager] Marking String {:?}",string_index)
                     }
                 },
                 Value::Object(object_index) => {

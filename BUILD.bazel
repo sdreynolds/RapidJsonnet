@@ -99,7 +99,7 @@ rust_library(
         ":chunk",
         ":scanner",
         ":parser",
-        ":string_pool",
+        ":memory_manager",
     ],
     crate_features = [
         "stress_gc"

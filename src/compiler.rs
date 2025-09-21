@@ -1,10 +1,10 @@
 use std::fs;
 use std::ops::Range;
 use std::collections::HashMap;
-use chunk::{Chunk, Opcode, Value};
+use chunk::{Chunk, Opcode, StringIndex, Value};
 use scanner::{Scanner, ScanError, Token, TokenInfo};
 use parser::Parser;
-use string_pool::{InternedString, StringPool};
+use memory_manager::MemoryManager;
 
 pub type CompilerError = ScanError;
 
@@ -39,21 +39,11 @@ pub struct Compiler<'a> {
     parser: Parser<'a>,
     type_stack: Vec<ExpressionType>,
     constant_pool: HashMap<Value, u16>,
-    string_pool: StringPool,
-    string_lookup: HashMap<String, InternedString>,
+    memory_manager: MemoryManager,
 }
 
 impl<'a> Compiler<'a> {
     pub fn new(scanner: &'a mut Scanner<'a>, source_id: &'a str) -> Self {
-        let mut string_pool = StringPool::new();
-        let mut string_lookup = HashMap::new();
-        
-        // Batch intern all collected strings using move semantics
-        for raw_string in scanner.collected_strings() {
-            let interned = string_pool.intern_owned(raw_string.clone());
-            string_lookup.insert(raw_string.clone(), interned);
-        }
-        
         let parser = Parser::new(scanner);
         let compiling_chunk = Chunk::new(source_id);
 
@@ -62,8 +52,7 @@ impl<'a> Compiler<'a> {
             parser,
             type_stack: Vec::new(),
             constant_pool: HashMap::new(),
-            string_pool,
-            string_lookup,
+            memory_manager: MemoryManager::new(),
         }
     }
 
@@ -94,7 +83,7 @@ impl<'a> Compiler<'a> {
         Ok(index_u16)
     }
 
-    pub fn compile(mut self) -> Result<(Chunk<'a>, StringPool), CompilerError> {
+    pub fn compile(mut self) -> Result<(Chunk<'a>, MemoryManager), CompilerError> {
         // Advance to get the first token
         self.parser.advance()?;
 
@@ -108,7 +97,7 @@ impl<'a> Compiler<'a> {
         let span = self.current_span();
         self.emit_opcode(Opcode::Return, span);
 
-        Ok((self.compiling_chunk, self.string_pool))
+        Ok((self.compiling_chunk, self.memory_manager))
     }
 
     fn parse_expr(&mut self, min_bp: u8) -> Result<(), CompilerError> {
@@ -183,32 +172,25 @@ impl<'a> Compiler<'a> {
                 self.parser.advance()?; // consume the number
             }
             Token::String(value) => {
-                let interned = if let Some(&existing) = self.string_lookup.get(value) {
-                    existing
-                } else {
-                    // Handle strings not collected during scanning (e.g., in tests)
-                    let new_interned = self.string_pool.intern(value);
-                    self.string_lookup.insert(value.clone(), new_interned);
-                    new_interned
-                };
-                self.emit_string_constant(interned)?;
+                let allocation_result = self.memory_manager.allocate_string(value);
+                self.emit_string_constant(allocation_result.index)?;
                 self.push_type(ExpressionType::String);
-                self.parser.advance()?; // consume the string
+                self.parser.advance()?;
             }
             Token::True => {
                 self.emit_opcode(Opcode::LoadTrue, token.span);
                 self.push_type(ExpressionType::Boolean);
-                self.parser.advance()?; // consume the true
+                self.parser.advance()?;
             }
             Token::False => {
                 self.emit_opcode(Opcode::LoadFalse, token.span);
                 self.push_type(ExpressionType::Boolean);
-                self.parser.advance()?; // consume the false
+                self.parser.advance()?;
             }
             Token::Null => {
                 self.emit_opcode(Opcode::LoadNull, token.span);
                 self.push_type(ExpressionType::Null);
-                self.parser.advance()?; // consume the null
+                self.parser.advance()?;
             }
             Token::Operator(op) if op == "-" => {
                 self.parser.advance()?; // consume the operator
@@ -295,7 +277,7 @@ impl<'a> Compiler<'a> {
                 // Check operand types for optimization
                 let right_type = self.pop_type();
                 let left_type = self.pop_type();
-                
+
                 // If both operands are known to be strings, use StringConcat
                 if left_type == ExpressionType::String && right_type == ExpressionType::String {
                     self.emit_opcode(Opcode::StringConcat, token.span);
@@ -303,7 +285,7 @@ impl<'a> Compiler<'a> {
                 } else {
                     // Fall back to Add for mixed/unknown types
                     self.emit_opcode(Opcode::Add, token.span);
-                    
+
                     // Determine result type
                     if left_type == ExpressionType::String || right_type == ExpressionType::String {
                         self.push_type(ExpressionType::String);
@@ -401,7 +383,7 @@ impl<'a> Compiler<'a> {
         Ok(index)
     }
 
-    fn emit_string_constant(&mut self, value: InternedString) -> Result<u16, CompilerError> {
+    fn emit_string_constant(&mut self, value: StringIndex) -> Result<u16, CompilerError> {
         let index = self.add_constant_pooled(Value::String(value))?;
 
         // Use the current token's span for the constant
@@ -532,7 +514,7 @@ impl<'a> Compiler<'a> {
         match &token.token {
             Token::Dot => {
                 self.parser.advance()?; // consume '.'
-                
+
                 // Expect an identifier for property name
                 let property_token = self.parser.current_token().cloned()
                     .ok_or_else(|| {
@@ -543,20 +525,13 @@ impl<'a> Compiler<'a> {
                 match &property_token.token {
                     Token::Identifier(name) => {
                         self.parser.advance()?; // consume identifier
-                        
-                        // Emit string constant for property name
-                        let interned_name = if let Some(&existing) = self.string_lookup.get(name) {
-                            existing
-                        } else {
-                            let new_interned = self.string_pool.intern(name);
-                            self.string_lookup.insert(name.clone(), new_interned);
-                            new_interned
-                        };
-                        let _index = self.emit_string_constant(interned_name)?;
-                        
+                        let allocation_result = self.memory_manager.allocate_string(name);
+
+                        let _index = self.emit_string_constant(allocation_result.index)?;
+
                         // Emit ObjectIndex opcode to access property
                         self.emit_opcode(Opcode::ObjectIndex, property_token.span);
-                        
+
                         // Property access can return any type
                         self.push_type(ExpressionType::Unknown);
                     }
@@ -570,16 +545,16 @@ impl<'a> Compiler<'a> {
             }
             Token::LeftBracket => {
                 self.parser.advance()?; // consume '['
-                
+
                 // Parse the expression inside brackets
                 self.parse_expr(0)?;
-                
+
                 // Expect closing bracket
                 self.parser.consume(Token::RightBracket, "Expected ']' after property expression")?;
-                
+
                 // Emit ObjectIndex opcode to access property
                 self.emit_opcode(Opcode::ObjectIndex, token.span);
-                
+
                 // Property access can return any type
                 self.push_type(ExpressionType::Unknown);
             }
@@ -597,9 +572,9 @@ impl<'a> Compiler<'a> {
     /// Parse an object literal: { key1: value1, key2: value2, ... }
     fn parse_object_literal(&mut self, start_token: &TokenInfo) -> Result<(), CompilerError> {
         self.parser.advance()?; // consume '{'
-        
+
         let mut field_count = 0u16;
-        
+
         // Handle empty object: {}
         if let Some(current) = self.parser.current_token() {
             if current.token == Token::RightBrace {
@@ -608,38 +583,26 @@ impl<'a> Compiler<'a> {
                 return Ok(());
             }
         }
-        
+
         // Parse field pairs: key: value
         loop {
             // Parse the key (can be a string literal or identifier)
             if let Some(key_token) = self.parser.current_token() {
                 match &key_token.token {
                     Token::String(key_value) => {
-                        // Push the key as a string constant  
-                        let interned_key = if let Some(&existing) = self.string_lookup.get(key_value) {
-                            existing
-                        } else {
-                            let new_interned = self.string_pool.intern(key_value);
-                            self.string_lookup.insert(key_value.clone(), new_interned);
-                            new_interned
-                        };
+                        let allocation_result = self.memory_manager.allocate_string(key_value);
+                        let interned_key = allocation_result.index;
                         let _key_index = self.emit_string_constant(interned_key)?;
                         self.push_type(ExpressionType::String);
-                        
+
                         self.parser.advance()?; // consume the key
                     }
                     Token::Identifier(key_name) => {
-                        // Convert identifier to interned string and push as constant
-                        let interned_key = if let Some(&existing) = self.string_lookup.get(key_name) {
-                            existing
-                        } else {
-                            let new_interned = self.string_pool.intern(key_name);
-                            self.string_lookup.insert(key_name.clone(), new_interned);
-                            new_interned
-                        };
+                        let allocation_result = self.memory_manager.allocate_string(key_name);
+                        let interned_key = allocation_result.index;
                         let _key_index = self.emit_string_constant(interned_key)?;
                         self.push_type(ExpressionType::String);
-                        
+
                         self.parser.advance()?; // consume the key
                     }
                     _ => {
@@ -652,24 +615,24 @@ impl<'a> Compiler<'a> {
             } else {
                 return Err(self.unexpected_eof_error(start_token.span.clone()));
             }
-            
+
             // Expect ':' after key
             self.parser.consume(
                 Token::Operator(":".to_string()),
                 "Expected ':' after object key"
             )?;
-            
+
             // Parse the value expression
             self.parse_expr(0)?;
-            
+
             field_count += 1;
-            
+
             // Check for more fields or end of object
             if let Some(current) = self.parser.current_token() {
                 match &current.token {
                     Token::Comma => {
                         self.parser.advance()?; // consume ','
-                        
+
                         // Check for trailing comma followed by '}'
                         if let Some(next) = self.parser.current_token() {
                             if next.token == Token::RightBrace {
@@ -692,13 +655,13 @@ impl<'a> Compiler<'a> {
                 return Err(self.unexpected_eof_error(start_token.span.clone()));
             }
         }
-        
+
         // Consume the closing '}'
         self.parser.consume(Token::RightBrace, "Expected '}' to close object literal")?;
-        
+
         // Emit CreateObject opcode with field count
         self.compiling_chunk.write_opcode_u16(Opcode::CreateObject, field_count, start_token.span.clone());
-        
+
         Ok(())
     }
 }
@@ -711,7 +674,7 @@ mod tests {
     fn test_simple_number() {
         let mut scanner = Scanner::new("42", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _string_pool) = compiler.compile().unwrap();
+        let (chunk, _memory_manager) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 1);
         assert_eq!(chunk.constants[0], Value::Number(42.0));
@@ -722,7 +685,7 @@ mod tests {
     fn test_simple_addition() {
         let mut scanner = Scanner::new("3 + 4", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _string_pool) = compiler.compile().unwrap();
+        let (chunk, _memory_manager) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 2);
         assert_eq!(chunk.constants[0], Value::Number(3.0));
@@ -735,7 +698,7 @@ mod tests {
     fn test_unary_minus() {
         let mut scanner = Scanner::new("-42", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _string_pool) = compiler.compile().unwrap();
+        let (chunk, _memory_manager) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 1);
         assert_eq!(chunk.constants[0], Value::Number(42.0));
@@ -747,7 +710,7 @@ mod tests {
     fn test_grouped_expression() {
         let mut scanner = Scanner::new("(1 + 2) * 3", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _string_pool) = compiler.compile().unwrap();
+        let (chunk, _memory_manager) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 3);
         // LoadConst (3) + LoadConst (3) + Add (1) + LoadConst (3) + Mul (1) + Return (1) = 12 bytes
@@ -758,7 +721,7 @@ mod tests {
     fn test_precedence() {
         let mut scanner = Scanner::new("2 + 3 * 4", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _string_pool) = compiler.compile().unwrap();
+        let (chunk, _memory_manager) = compiler.compile().unwrap();
 
         // Should parse as 2 + (3 * 4), so constants should be in order 2, 3, 4
         assert_eq!(chunk.constants.len(), 3);
@@ -771,7 +734,7 @@ mod tests {
     fn test_true_literal() {
         let mut scanner = Scanner::new("true", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _string_pool) = compiler.compile().unwrap();
+        let (chunk, _memory_manager) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 2); // LoadTrue (1 byte) + Return (1 byte)
@@ -795,7 +758,7 @@ mod tests {
     fn test_null_literal() {
         let mut scanner = Scanner::new("null", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _string_pool) = compiler.compile().unwrap();
+        let (chunk, _memory_manager) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 2); // LoadNull (1 byte) + Return (1 byte)
@@ -807,7 +770,7 @@ mod tests {
     fn test_logical_not_with_true() {
         let mut scanner = Scanner::new("!true", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _string_pool) = compiler.compile().unwrap();
+        let (chunk, _memory_manager) = compiler.compile().unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 3); // LoadTrue (1 byte) + Not (1 byte) + Return (1 byte)
@@ -820,11 +783,11 @@ mod tests {
     fn test_string_literal() {
         let mut scanner = Scanner::new("\"hello world\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, mut string_pool) = compiler.compile().unwrap();
-        
+        let (chunk, mut memory_manager) = compiler.compile().unwrap();
+
         assert_eq!(chunk.constants.len(), 1);
-        let expected_interned = string_pool.intern("hello world");
-        assert_eq!(chunk.constants[0], Value::String(expected_interned));
+        let expected_interned = memory_manager.allocate_string("hello world");
+        assert_eq!(chunk.constants[0], Value::String(expected_interned.index));
         assert_eq!(chunk.code.len(), 4); // LoadConst (3 bytes) + Return (1 byte)
     }
 
@@ -832,11 +795,11 @@ mod tests {
     fn test_empty_string_literal() {
         let mut scanner = Scanner::new("\"\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, mut string_pool) = compiler.compile().unwrap();
-        
+        let (chunk, mut memory_manager) = compiler.compile().unwrap();
+
         assert_eq!(chunk.constants.len(), 1);
-        let expected_interned = string_pool.intern("");
-        assert_eq!(chunk.constants[0], Value::String(expected_interned));
+        let expected_interned = memory_manager.allocate_string("");
+        assert_eq!(chunk.constants[0], Value::String(expected_interned.index));
         assert_eq!(chunk.code.len(), 4); // LoadConst (3 bytes) + Return (1 byte)
     }
 
@@ -844,11 +807,11 @@ mod tests {
     fn test_string_with_logical_not() {
         let mut scanner = Scanner::new("!\"test\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, mut string_pool) = compiler.compile().unwrap();
-        
+        let (chunk, mut memory_manager) = compiler.compile().unwrap();
+
         assert_eq!(chunk.constants.len(), 1);
-        let expected_interned = string_pool.intern("test");
-        assert_eq!(chunk.constants[0], Value::String(expected_interned));
+        let expected_interned = memory_manager.allocate_string("test");
+        assert_eq!(chunk.constants[0], Value::String(expected_interned.index));
         assert_eq!(chunk.code.len(), 5); // LoadConst (3 bytes) + Not (1 byte) + Return (1 byte)
         assert_eq!(chunk.code[0], Opcode::LoadConst as u8);
         assert_eq!(chunk.code[3], Opcode::Not as u8);
