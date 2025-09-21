@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::cell::Cell;
 use slotmap::SlotMap;
@@ -15,15 +15,13 @@ pub struct AllocationResult<T> {
 pub struct ManagedObject {
     /// Object properties mapping interned string keys to values
     pub properties: HashMap<StringIndex, Value>,
-    /// Allocated bytes for GC accounting (includes HashMap capacity overhead)
-    allocated_bytes: usize,
     // GC marking
     marked: Cell<bool>,
 }
 
 impl ManagedObject {
     /// Calculate the actual size of this object including HashMap overhead
-    fn calculate_size(&self) -> usize {
+    fn size(&self) -> usize {
         let base_size = std::mem::size_of::<Self>();
         // HashMap capacity accounts for actual allocated memory, not just length
         let map_capacity_bytes = self.properties.capacity() * (
@@ -35,34 +33,23 @@ impl ManagedObject {
     /// Create a new empty Jsonnet object
     pub fn new() -> Self {
         let properties = HashMap::new();
-        let mut obj = Self {
+        Self {
             properties,
-            allocated_bytes: 0,
             marked: Cell::new(false),
-        };
-        obj.allocated_bytes = obj.calculate_size();
-        obj
+        }
     }
 
     /// Create a Jsonnet object with the given properties
     pub fn with_properties(properties: HashMap<StringIndex, Value>) -> Self {
-        let mut obj = Self {
+        Self {
             properties,
-            allocated_bytes: 0,
             marked: Cell::new(false),
-        };
-        obj.allocated_bytes = obj.calculate_size();
-        obj
+        }
     }
 
     /// Get a property value by key
     pub fn get(&self, key: &StringIndex) -> Option<&Value> {
         self.properties.get(key)
-    }
-
-    /// Get the allocated byte size of this object
-    pub fn allocated_bytes(&self) -> usize {
-        self.allocated_bytes
     }
 
     /// Check if object has a property
@@ -175,7 +162,7 @@ impl MemoryManager {
 
     pub fn allocate_object(&mut self) -> AllocationResult<ObjectIndex> {
         let obj = ManagedObject::new();
-        self.allocated_bytes += obj.calculate_size();
+        self.allocated_bytes += obj.size();
         let index = self.objects.insert(obj);
         AllocationResult {
             should_garbage_collect: self.should_collect(),
@@ -185,7 +172,7 @@ impl MemoryManager {
 
     pub fn allocate_object_with_properties(&mut self, properties: HashMap<StringIndex, Value>) -> AllocationResult<ObjectIndex> {
         let obj = ManagedObject::with_properties(properties);
-        self.allocated_bytes += obj.calculate_size();
+        self.allocated_bytes += obj.size();
         let index = self.objects.insert(obj);
         AllocationResult {
             should_garbage_collect: self.should_collect(),
@@ -211,6 +198,71 @@ impl MemoryManager {
             }
             should_collect
         }
+    }
+
+    /// Runs a mark and sweep pass starting from roots
+    pub fn run_garbage_collect(&mut self, roots: Vec<Value>) {
+        let mut values = VecDeque::from(roots);
+
+        // Mark Phase, iterate over the roots, mark Values that need to remain
+        while let Some(head) = values.pop_front() {
+            match head {
+                Value::String(string_index) => {
+                    self.strings.get_mut(string_index).map(|ms| ms.marked.set(true));
+                    #[cfg(feature = "gc_debug")]
+                    {
+                        eprintln!("[MemoryManager] Marking String {}", self.load_string(string_index).content.as_str())
+                    }
+                },
+                Value::Object(object_index) => {
+                    self.objects.get_mut(object_index).map(|managed_object| {
+                        managed_object.marked.set(true);
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] Marking Object {:?}", object_index)
+                        }
+
+                        for field_index in managed_object.properties.keys() {
+                            values.push_back(Value::String(*field_index));
+                        }
+                    });
+                },
+
+                _ => continue
+            };
+        }
+
+        // Sweep Phase, iterate over all the different slotmaps and delete the values that are not marked.
+        // For those that are marked, set them to false now.
+        let mut strings_to_delete: Vec<StringIndex> = Vec::new();
+        for (string_idx, managed_string) in self.strings.iter_mut() {
+            if managed_string.marked.get() {
+                managed_string.marked.set(false);
+            } else {
+                strings_to_delete.push(string_idx);
+                self.allocated_bytes -= managed_string.size();
+            }
+        }
+
+        let mut objects_to_delete: Vec<ObjectIndex> = Vec::new();
+        for (obj_idx, obj) in self.objects.iter_mut() {
+            if obj.marked.get() {
+                obj.marked.set(false);
+            } else {
+                objects_to_delete.push(obj_idx);
+                self.allocated_bytes -= obj.size();
+            }
+        }
+
+        for string_idx in strings_to_delete {
+            self.strings.remove(string_idx);
+        }
+
+        for obj_idx in objects_to_delete {
+            self.objects.remove(obj_idx);
+        }
+
+        self.gc_threshold = self.allocated_bytes * 2;
     }
 
     pub fn load_object(&self, key: ObjectIndex) -> Option<&ManagedObject> {
@@ -308,7 +360,44 @@ mod tests {
         } else {
             panic!("Failed to load the created object");
         }
-
     }
 
+    #[test]
+    fn garbage_collection() {
+        let mut manager = MemoryManager::new();
+        let name = manager.allocate_string("field1").index;
+        let field_value = Value::Boolean(true);
+
+        let mut properties = HashMap::new();
+
+        properties.insert(name, field_value);
+        let object_index = manager.allocate_object_with_properties(properties).index;
+
+        let object_size = manager.load_object(object_index)
+            .expect("Object was just created").size();
+        let string_size = manager.load_string(name)
+            .expect("String field1 was just created").size();
+
+        let mut roots: Vec<Value> = Vec::new();
+        roots.push(Value::Object(object_index));
+
+        manager.run_garbage_collect(roots);
+        assert_eq!(object_size + string_size, manager.allocated_bytes,
+                   "Total memory should be both string and object size");
+
+        let mut only_string: Vec<Value> = Vec::new();
+        only_string.push(Value::String(name));
+        manager.run_garbage_collect(only_string);
+        assert_eq!(string_size, manager.allocated_bytes,
+                   "GC should have collected the object but left the string around");
+
+        assert_eq!(None, manager.load_object(object_index),
+                   "GC should have removed the object from the slotmap");
+
+        manager.run_garbage_collect(vec!());
+        assert_eq!(0, manager.allocated_bytes);
+        assert_eq!(None, manager.load_string(name));
+
+
+    }
 }
