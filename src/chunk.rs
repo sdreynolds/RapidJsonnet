@@ -10,7 +10,7 @@ pub type ObjectIndex = DefaultKey;
 pub type StringIndex = DefaultKey;
 
 /// Value type for the Jsonnet virtual machine
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
     Null,
     Boolean(bool),

@@ -173,8 +173,14 @@ impl<'a> VirtualMachine<'a> {
                             }
 
                             let merged_allocation = self.memory_manager.allocate_object_with_properties(merged_properties);
-
                             self.push(Value::Object(merged_allocation.index))?;
+                            if merged_allocation.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!("[VirtualMachine] Running GC at PC={} (Object merge in Concat)", self.program_counter);
+                                }
+                                self.run_garbage_collection();
+                            }
                         }
                         (Value::Object(_), _) | (_, Value::Object(_)) => {
                             return Err(RuntimeError {
@@ -202,6 +208,13 @@ impl<'a> VirtualMachine<'a> {
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
                             self.push(Value::String(interned.index))?;
+                            if interned.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!("[VirtualMachine] Running GC at PC={} (String concat in Concat fallback)", self.program_counter);
+                                }
+                                self.run_garbage_collection();
+                            }
                         }
                         // Numeric addition for all other cases
                         _ => {
@@ -301,13 +314,20 @@ impl<'a> VirtualMachine<'a> {
 
                     // @TODO: actually benchmark this optimization. First glance doesn't look like an improvement.
                     // Optimized string concatenation - assumes both are strings
-                    let result = match (&a, &b) {
+                    match (&a, &b) {
                         (Value::String(s1), Value::String(s2)) => {
                             let result_str = format!("{}{}",
                                                      self.memory_manager.load_string(*s1),
                                                      self.memory_manager.load_string(*s2));
                             let interned = self.memory_manager.allocate_string(&result_str);
-                            Value::String(interned.index)
+                            self.push(Value::String(interned.index))?;
+                            if interned.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!("[VirtualMachine] Running GC at PC={} (String concat in StringConcat)", self.program_counter);
+                                }
+                                self.run_garbage_collection();
+                            }
                         }
                         _ => {
                             // This should not happen if compiler type tracking is correct
@@ -328,11 +348,16 @@ impl<'a> VirtualMachine<'a> {
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
-                            Value::String(interned.index)
+                            self.push(Value::String(interned.index))?;
+                            if interned.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!("[VirtualMachine] Running GC at PC={} (String concat in Multiply)", self.program_counter);
+                                }
+                                self.run_garbage_collection();
+                            }
                         }
                     };
-
-                    self.push(result)?;
                     self.advance_pc();
                 }
 
@@ -482,6 +507,13 @@ impl<'a> VirtualMachine<'a> {
 
                     let object_allocation = self.memory_manager.allocate_object_with_properties(properties);
                     self.push(Value::Object(object_allocation.index))?;
+                    if object_allocation.should_garbage_collect {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[VirtualMachine] Running GC at PC={} (Object construction)", self.program_counter);
+                        }
+                        self.run_garbage_collection();
+                    }
                 }
 
                 Opcode::ObjectIndex => {
@@ -533,6 +565,13 @@ impl<'a> VirtualMachine<'a> {
 
                         let merged_allocation = self.memory_manager.allocate_object_with_properties(merged_properties);
                         self.push(Value::Object(merged_allocation.index))?;
+                        if merged_allocation.should_garbage_collect {
+                            #[cfg(feature = "gc_debug")]
+                            {
+                                eprintln!("[VirtualMachine] Running GC at PC={} (Object merge in Add)", self.program_counter);
+                            }
+                            self.run_garbage_collection();
+                        }
                     } else {
                         return Err(RuntimeError {
                             span: self.get_current_span(),
@@ -613,6 +652,16 @@ impl<'a> VirtualMachine<'a> {
                 Ok(serde_json::Value::Object(json_object))
             }
         }
+    }
+
+    fn run_garbage_collection(&mut self) {
+        let mut roots = Vec::from(self.stack.clone());
+
+        for chunk in &self.chunks {
+            roots.extend_from_slice(&chunk.constants);
+        }
+
+        self.memory_manager.run_garbage_collect(roots);
     }
 }
 

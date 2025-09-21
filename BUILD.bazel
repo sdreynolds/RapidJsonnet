@@ -62,7 +62,8 @@ rust_library(
         "@crates//:slotmap"
     ],
     crate_features = [
-        "stress_gc"
+        "stress_gc",
+        "gc_debug",
     ]
 )
 

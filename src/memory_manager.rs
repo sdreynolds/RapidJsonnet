@@ -208,24 +208,37 @@ impl MemoryManager {
         while let Some(head) = values.pop_front() {
             match head {
                 Value::String(string_index) => {
-                    self.strings.get_mut(string_index).map(|ms| ms.marked.set(true));
-                    #[cfg(feature = "gc_debug")]
-                    {
-                        eprintln!("[MemoryManager] Marking String {:?}",string_index)
+                    if let Some(ms) = self.strings.get_mut(string_index) {
+                        ms.marked.set(true);
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] Marking String {:?}", string_index)
+                        }
+                    } else {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] WARNING: Failed to mark String {:?} - not found", string_index)
+                        }
                     }
                 },
                 Value::Object(object_index) => {
-                    self.objects.get_mut(object_index).map(|managed_object| {
+                    if let Some(managed_object) = self.objects.get_mut(object_index) {
                         managed_object.marked.set(true);
                         #[cfg(feature = "gc_debug")]
                         {
                             eprintln!("[MemoryManager] Marking Object {:?}", object_index)
                         }
 
-                        for field_index in managed_object.properties.keys() {
-                            values.push_back(Value::String(*field_index));
+                        for (field_key, field_value) in &managed_object.properties {
+                            values.push_back(Value::String(*field_key));
+                            values.push_back(*field_value);
                         }
-                    });
+                    } else {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] WARNING: Failed to mark Object {:?} - not found", object_index)
+                        }
+                    }
                 },
 
                 _ => continue
@@ -255,10 +268,18 @@ impl MemoryManager {
         }
 
         for string_idx in strings_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing String {:?}", string_idx)
+            }
             self.deallocate_string(string_idx);
         }
 
         for obj_idx in objects_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing Object {:?}", obj_idx)
+            }
             self.objects.remove(obj_idx);
         }
 
@@ -266,11 +287,11 @@ impl MemoryManager {
     }
 
     pub fn load_object(&self, key: ObjectIndex) -> &ManagedObject {
-        self.objects.get(key).expect("Object not found in SlotMap")
+        self.objects.get(key).expect(format!("Object not found in SlotMap: {:?}", key).as_str())
     }
 
     pub fn load_string(&self, key: StringIndex) -> &str {
-        &self.strings.get(key).expect("String not found in SlotMap").content
+        &self.strings.get(key).expect(format!("String not found in SlotMap: {:?}", key).as_str()).content
     }
 
     /// Get current statistics
