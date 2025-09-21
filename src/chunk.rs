@@ -1,85 +1,13 @@
 use std::ops::Range;
-use std::collections::HashMap;
 use ariadne::{Report, ReportKind, Label};
 use scanner::ScanError;
-use string_pool::InternedString;
 use slotmap::DefaultKey;
 
 /// Runtime error type - alias for ScanError to reuse existing infrastructure
 pub type RuntimeError = ScanError;
 
-/// A Jsonnet object containing property key-value pairs
-#[derive(Debug, Clone, PartialEq)]
-pub struct JsonnetObject {
-    /// Object properties mapping interned string keys to values
-    pub properties: HashMap<InternedString, Value>,
-    /// Allocated bytes for GC accounting (includes HashMap capacity overhead)
-    allocated_bytes: usize,
-}
-
-impl JsonnetObject {
-    /// Calculate the actual size of this object including HashMap overhead
-    fn calculate_size(&self) -> usize {
-        let base_size = std::mem::size_of::<Self>();
-        // HashMap capacity accounts for actual allocated memory, not just length
-        let map_capacity_bytes = self.properties.capacity() * (
-            std::mem::size_of::<InternedString>() + std::mem::size_of::<Value>()
-        );
-        base_size + map_capacity_bytes
-    }
-
-    /// Create a new empty Jsonnet object
-    pub fn new() -> Self {
-        let properties = HashMap::new();
-        let mut obj = Self {
-            properties,
-            allocated_bytes: 0,
-        };
-        obj.allocated_bytes = obj.calculate_size();
-        obj
-    }
-
-    /// Create a Jsonnet object with the given properties
-    pub fn with_properties(properties: HashMap<InternedString, Value>) -> Self {
-        let mut obj = Self { 
-            properties,
-            allocated_bytes: 0,
-        };
-        obj.allocated_bytes = obj.calculate_size();
-        obj
-    }
-
-    /// Get a property value by key
-    pub fn get(&self, key: &InternedString) -> Option<&Value> {
-        self.properties.get(key)
-    }
-
-    /// Set a property value and recalculate size
-    pub fn set(&mut self, key: InternedString, value: Value) {
-        self.properties.insert(key, value);
-        self.allocated_bytes = self.calculate_size();
-    }
-
-    /// Get the allocated byte size of this object
-    pub fn allocated_bytes(&self) -> usize {
-        self.allocated_bytes
-    }
-
-    /// Check if object has a property
-    pub fn has_property(&self, key: &InternedString) -> bool {
-        self.properties.contains_key(key)
-    }
-
-    /// Get number of properties
-    pub fn len(&self) -> usize {
-        self.properties.len()
-    }
-
-    /// Check if object is empty
-    pub fn is_empty(&self) -> bool {
-        self.properties.is_empty()
-    }
-}
+pub type ObjectIndex = DefaultKey;
+pub type StringIndex = DefaultKey;
 
 /// Value type for the Jsonnet virtual machine
 #[derive(Debug, Clone, PartialEq)]
@@ -87,45 +15,30 @@ pub enum Value {
     Null,
     Boolean(bool),
     Number(f64),
-    String(InternedString),
-    Object(DefaultKey),
-}
-
-impl std::fmt::Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::Null => write!(f, "null"),
-            Value::Boolean(b) => write!(f, "{}", b),
-            Value::Number(n) => write!(f, "{}", n),
-            Value::String(s) => write!(f, "\"{}\"", s.as_str()),
-            Value::Object(_key) => write!(f, "{{object}}"), // Placeholder - actual formatting requires SlotMap access
-        }
-    }
+    String(StringIndex),
+    Object(ObjectIndex),
 }
 
 impl Value {
     /// Check if value is truthy according to Jsonnet rules
+    // @TODO: remove this and make is_truthy part of virtual machine
+    // The virutal machine has access to the memory manager so  can actually do
+    // truthy ness
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Null => false,
             Value::Boolean(b) => *b,
             Value::Number(n) => *n != 0.0,
-            Value::String(s) => !s.as_str().is_empty(),
+            Value::String(_s) => true,
             Value::Object(_key) => true, // Objects are always truthy
         }
     }
 
     /// Convert value to f64 for numeric operations
+    // @TODO: these need to move virtual machine because of memory manager
     pub fn to_number<'a>(&self, span: Range<usize>, source_id: &'a str) -> Result<f64, RuntimeError> {
         match self {
             Value::Number(n) => Ok(*n),
-            Value::String(s) => {
-                s.as_str().parse::<f64>().map_err(|_| RuntimeError {
-                    span,
-                    message: format!("Cannot convert string '{}' to number", s.as_str()),
-                    source_id: source_id.to_string(),
-                })
-            },
             _ => Err(RuntimeError {
                 span,
                 message: format!("Cannot convert {:?} to number", self),
@@ -135,6 +48,7 @@ impl Value {
     }
 
     /// Convert to integer for bitwise operations (per Jsonnet spec)
+    // @TODO: these need to move virtual machine because of memory manager
     pub fn to_integer<'a>(&self, span: Range<usize>, source_id: &'a str) -> Result<i64, RuntimeError> {
         match self {
             Value::Number(n) => {
@@ -148,26 +62,7 @@ impl Value {
                     Ok(*n as i64)
                 }
             }
-            Value::String(s) => {
-                match s.as_str().parse::<f64>() {
-                    Ok(n) => {
-                        if n.is_nan() || n.is_infinite() {
-                            Err(RuntimeError {
-                                span,
-                                message: format!("Cannot convert string '{}' (NaN or Infinity) to integer", s),
-                                source_id: source_id.to_string(),
-                            })
-                        } else {
-                            Ok(n as i64)
-                        }
-                    }
-                    Err(_) => Err(RuntimeError {
-                        span,
-                        message: format!("Cannot convert string '{}' to integer", s.as_str()),
-                        source_id: source_id.to_string(),
-                    })
-                }
-            }
+            // @TODO: turn string into integer
             _ => Err(RuntimeError {
                 span,
                 message: format!("Cannot convert {:?} to integer", self),
@@ -210,6 +105,30 @@ impl std::hash::Hash for Value {
                 4u8.hash(state);
                 key.hash(state);
             }
+        }
+    }
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Null => write!(f, "null"),
+            Value::Boolean(b) => write!(f, "{}", b),
+            Value::Number(n) => {
+                if n.is_nan() {
+                    write!(f, "NaN")
+                } else if n.is_infinite() {
+                    if n.is_sign_positive() {
+                        write!(f, "Infinity")
+                    } else {
+                        write!(f, "-Infinity")
+                    }
+                } else {
+                    write!(f, "{}", n)
+                }
+            },
+            Value::String(index) => write!(f, "String[{:?}]", index),
+            Value::Object(index) => write!(f, "Object[{:?}]", index),
         }
     }
 }
@@ -947,5 +866,42 @@ mod tests {
         assert!(chunk.is_empty());
         assert_eq!(chunk.count(), 0);
         assert_eq!(chunk.source_id, "");
+    }
+
+    #[test]
+    fn test_value_display() {
+        // Test null
+        assert_eq!(format!("{}", Value::Null), "null");
+
+        // Test boolean
+        assert_eq!(format!("{}", Value::Boolean(true)), "true");
+        assert_eq!(format!("{}", Value::Boolean(false)), "false");
+
+        // Test number
+        assert_eq!(format!("{}", Value::Number(42.0)), "42");
+        assert_eq!(format!("{}", Value::Number(-3.14)), "-3.14");
+        assert_eq!(format!("{}", Value::Number(0.0)), "0");
+
+        // Test special number values
+        assert_eq!(format!("{}", Value::Number(f64::NAN)), "NaN");
+        assert_eq!(format!("{}", Value::Number(f64::INFINITY)), "Infinity");
+        assert_eq!(format!("{}", Value::Number(f64::NEG_INFINITY)), "-Infinity");
+
+        // Test String and Object with indices (using slotmap key)
+        use slotmap::SlotMap;
+        let mut string_map: SlotMap<StringIndex, String> = SlotMap::new();
+        let mut object_map: SlotMap<ObjectIndex, String> = SlotMap::new();
+
+        let string_key = string_map.insert("test".to_string());
+        let object_key = object_map.insert("test_object".to_string());
+
+        let string_display = format!("{}", Value::String(string_key));
+        let object_display = format!("{}", Value::Object(object_key));
+
+        // Verify format - should be "String[<debug_output>]" and "Object[<debug_output>]"
+        assert!(string_display.starts_with("String["));
+        assert!(string_display.ends_with("]"));
+        assert!(object_display.starts_with("Object["));
+        assert!(object_display.ends_with("]"));
     }
 }

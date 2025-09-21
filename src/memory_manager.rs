@@ -1,15 +1,20 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::cell::Cell;
-use slotmap::{SlotMap, DefaultKey};
-use chunk::Value;
+use slotmap::SlotMap;
+use chunk::{ObjectIndex, StringIndex, Value};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AllocationResult<T> {
+    pub should_garbage_collect: bool,
+    pub index: T
+}
 
 /// A Jsonnet object containing property key-value pairs
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManagedObject {
     /// Object properties mapping interned string keys to values
-    /// TODO Properties is wrong here. It Should be a pointer into the SlotMap for string
-    pub properties: HashMap<ManagedString, Value>,
+    pub properties: HashMap<StringIndex, Value>,
     /// Allocated bytes for GC accounting (includes HashMap capacity overhead)
     allocated_bytes: usize,
     // GC marking
@@ -22,7 +27,7 @@ impl ManagedObject {
         let base_size = std::mem::size_of::<Self>();
         // HashMap capacity accounts for actual allocated memory, not just length
         let map_capacity_bytes = self.properties.capacity() * (
-            std::mem::size_of::<ManagedString>() + std::mem::size_of::<Value>()
+            std::mem::size_of::<StringIndex>() + std::mem::size_of::<Value>()
         );
         base_size + map_capacity_bytes
     }
@@ -40,7 +45,7 @@ impl ManagedObject {
     }
 
     /// Create a Jsonnet object with the given properties
-    pub fn with_properties(properties: HashMap<ManagedString, Value>) -> Self {
+    pub fn with_properties(properties: HashMap<StringIndex, Value>) -> Self {
         let mut obj = Self {
             properties,
             allocated_bytes: 0,
@@ -51,7 +56,7 @@ impl ManagedObject {
     }
 
     /// Get a property value by key
-    pub fn get(&self, key: &ManagedString) -> Option<&Value> {
+    pub fn get(&self, key: &StringIndex) -> Option<&Value> {
         self.properties.get(key)
     }
 
@@ -61,7 +66,7 @@ impl ManagedObject {
     }
 
     /// Check if object has a property
-    pub fn has_property(&self, key: &ManagedString) -> bool {
+    pub fn has_property(&self, key: &StringIndex) -> bool {
         self.properties.contains_key(key)
     }
 
@@ -115,10 +120,10 @@ impl std::fmt::Display for ManagedString {
 /// A HashSet-based string interning system with garbage collection support
 pub struct MemoryManager {
     /// HashSet containing all interned strings
-    interned_strings: HashMap<String, DefaultKey>,
-    strings: SlotMap<DefaultKey, ManagedString>,
+    interned_strings: HashMap<String, StringIndex>,
+    strings: SlotMap<StringIndex, ManagedString>,
     /// Collection of Objects
-    objects: SlotMap<DefaultKey, ManagedObject>,
+    objects: SlotMap<ObjectIndex, ManagedObject>,
     /// Total bytes allocated for all strings
     allocated_bytes: usize,
     /// GC threshold for triggering collection
@@ -138,10 +143,12 @@ impl MemoryManager {
     }
 
     /// Allocate_String a string, returning a handle
-    pub fn allocate_string(&mut self, content: &str) -> DefaultKey {
-        // Check if already interned by creating a temporary handle for lookup
+    pub fn allocate_string(&mut self, content: &str) -> AllocationResult<StringIndex> {
         if let Some(index) = self.interned_strings.get(content) {
-            *index
+            AllocationResult {
+                index: *index,
+                should_garbage_collect: false,
+            }
         } else {
             let managed_string = ManagedString::new(content.to_owned());
             self.allocated_bytes += managed_string.size();
@@ -150,11 +157,14 @@ impl MemoryManager {
             // this is a second copy of the content :-(
             self.interned_strings.insert(content.to_owned(), key);
 
-            key
+            AllocationResult {
+                should_garbage_collect: self.should_collect(),
+                index: key
+            }
         }
     }
 
-    fn deallocate_string(&mut self, string_key: DefaultKey) -> Option<ManagedString> {
+    fn deallocate_string(&mut self, string_key: StringIndex) -> Option<ManagedString> {
         let content = self.load_string(string_key).map(|s| s.content.clone());
         if let Some(content) = content {
             self.interned_strings.remove(&content);
@@ -163,16 +173,24 @@ impl MemoryManager {
         self.strings.remove(string_key)
     }
 
-    pub fn allocate_object(&mut self) -> DefaultKey {
+    pub fn allocate_object(&mut self) -> AllocationResult<ObjectIndex> {
         let obj = ManagedObject::new();
         self.allocated_bytes += obj.calculate_size();
-        self.objects.insert(obj)
+        let index = self.objects.insert(obj);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index
+        }
     }
 
-    pub fn allocate_object_with_properties(&mut self, properties: HashMap<ManagedString, Value>) -> DefaultKey {
+    pub fn allocate_object_with_properties(&mut self, properties: HashMap<StringIndex, Value>) -> AllocationResult<ObjectIndex> {
         let obj = ManagedObject::with_properties(properties);
         self.allocated_bytes += obj.calculate_size();
-        self.objects.insert(obj)
+        let index = self.objects.insert(obj);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index
+        }
     }
 
     /// Check if garbage collection should be triggered
@@ -195,11 +213,11 @@ impl MemoryManager {
         }
     }
 
-    pub fn load_object(&self, key: DefaultKey) -> Option<&ManagedObject> {
+    pub fn load_object(&self, key: ObjectIndex) -> Option<&ManagedObject> {
         self.objects.get(key)
     }
 
-    pub fn load_string(&self, key: DefaultKey) -> Option<&ManagedString> {
+    pub fn load_string(&self, key: StringIndex) -> Option<&ManagedString> {
         self.strings.get(key)
     }
 
@@ -235,14 +253,14 @@ mod tests {
         assert_eq!(s1, s2);
         assert_ne!(s1, s3);
 
-        assert_eq!(set.load_string(s1).map(|managed| managed.content.as_str()), Some("hello"));
+        assert_eq!(set.load_string(s1.index).map(|managed| managed.content.as_str()), Some("hello"));
     }
 
     #[test]
     fn test_interning_with_owned_strings() {
         let mut set = MemoryManager::new();
-        let s1: DefaultKey;
-        let s2: DefaultKey;
+        let s1: AllocationResult<StringIndex>;
+        let s2: AllocationResult<StringIndex>;
 
         {
             let owned1 = "hello".to_string();
@@ -262,15 +280,34 @@ mod tests {
         let s = manager.allocate_string("hello");
         let repeated = manager.allocate_string("hello");
 
-        assert_eq!(manager.load_string(s), manager.load_string(repeated));
+        assert_eq!(manager.load_string(s.index), manager.load_string(repeated.index));
 
         assert_eq!(Some("hello"),
                    manager
-                   .deallocate_string(repeated)
+                   .deallocate_string(repeated.index)
                    .map(|s| s.content.clone()).as_deref());
 
-        assert_eq!(manager.load_string(s), None);
-        assert_eq!(manager.load_string(repeated), None);
+        assert_eq!(manager.load_string(s.index), None);
+        assert_eq!(manager.load_string(repeated.index), None);
+
+    }
+
+    #[test]
+    fn allocate_object() {
+        let mut manager = MemoryManager::new();
+        let name = manager.allocate_string("field1").index;
+        let field_value = Value::Boolean(true);
+
+        let mut properties = HashMap::new();
+
+        properties.insert(name, field_value);
+        let object_index = manager.allocate_object_with_properties(properties).index;
+
+        if let Some(object) = manager.load_object(object_index) {
+            assert_eq!(Some(&Value::Boolean(true)), object.get(&name));
+        } else {
+            panic!("Failed to load the created object");
+        }
 
     }
 
