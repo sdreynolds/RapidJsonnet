@@ -1,13 +1,13 @@
+use chunk::{ObjectIndex, StringIndex, Value};
+use slotmap::SlotMap;
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::cell::Cell;
-use slotmap::SlotMap;
-use chunk::{ObjectIndex, StringIndex, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AllocationResult<T> {
     pub should_garbage_collect: bool,
-    pub index: T
+    pub index: T,
 }
 
 /// A Jsonnet object containing property key-value pairs
@@ -24,9 +24,8 @@ impl ManagedObject {
     fn size(&self) -> usize {
         let base_size = std::mem::size_of::<Self>();
         // HashMap capacity accounts for actual allocated memory, not just length
-        let map_capacity_bytes = self.properties.capacity() * (
-            std::mem::size_of::<StringIndex>() + std::mem::size_of::<Value>()
-        );
+        let map_capacity_bytes = self.properties.capacity()
+            * (std::mem::size_of::<StringIndex>() + std::mem::size_of::<Value>());
         base_size + map_capacity_bytes
     }
 
@@ -146,7 +145,7 @@ impl MemoryManager {
 
             AllocationResult {
                 should_garbage_collect: self.should_collect(),
-                index: key
+                index: key,
             }
         }
     }
@@ -166,17 +165,20 @@ impl MemoryManager {
         let index = self.objects.insert(obj);
         AllocationResult {
             should_garbage_collect: self.should_collect(),
-            index
+            index,
         }
     }
 
-    pub fn allocate_object_with_properties(&mut self, properties: HashMap<StringIndex, Value>) -> AllocationResult<ObjectIndex> {
+    pub fn allocate_object_with_properties(
+        &mut self,
+        properties: HashMap<StringIndex, Value>,
+    ) -> AllocationResult<ObjectIndex> {
         let obj = ManagedObject::with_properties(properties);
         self.allocated_bytes += obj.size();
         let index = self.objects.insert(obj);
         AllocationResult {
             should_garbage_collect: self.should_collect(),
-            index
+            index,
         }
     }
 
@@ -184,8 +186,10 @@ impl MemoryManager {
     pub fn should_collect(&self) -> bool {
         #[cfg(feature = "stress_gc")]
         {
-            eprintln!("[MemoryManager] Stress GC enabled - triggering collection ({} bytes)",
-                     self.allocated_bytes);
+            eprintln!(
+                "[MemoryManager] Stress GC enabled - triggering collection ({} bytes)",
+                self.allocated_bytes
+            );
             return true;
         }
 
@@ -193,8 +197,10 @@ impl MemoryManager {
         {
             let should_collect = self.allocated_bytes >= self.gc_threshold;
             if should_collect {
-                eprintln!("[MemoryManager] Threshold exceeded - triggering collection ({} bytes >= {} bytes)",
-                         self.allocated_bytes, self.gc_threshold);
+                eprintln!(
+                    "[MemoryManager] Threshold exceeded - triggering collection ({} bytes >= {} bytes)",
+                    self.allocated_bytes, self.gc_threshold
+                );
             }
             should_collect
         }
@@ -217,10 +223,13 @@ impl MemoryManager {
                     } else {
                         #[cfg(feature = "gc_debug")]
                         {
-                            eprintln!("[MemoryManager] WARNING: Failed to mark String {:?} - not found", string_index)
+                            eprintln!(
+                                "[MemoryManager] WARNING: Failed to mark String {:?} - not found",
+                                string_index
+                            )
                         }
                     }
-                },
+                }
                 Value::Object(object_index) => {
                     if let Some(managed_object) = self.objects.get_mut(object_index) {
                         managed_object.marked.set(true);
@@ -236,12 +245,15 @@ impl MemoryManager {
                     } else {
                         #[cfg(feature = "gc_debug")]
                         {
-                            eprintln!("[MemoryManager] WARNING: Failed to mark Object {:?} - not found", object_index)
+                            eprintln!(
+                                "[MemoryManager] WARNING: Failed to mark Object {:?} - not found",
+                                object_index
+                            )
                         }
                     }
-                },
+                }
 
-                _ => continue
+                _ => continue,
             };
         }
 
@@ -287,20 +299,22 @@ impl MemoryManager {
     }
 
     pub fn load_object(&self, key: ObjectIndex) -> &ManagedObject {
-        self.objects.get(key).expect(format!("Object not found in SlotMap: {:?}", key).as_str())
+        self.objects
+            .get(key)
+            .expect(format!("Object not found in SlotMap: {:?}", key).as_str())
     }
 
     pub fn load_string(&self, key: StringIndex) -> &str {
-        &self.strings.get(key).expect(format!("String not found in SlotMap: {:?}", key).as_str()).content
+        &self
+            .strings
+            .get(key)
+            .expect(format!("String not found in SlotMap: {:?}", key).as_str())
+            .content
     }
 
     /// Get current statistics
     pub fn stats(&self) -> (usize, usize, usize) {
-        (
-            self.allocated_bytes,
-            self.gc_threshold,
-            self.strings.len()
-        )
+        (self.allocated_bytes, self.gc_threshold, self.strings.len())
     }
 }
 
@@ -353,16 +367,21 @@ mod tests {
         let s = manager.allocate_string("hello");
         let repeated = manager.allocate_string("hello");
 
-        assert_eq!(manager.load_string(s.index), manager.load_string(repeated.index));
+        assert_eq!(
+            manager.load_string(s.index),
+            manager.load_string(repeated.index)
+        );
 
-        assert_eq!(Some("hello"),
-                   manager
-                   .deallocate_string(repeated.index)
-                   .map(|s| s.content.clone()).as_deref());
+        assert_eq!(
+            Some("hello"),
+            manager
+                .deallocate_string(repeated.index)
+                .map(|s| s.content.clone())
+                .as_deref()
+        );
 
         assert_eq!(manager.strings.get(s.index), None);
         assert_eq!(manager.strings.get(repeated.index), None);
-
     }
 
     #[test]
@@ -392,30 +411,36 @@ mod tests {
         let object_index = manager.allocate_object_with_properties(properties).index;
 
         let object_size = manager.load_object(object_index).size();
-        let string_size = manager.strings.get(name)
-            .expect("String field1 was just created").size();
+        let string_size = manager
+            .strings
+            .get(name)
+            .expect("String field1 was just created")
+            .size();
 
         let mut roots: Vec<Value> = Vec::new();
         roots.push(Value::Object(object_index));
 
         manager.run_garbage_collect(roots);
-        assert_eq!(object_size + string_size, manager.allocated_bytes,
-                   "Total memory should be both string and object size");
+        assert_eq!(
+            object_size + string_size,
+            manager.allocated_bytes,
+            "Total memory should be both string and object size"
+        );
 
         let mut only_string: Vec<Value> = Vec::new();
         only_string.push(Value::String(name));
         manager.run_garbage_collect(only_string);
-        assert_eq!(string_size, manager.allocated_bytes,
-                   "GC should have collected the object but left the string around");
+        assert_eq!(
+            string_size, manager.allocated_bytes,
+            "GC should have collected the object but left the string around"
+        );
 
         // This would panic since the object was garbage collected:
         assert_eq!(None, manager.objects.get(object_index));
 
-        manager.run_garbage_collect(vec!());
+        manager.run_garbage_collect(vec![]);
         assert_eq!(0, manager.allocated_bytes);
         // This would panic since the string was garbage collected:
         assert_eq!(None, manager.strings.get(name));
-
-
     }
 }

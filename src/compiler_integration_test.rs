@@ -1,5 +1,5 @@
-use std::fs;
 use crate::compiler::Compiler;
+use std::fs;
 
 #[cfg(test)]
 mod integration_tests {
@@ -10,7 +10,7 @@ mod integration_tests {
         let mut scanner = crate::scanner::Scanner::new("42", "simple_number.jsonnet");
         let compiler = Compiler::new(&mut scanner, "simple_number.jsonnet");
         let chunk = compiler.compile().unwrap();
-        
+
         assert_eq!(chunk.constants.len(), 1);
         assert_eq!(chunk.constants[0], 42.0);
     }
@@ -20,7 +20,7 @@ mod integration_tests {
         let mut scanner = crate::scanner::Scanner::new("3 + 4", "simple_addition.jsonnet");
         let compiler = Compiler::new(&mut scanner, "simple_addition.jsonnet");
         let chunk = compiler.compile().unwrap();
-        
+
         assert_eq!(chunk.constants.len(), 2);
         assert_eq!(chunk.constants[0], 3.0);
         assert_eq!(chunk.constants[1], 4.0);
@@ -31,17 +31,18 @@ mod integration_tests {
         let mut scanner = crate::scanner::Scanner::new("-42", "unary_minus.jsonnet");
         let compiler = Compiler::new(&mut scanner, "unary_minus.jsonnet");
         let chunk = compiler.compile().unwrap();
-        
+
         assert_eq!(chunk.constants.len(), 1);
         assert_eq!(chunk.constants[0], 42.0);
     }
 
     #[test]
     fn test_complex_expression_file() {
-        let mut scanner = crate::scanner::Scanner::new("-3 * (4 - 1 + 2)", "complex_expression.jsonnet");
+        let mut scanner =
+            crate::scanner::Scanner::new("-3 * (4 - 1 + 2)", "complex_expression.jsonnet");
         let compiler = Compiler::new(&mut scanner, "complex_expression.jsonnet");
         let chunk = compiler.compile().unwrap();
-        
+
         // Should have constants: 3, 4, 1, 2
         assert_eq!(chunk.constants.len(), 4);
         assert_eq!(chunk.constants[0], 3.0);
@@ -52,10 +53,11 @@ mod integration_tests {
 
     #[test]
     fn test_precedence_test_file() {
-        let mut scanner = crate::scanner::Scanner::new("(-1 + 2) * 3 - -4", "precedence_test.jsonnet");
+        let mut scanner =
+            crate::scanner::Scanner::new("(-1 + 2) * 3 - -4", "precedence_test.jsonnet");
         let compiler = Compiler::new(&mut scanner, "precedence_test.jsonnet");
         let chunk = compiler.compile().unwrap();
-        
+
         // Should have constants: 1, 2, 3, 4
         assert_eq!(chunk.constants.len(), 4);
         assert_eq!(chunk.constants[0], 1.0);

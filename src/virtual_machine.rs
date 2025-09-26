@@ -1,6 +1,6 @@
-use std::ops::Range;
-use chunk::{Chunk, Opcode, ObjectIndex, Value, RuntimeError};
+use chunk::{Chunk, ObjectIndex, Opcode, RuntimeError, Value};
 use memory_manager::MemoryManager;
+use std::ops::Range;
 
 /// Virtual machine for executing Jsonnet bytecode
 pub struct VirtualMachine<'a> {
@@ -87,11 +87,13 @@ impl<'a> VirtualMachine<'a> {
     /// Read a u16 operand from the current position and advance PC
     fn read_u16_operand(&mut self) -> Result<u16, RuntimeError> {
         let chunk = self.current_chunk();
-        let operand = chunk.read_u16(self.program_counter + 1).ok_or_else(|| RuntimeError {
-            span: self.get_current_span(),
-            message: "Invalid bytecode - missing operand".to_string(),
-            source_id: chunk.source_id.to_string(),
-        })?;
+        let operand = chunk
+            .read_u16(self.program_counter + 1)
+            .ok_or_else(|| RuntimeError {
+                span: self.get_current_span(),
+                message: "Invalid bytecode - missing operand".to_string(),
+                source_id: chunk.source_id.to_string(),
+            })?;
 
         self.program_counter += 3; // opcode + 2 bytes for u16
         Ok(operand)
@@ -116,11 +118,13 @@ impl<'a> VirtualMachine<'a> {
                 });
             }
 
-            let opcode = chunk.read_opcode(self.program_counter).ok_or_else(|| RuntimeError {
-                span: self.get_current_span(),
-                message: "Invalid opcode in bytecode".to_string(),
-                source_id: chunk.source_id.to_string(),
-            })?;
+            let opcode = chunk
+                .read_opcode(self.program_counter)
+                .ok_or_else(|| RuntimeError {
+                    span: self.get_current_span(),
+                    message: "Invalid opcode in bytecode".to_string(),
+                    source_id: chunk.source_id.to_string(),
+                })?;
 
             match opcode {
                 Opcode::LoadNull => {
@@ -163,7 +167,10 @@ impl<'a> VirtualMachine<'a> {
                     match (&a, &b) {
                         // Object merging (according to Jsonnet spec)
                         (Value::Object(left_key), Value::Object(right_key)) => {
-                            let (left_object, right_object) = (self.memory_manager.load_object(*left_key), self.memory_manager.load_object(*right_key));
+                            let (left_object, right_object) = (
+                                self.memory_manager.load_object(*left_key),
+                                self.memory_manager.load_object(*right_key),
+                            );
                             // Create merged properties starting with left object
                             let mut merged_properties = left_object.properties.clone();
 
@@ -172,12 +179,17 @@ impl<'a> VirtualMachine<'a> {
                                 merged_properties.insert(*key, value.clone());
                             }
 
-                            let merged_allocation = self.memory_manager.allocate_object_with_properties(merged_properties);
+                            let merged_allocation = self
+                                .memory_manager
+                                .allocate_object_with_properties(merged_properties);
                             self.push(Value::Object(merged_allocation.index))?;
                             if merged_allocation.should_garbage_collect {
                                 #[cfg(feature = "gc_debug")]
                                 {
-                                    eprintln!("[VirtualMachine] Running GC at PC={} (Object merge in Concat)", self.program_counter);
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (Object merge in Concat)",
+                                        self.program_counter
+                                    );
                                 }
                                 self.run_garbage_collection();
                             }
@@ -187,7 +199,7 @@ impl<'a> VirtualMachine<'a> {
                                 span: self.get_current_span(),
                                 message: "Must concatenate objects with other objects".to_string(),
                                 source_id: self.current_chunk().source_id.to_string(),
-                            })
+                            });
                         }
                         // String concatenation if either operand is a string
                         (Value::String(_), _) | (_, Value::String(_)) => {
@@ -211,14 +223,23 @@ impl<'a> VirtualMachine<'a> {
                             if interned.should_garbage_collect {
                                 #[cfg(feature = "gc_debug")]
                                 {
-                                    eprintln!("[VirtualMachine] Running GC at PC={} (String concat in Concat fallback)", self.program_counter);
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (String concat in Concat fallback)",
+                                        self.program_counter
+                                    );
                                 }
                                 self.run_garbage_collection();
                             }
                         }
                         // Numeric addition for all other cases
                         _ => {
-                            let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? + b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                            let result = a.to_number(
+                                self.get_current_span(),
+                                self.current_chunk().source_id,
+                            )? + b.to_number(
+                                self.get_current_span(),
+                                self.current_chunk().source_id,
+                            )?;
                             self.push(Value::Number(result))?;
                         }
                     }
@@ -228,7 +249,9 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Sub => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? - b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = a
+                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
+                        - b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -236,7 +259,9 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Mul => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? * b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = a
+                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
+                        * b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -244,7 +269,8 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Div => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let b_num = b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let b_num =
+                        b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
                     if b_num == 0.0 {
                         return Err(RuntimeError {
                             span: self.get_current_span(),
@@ -252,7 +278,9 @@ impl<'a> VirtualMachine<'a> {
                             source_id: self.current_chunk().source_id.to_string(),
                         });
                     }
-                    let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? / b_num;
+                    let result = a
+                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
+                        / b_num;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -261,7 +289,9 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Lt => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? < b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = a
+                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
+                        < b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -269,7 +299,9 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Le => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? <= b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = a
+                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
+                        <= b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -277,7 +309,9 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Gt => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? > b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = a
+                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
+                        > b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -285,7 +319,9 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Ge => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)? >= b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = a
+                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
+                        >= b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -316,15 +352,20 @@ impl<'a> VirtualMachine<'a> {
                     // Optimized string concatenation - assumes both are strings
                     match (&a, &b) {
                         (Value::String(s1), Value::String(s2)) => {
-                            let result_str = format!("{}{}",
-                                                     self.memory_manager.load_string(*s1),
-                                                     self.memory_manager.load_string(*s2));
+                            let result_str = format!(
+                                "{}{}",
+                                self.memory_manager.load_string(*s1),
+                                self.memory_manager.load_string(*s2)
+                            );
                             let interned = self.memory_manager.allocate_string(&result_str);
                             self.push(Value::String(interned.index))?;
                             if interned.should_garbage_collect {
                                 #[cfg(feature = "gc_debug")]
                                 {
-                                    eprintln!("[VirtualMachine] Running GC at PC={} (String concat in StringConcat)", self.program_counter);
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (String concat in StringConcat)",
+                                        self.program_counter
+                                    );
                                 }
                                 self.run_garbage_collection();
                             }
@@ -352,7 +393,10 @@ impl<'a> VirtualMachine<'a> {
                             if interned.should_garbage_collect {
                                 #[cfg(feature = "gc_debug")]
                                 {
-                                    eprintln!("[VirtualMachine] Running GC at PC={} (String concat in Multiply)", self.program_counter);
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (String concat in Multiply)",
+                                        self.program_counter
+                                    );
                                 }
                                 self.run_garbage_collection();
                             }
@@ -365,7 +409,9 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Shl => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let shift_count = (b.to_integer(self.get_current_span(), self.current_chunk().source_id)? % 64) as u32;
+                    let shift_count = (b
+                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
+                        % 64) as u32;
                     if shift_count >= 64 {
                         return Err(RuntimeError {
                             span: self.get_current_span(),
@@ -373,7 +419,9 @@ impl<'a> VirtualMachine<'a> {
                             source_id: self.current_chunk().source_id.to_string(),
                         });
                     }
-                    let result = (a.to_integer(self.get_current_span(), self.current_chunk().source_id)? << shift_count) as f64;
+                    let result = (a
+                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
+                        << shift_count) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -381,8 +429,12 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Shr => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let shift_count = (b.to_integer(self.get_current_span(), self.current_chunk().source_id)? % 64) as u32;
-                    let result = (a.to_integer(self.get_current_span(), self.current_chunk().source_id)? >> shift_count) as f64;
+                    let shift_count = (b
+                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
+                        % 64) as u32;
+                    let result = (a
+                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
+                        >> shift_count) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -390,7 +442,10 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::BitAnd => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = (a.to_integer(self.get_current_span(), self.current_chunk().source_id)? & b.to_integer(self.get_current_span(), self.current_chunk().source_id)?) as f64;
+                    let result = (a
+                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
+                        & b.to_integer(self.get_current_span(), self.current_chunk().source_id)?)
+                        as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -398,7 +453,10 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::BitXor => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = (a.to_integer(self.get_current_span(), self.current_chunk().source_id)? ^ b.to_integer(self.get_current_span(), self.current_chunk().source_id)?) as f64;
+                    let result = (a
+                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
+                        ^ b.to_integer(self.get_current_span(), self.current_chunk().source_id)?)
+                        as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -406,7 +464,10 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::BitOr => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = (a.to_integer(self.get_current_span(), self.current_chunk().source_id)? | b.to_integer(self.get_current_span(), self.current_chunk().source_id)?) as f64;
+                    let result = (a
+                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
+                        | b.to_integer(self.get_current_span(), self.current_chunk().source_id)?)
+                        as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -437,14 +498,16 @@ impl<'a> VirtualMachine<'a> {
                 // Unary operations
                 Opcode::Neg => {
                     let a = self.pop()?;
-                    let result = -a.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result =
+                        -a.to_number(self.get_current_span(), self.current_chunk().source_id)?;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::Pos => {
                     let a = self.pop()?;
-                    let result = a.to_number(self.get_current_span(), self.current_chunk().source_id)?; // Unary + is essentially a no-op for numbers
+                    let result =
+                        a.to_number(self.get_current_span(), self.current_chunk().source_id)?; // Unary + is essentially a no-op for numbers
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -458,7 +521,9 @@ impl<'a> VirtualMachine<'a> {
 
                 Opcode::BitNot => {
                     let a = self.pop()?;
-                    let result = (!a.to_integer(self.get_current_span(), self.current_chunk().source_id)?) as f64;
+                    let result = (!a
+                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?)
+                        as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -505,20 +570,25 @@ impl<'a> VirtualMachine<'a> {
                         }
                     }
 
-                    let object_allocation = self.memory_manager.allocate_object_with_properties(properties);
+                    let object_allocation = self
+                        .memory_manager
+                        .allocate_object_with_properties(properties);
                     self.push(Value::Object(object_allocation.index))?;
                     if object_allocation.should_garbage_collect {
                         #[cfg(feature = "gc_debug")]
                         {
-                            eprintln!("[VirtualMachine] Running GC at PC={} (Object construction)", self.program_counter);
+                            eprintln!(
+                                "[VirtualMachine] Running GC at PC={} (Object construction)",
+                                self.program_counter
+                            );
                         }
                         self.run_garbage_collection();
                     }
                 }
 
                 Opcode::ObjectIndex => {
-                    let field_name = self.pop()?;  // Property name to access
-                    let object_value = self.pop()?;  // Object to index into
+                    let field_name = self.pop()?; // Property name to access
+                    let object_value = self.pop()?; // Object to index into
 
                     // Ensure we have an object
                     if let Value::Object(object_key) = object_value {
@@ -534,14 +604,20 @@ impl<'a> VirtualMachine<'a> {
                         } else {
                             return Err(RuntimeError {
                                 span: self.get_current_span(),
-                                message: format!("Object index must be a string, got {:?}", field_name),
+                                message: format!(
+                                    "Object index must be a string, got {:?}",
+                                    field_name
+                                ),
                                 source_id: self.current_chunk().source_id.to_string(),
                             });
                         }
                     } else {
                         return Err(RuntimeError {
                             span: self.get_current_span(),
-                            message: format!("Cannot index into non-object value: {:?}", object_value),
+                            message: format!(
+                                "Cannot index into non-object value: {:?}",
+                                object_value
+                            ),
                             source_id: self.current_chunk().source_id.to_string(),
                         });
                     }
@@ -549,12 +625,17 @@ impl<'a> VirtualMachine<'a> {
                 }
 
                 Opcode::ObjectMerge => {
-                    let right_value = self.pop()?;  // Right-hand side object
-                    let left_value = self.pop()?;   // Left-hand side object
+                    let right_value = self.pop()?; // Right-hand side object
+                    let left_value = self.pop()?; // Left-hand side object
 
                     // Ensure both values are objects
-                    if let (Value::Object(left_key), Value::Object(right_key)) = (left_value, right_value) {
-                        let (left_object, right_object) = (self.memory_manager.load_object(left_key), self.memory_manager.load_object(right_key));
+                    if let (Value::Object(left_key), Value::Object(right_key)) =
+                        (left_value, right_value)
+                    {
+                        let (left_object, right_object) = (
+                            self.memory_manager.load_object(left_key),
+                            self.memory_manager.load_object(right_key),
+                        );
                         // Create merged properties starting with left object
                         let mut merged_properties = left_object.properties.clone();
 
@@ -563,12 +644,17 @@ impl<'a> VirtualMachine<'a> {
                             merged_properties.insert(*key, value.clone());
                         }
 
-                        let merged_allocation = self.memory_manager.allocate_object_with_properties(merged_properties);
+                        let merged_allocation = self
+                            .memory_manager
+                            .allocate_object_with_properties(merged_properties);
                         self.push(Value::Object(merged_allocation.index))?;
                         if merged_allocation.should_garbage_collect {
                             #[cfg(feature = "gc_debug")]
                             {
-                                eprintln!("[VirtualMachine] Running GC at PC={} (Object merge in Add)", self.program_counter);
+                                eprintln!(
+                                    "[VirtualMachine] Running GC at PC={} (Object merge in Add)",
+                                    self.program_counter
+                                );
                             }
                             self.run_garbage_collection();
                         }
@@ -614,20 +700,24 @@ impl<'a> VirtualMachine<'a> {
     }
 
     /// Convert a VM Value to serde_json::Value for JSON output
-    fn value_to_json(&self, value: &Value, visited: &mut std::collections::HashSet<ObjectIndex>) -> Result<serde_json::Value, RuntimeError> {
+    fn value_to_json(
+        &self,
+        value: &Value,
+        visited: &mut std::collections::HashSet<ObjectIndex>,
+    ) -> Result<serde_json::Value, RuntimeError> {
         match value {
             Value::Null => Ok(serde_json::Value::Null),
             Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
-            Value::Number(n) => {
-                serde_json::Number::from_f64(*n)
-                    .map(serde_json::Value::Number)
-                    .ok_or_else(|| RuntimeError {
-                        span: 0..0,
-                        message: "Invalid number for JSON conversion".to_string(),
-                        source_id: "serialization".to_string(),
-                    })
-            },
-            Value::String(s) => Ok(serde_json::Value::String(self.memory_manager.load_string(*s).to_owned())),
+            Value::Number(n) => serde_json::Number::from_f64(*n)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| RuntimeError {
+                    span: 0..0,
+                    message: "Invalid number for JSON conversion".to_string(),
+                    source_id: "serialization".to_string(),
+                }),
+            Value::String(s) => Ok(serde_json::Value::String(
+                self.memory_manager.load_string(*s).to_owned(),
+            )),
             Value::Object(object_key) => {
                 // Check for circular references
                 if visited.contains(object_key) {
@@ -645,7 +735,8 @@ impl<'a> VirtualMachine<'a> {
 
                 for (key, value) in &object.properties {
                     let json_value = self.value_to_json(value, visited)?;
-                    json_object.insert(self.memory_manager.load_string(*key).to_owned(), json_value);
+                    json_object
+                        .insert(self.memory_manager.load_string(*key).to_owned(), json_value);
                 }
 
                 visited.remove(object_key); // Remove after processing
@@ -666,7 +757,10 @@ impl<'a> VirtualMachine<'a> {
 }
 
 /// Main execution function - entry point for running Jsonnet bytecode
-pub fn execute(chunk: Chunk, memory_manager: MemoryManager) -> Result<serde_json::Value, RuntimeError> {
+pub fn execute(
+    chunk: Chunk,
+    memory_manager: MemoryManager,
+) -> Result<serde_json::Value, RuntimeError> {
     let mut vm = VirtualMachine::new(chunk, memory_manager);
 
     let value = vm.interpret()?;
@@ -1016,7 +1110,12 @@ mod tests {
         let result = vm.interpret();
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("Invalid constant index"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("Invalid constant index")
+        );
     }
 
     #[test]
@@ -1030,7 +1129,12 @@ mod tests {
         let result = vm.interpret();
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("missing Return instruction"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("missing Return instruction")
+        );
     }
 
     #[test]
@@ -1058,11 +1162,11 @@ mod tests {
 
         chunk.write_opcode_u16(Opcode::LoadConst, idx_10 as u16, 0..5);
         chunk.write_opcode_u16(Opcode::LoadConst, idx_5 as u16, 5..10);
-        chunk.write_opcode(Opcode::Add, 10..15);  // 15
+        chunk.write_opcode(Opcode::Add, 10..15); // 15
         chunk.write_opcode_u16(Opcode::LoadConst, idx_2 as u16, 15..20);
-        chunk.write_opcode(Opcode::Mul, 20..25);  // 30
+        chunk.write_opcode(Opcode::Mul, 20..25); // 30
         chunk.write_opcode_u16(Opcode::LoadConst, idx_3 as u16, 25..30);
-        chunk.write_opcode(Opcode::Sub, 30..35);  // 27
+        chunk.write_opcode(Opcode::Sub, 30..35); // 27
         chunk.write_opcode(Opcode::Return, 35..40);
 
         let memory_manager = MemoryManager::new();

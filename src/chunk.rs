@@ -1,7 +1,7 @@
-use std::ops::Range;
-use ariadne::{Report, ReportKind, Label};
+use ariadne::{Label, Report, ReportKind};
 use scanner::ScanError;
 use slotmap::DefaultKey;
+use std::ops::Range;
 
 /// Runtime error type - alias for ScanError to reuse existing infrastructure
 pub type RuntimeError = ScanError;
@@ -36,7 +36,11 @@ impl Value {
 
     /// Convert value to f64 for numeric operations
     // @TODO: these need to move virtual machine because of memory manager
-    pub fn to_number<'a>(&self, span: Range<usize>, source_id: &'a str) -> Result<f64, RuntimeError> {
+    pub fn to_number<'a>(
+        &self,
+        span: Range<usize>,
+        source_id: &'a str,
+    ) -> Result<f64, RuntimeError> {
         match self {
             Value::Number(n) => Ok(*n),
             _ => Err(RuntimeError {
@@ -49,7 +53,11 @@ impl Value {
 
     /// Convert to integer for bitwise operations (per Jsonnet spec)
     // @TODO: these need to move virtual machine because of memory manager
-    pub fn to_integer<'a>(&self, span: Range<usize>, source_id: &'a str) -> Result<i64, RuntimeError> {
+    pub fn to_integer<'a>(
+        &self,
+        span: Range<usize>,
+        source_id: &'a str,
+    ) -> Result<i64, RuntimeError> {
         match self {
             Value::Number(n) => {
                 if n.is_nan() || n.is_infinite() {
@@ -126,7 +134,7 @@ impl std::fmt::Display for Value {
                 } else {
                     write!(f, "{}", n)
                 }
-            },
+            }
             Value::String(index) => write!(f, "String[{:?}]", index),
             Value::Object(index) => write!(f, "Object[{:?}]", index),
         }
@@ -141,35 +149,35 @@ pub enum Opcode {
     LoadNull = 0,
     LoadTrue = 1,
     LoadFalse = 2,
-    LoadConst = 3,    // operand: u16 index
+    LoadConst = 3, // operand: u16 index
     LoadSelf = 4,
     LoadSuper = 5,
-    LoadVar = 6,      // operand: u16 name_index
+    LoadVar = 6, // operand: u16 name_index
 
     // Object Operations
-    CreateObject = 10,      // operand: u16 field_count
+    CreateObject = 10, // operand: u16 field_count
     CreateObjectComp = 11,
-    FieldDef = 12,          // operands: u16 name_index, u8 hidden_type
+    FieldDef = 12, // operands: u16 name_index, u8 hidden_type
     Assert = 13,
     ObjectIndex = 14,
     ObjectMerge = 15,
 
     // Array Operations
-    CreateArray = 20,       // operand: u16 element_count
+    CreateArray = 20, // operand: u16 element_count
     ArrayIndex = 21,
     ArrayConcat = 22,
 
     // Function Operations
-    CreateFunction = 30,    // operands: u8 param_count, u32 code_offset
-    Call = 31,              // operands: u8 positional_count, u8 named_count
+    CreateFunction = 30, // operands: u8 param_count, u32 code_offset
+    Call = 31,           // operands: u8 positional_count, u8 named_count
     Return = 32,
-    BindDefault = 33,       // operand: u16 param_name
+    BindDefault = 33, // operand: u16 param_name
 
     // Control Flow
-    Jump = 40,              // operand: i32 offset
-    JumpIfFalse = 41,       // operand: i32 offset
-    JumpIfTrue = 42,        // operand: i32 offset
-    LocalScope = 43,        // operand: u8 var_count
+    Jump = 40,        // operand: i32 offset
+    JumpIfFalse = 41, // operand: i32 offset
+    JumpIfTrue = 42,  // operand: i32 offset
+    LocalScope = 43,  // operand: u8 var_count
 
     // Binary Operators
     Add = 50,
@@ -198,7 +206,7 @@ pub enum Opcode {
     BitNot = 73,
 
     // Standard Library Integration
-    StdCall = 80,           // operands: u16 function_index, u8 arg_count
+    StdCall = 80, // operands: u16 function_index, u8 arg_count
     Error = 81,
 
     // Stack Management
@@ -362,7 +370,11 @@ impl<'a> Chunk<'a> {
     }
 
     /// Creates an ariadne error report for a range of code offsets with the given message
-    pub fn create_error_report(&self, code_range: Range<usize>, message: &str) -> Report<(&str, Range<usize>)> {
+    pub fn create_error_report(
+        &self,
+        code_range: Range<usize>,
+        message: &str,
+    ) -> Report<(&str, Range<usize>)> {
         // Find the source spans that correspond to the code range
         let start_span = self.get_span(code_range.start);
         let end_span = self.get_span(code_range.end.saturating_sub(1));
@@ -378,8 +390,7 @@ impl<'a> Chunk<'a> {
         Report::build(ReportKind::Error, (self.source_id, source_span.clone()))
             .with_message(message)
             .with_label(
-                Label::new((self.source_id, source_span))
-                    .with_message("error occurred here")
+                Label::new((self.source_id, source_span)).with_message("error occurred here"),
             )
             .finish()
     }
@@ -521,8 +532,11 @@ impl<'a> Chunk<'a> {
             raw_bytecode.push('\n');
         }
 
-        let mut report = Report::build(ReportKind::Advice, (self.source_id, 0..0))
-            .with_message(format!("Debug: Compilation bytecode visualization\n\n{}", raw_bytecode));
+        let mut report =
+            Report::build(ReportKind::Advice, (self.source_id, 0..0)).with_message(format!(
+                "Debug: Compilation bytecode visualization\n\n{}",
+                raw_bytecode
+            ));
 
         // Color palette for different opcodes
         let colors = [
@@ -545,17 +559,17 @@ impl<'a> Chunk<'a> {
 
                 // Calculate instruction size and end position
                 let instruction_size = match opcode {
-                    Opcode::LoadConst => 3, // opcode + u16
-                    Opcode::LoadVar => 3,   // opcode + u16
-                    Opcode::CreateObject => 3, // opcode + u16
-                    Opcode::CreateArray => 3,  // opcode + u16
-                    Opcode::FieldDef => 4,     // opcode + u16 + u8
+                    Opcode::LoadConst => 3,                                       // opcode + u16
+                    Opcode::LoadVar => 3,                                         // opcode + u16
+                    Opcode::CreateObject => 3,                                    // opcode + u16
+                    Opcode::CreateArray => 3,                                     // opcode + u16
+                    Opcode::FieldDef => 4,       // opcode + u16 + u8
                     Opcode::CreateFunction => 6, // opcode + u8 + u32
-                    Opcode::Call => 3,         // opcode + u8 + u8
+                    Opcode::Call => 3,           // opcode + u8 + u8
                     Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue => 5, // opcode + i32
-                    Opcode::LocalScope => 2,   // opcode + u8
-                    Opcode::StdCall => 4,      // opcode + u16 + u8
-                    Opcode::BindDefault => 3,  // opcode + u16
+                    Opcode::LocalScope => 2,     // opcode + u8
+                    Opcode::StdCall => 4,        // opcode + u16 + u8
+                    Opcode::BindDefault => 3,    // opcode + u16
                     // All other opcodes have no operands
                     _ => 1,
                 };
@@ -566,23 +580,57 @@ impl<'a> Chunk<'a> {
                     Opcode::LoadConst => {
                         if let Some(const_index) = self.read_u16(ip + 1) {
                             if let Some(value) = self.constants.get(const_index as usize) {
-                                format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}, operand={:04X}@{}-{}, value={}",
-                                    ip, end_pos, instruction_size, opcode as u8, ip, const_index, ip + 1, ip + 2, value)
+                                format!(
+                                    "[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}, operand={:04X}@{}-{}, value={}",
+                                    ip,
+                                    end_pos,
+                                    instruction_size,
+                                    opcode as u8,
+                                    ip,
+                                    const_index,
+                                    ip + 1,
+                                    ip + 2,
+                                    value
+                                )
                             } else {
-                                format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}, operand={:04X}@{}-{}",
-                                    ip, end_pos, instruction_size, opcode as u8, ip, const_index, ip + 1, ip + 2)
+                                format!(
+                                    "[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}, operand={:04X}@{}-{}",
+                                    ip,
+                                    end_pos,
+                                    instruction_size,
+                                    opcode as u8,
+                                    ip,
+                                    const_index,
+                                    ip + 1,
+                                    ip + 2
+                                )
                             }
                         } else {
-                            format!("[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}",
-                                ip, end_pos, instruction_size, opcode as u8, ip)
+                            format!(
+                                "[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}",
+                                ip, end_pos, instruction_size, opcode as u8, ip
+                            )
                         }
                     }
                     _ => {
                         if instruction_size == 1 {
-                            format!("[{}] (1 byte) {}: opcode={:02X}@{}", ip, format!("{:?}", opcode), opcode as u8, ip)
+                            format!(
+                                "[{}] (1 byte) {}: opcode={:02X}@{}",
+                                ip,
+                                format!("{:?}", opcode),
+                                opcode as u8,
+                                ip
+                            )
                         } else {
-                            format!("[{}-{}] ({} bytes) {}: opcode={:02X}@{}",
-                                ip, end_pos, instruction_size, format!("{:?}", opcode), opcode as u8, ip)
+                            format!(
+                                "[{}-{}] ({} bytes) {}: opcode={:02X}@{}",
+                                ip,
+                                end_pos,
+                                instruction_size,
+                                format!("{:?}", opcode),
+                                opcode as u8,
+                                ip
+                            )
                         }
                     }
                 };
@@ -591,7 +639,7 @@ impl<'a> Chunk<'a> {
                     report = report.with_label(
                         Label::new((self.source_id, span.clone()))
                             .with_message(label_text)
-                            .with_color(color)
+                            .with_color(color),
                     );
                 }
 
@@ -839,9 +887,9 @@ mod tests {
         let mut chunk = Chunk::new("test.jsonnet");
 
         // Simulate: LOAD_CONST 0, ADD, RETURN
-        chunk.write_opcode_u16(Opcode::LoadConst, 0, 0..5);  // 3 bytes: opcode + u16
-        chunk.write_opcode(Opcode::Add, 5..10);              // 1 byte: opcode
-        chunk.write_opcode(Opcode::Return, 10..15);          // 1 byte: opcode
+        chunk.write_opcode_u16(Opcode::LoadConst, 0, 0..5); // 3 bytes: opcode + u16
+        chunk.write_opcode(Opcode::Add, 5..10); // 1 byte: opcode
+        chunk.write_opcode(Opcode::Return, 10..15); // 1 byte: opcode
 
         assert_eq!(chunk.count(), 5);
         assert_eq!(chunk.read_opcode(0), Some(Opcode::LoadConst));

@@ -1,4 +1,4 @@
-use scanner::{Scanner, Token, TokenInfo, ScanError};
+use scanner::{ScanError, Scanner, Token, TokenInfo};
 
 // Using ScanError from scanner module instead of duplicate ParseError
 
@@ -55,7 +55,10 @@ impl<'a> Parser<'a> {
             } else {
                 let error = ScanError {
                     span: current.span.clone(),
-                    message: format!("{}: expected {:?}, found {:?}", message, expected, current.token),
+                    message: format!(
+                        "{}: expected {:?}, found {:?}",
+                        message, expected, current.token
+                    ),
                     source_id: self.scanner.source_id.to_string(),
                 };
                 self.had_error = true;
@@ -121,13 +124,22 @@ mod tests {
 
         // Advance to second token
         parser.advance().unwrap();
-        assert!(matches!(parser.current_token().unwrap().token, Token::False));
-        assert!(matches!(parser.previous_token().unwrap().token, Token::True));
+        assert!(matches!(
+            parser.current_token().unwrap().token,
+            Token::False
+        ));
+        assert!(matches!(
+            parser.previous_token().unwrap().token,
+            Token::True
+        ));
 
         // Advance to EOF
         parser.advance().unwrap();
         assert!(parser.is_at_end());
-        assert!(matches!(parser.previous_token().unwrap().token, Token::False));
+        assert!(matches!(
+            parser.previous_token().unwrap().token,
+            Token::False
+        ));
     }
 
     #[test]
@@ -198,9 +210,13 @@ mod tests {
         parser.advance().unwrap();
         parser.consume(Token::LeftBrace, "Expected {").unwrap();
 
-        parser.consume(Token::String("key".to_string()), "Expected string").unwrap();
+        parser
+            .consume(Token::String("key".to_string()), "Expected string")
+            .unwrap();
 
-        parser.consume(Token::Operator(":".to_string()), "Expected :").unwrap();
+        parser
+            .consume(Token::Operator(":".to_string()), "Expected :")
+            .unwrap();
 
         parser.consume(Token::LeftBracket, "Expected [").unwrap();
 

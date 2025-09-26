@@ -63,14 +63,17 @@ impl ScanError {
     pub fn into_report(&self) -> Report<'static, (&str, Range<usize>)> {
         let color = ariadne::Color::Red;
 
-        Report::build(ReportKind::Error, (self.source_id.as_str(), self.span.clone()))
-            .with_message(&self.message)
-            .with_label(
-                Label::new((self.source_id.as_str(), self.span.clone()))
-                    .with_message(&self.message)
-                    .with_color(color)
-            )
-            .finish()
+        Report::build(
+            ReportKind::Error,
+            (self.source_id.as_str(), self.span.clone()),
+        )
+        .with_message(&self.message)
+        .with_label(
+            Label::new((self.source_id.as_str(), self.span.clone()))
+                .with_message(&self.message)
+                .with_color(color),
+        )
+        .finish()
     }
 }
 
@@ -164,15 +167,42 @@ impl<'a> Scanner<'a> {
 
         match ch {
             // Single character symbols
-            '{' => { self.advance(); Ok(self.make_token(Token::LeftBrace, start)) }
-            '}' => { self.advance(); Ok(self.make_token(Token::RightBrace, start)) }
-            '[' => { self.advance(); Ok(self.make_token(Token::LeftBracket, start)) }
-            ']' => { self.advance(); Ok(self.make_token(Token::RightBracket, start)) }
-            ',' => { self.advance(); Ok(self.make_token(Token::Comma, start)) }
-            '.' => { self.advance(); Ok(self.make_token(Token::Dot, start)) }
-            '(' => { self.advance(); Ok(self.make_token(Token::LeftParen, start)) }
-            ')' => { self.advance(); Ok(self.make_token(Token::RightParen, start)) }
-            ';' => { self.advance(); Ok(self.make_token(Token::Semicolon, start)) }
+            '{' => {
+                self.advance();
+                Ok(self.make_token(Token::LeftBrace, start))
+            }
+            '}' => {
+                self.advance();
+                Ok(self.make_token(Token::RightBrace, start))
+            }
+            '[' => {
+                self.advance();
+                Ok(self.make_token(Token::LeftBracket, start))
+            }
+            ']' => {
+                self.advance();
+                Ok(self.make_token(Token::RightBracket, start))
+            }
+            ',' => {
+                self.advance();
+                Ok(self.make_token(Token::Comma, start))
+            }
+            '.' => {
+                self.advance();
+                Ok(self.make_token(Token::Dot, start))
+            }
+            '(' => {
+                self.advance();
+                Ok(self.make_token(Token::LeftParen, start))
+            }
+            ')' => {
+                self.advance();
+                Ok(self.make_token(Token::RightParen, start))
+            }
+            ';' => {
+                self.advance();
+                Ok(self.make_token(Token::Semicolon, start))
+            }
 
             // String literals
             '"' => self.scan_string('"', false, start),
@@ -288,7 +318,12 @@ impl<'a> Scanner<'a> {
         ))
     }
 
-    fn scan_string(&mut self, quote: char, verbatim: bool, start: usize) -> Result<TokenInfo, ScanError> {
+    fn scan_string(
+        &mut self,
+        quote: char,
+        verbatim: bool,
+        start: usize,
+    ) -> Result<TokenInfo, ScanError> {
         self.advance(); // opening quote
         let mut value = String::new();
 
@@ -320,9 +355,7 @@ impl<'a> Scanner<'a> {
                             't' => value.push('\t'),
                             'u' => {
                                 let hex_start = self.position;
-                                let hex_digits: String = (0..4)
-                                    .map(|_| self.advance())
-                                    .collect();
+                                let hex_digits: String = (0..4).map(|_| self.advance()).collect();
 
                                 if let Ok(code_point) = u32::from_str_radix(&hex_digits, 16) {
                                     if let Some(unicode_char) = char::from_u32(code_point) {
@@ -330,13 +363,19 @@ impl<'a> Scanner<'a> {
                                     } else {
                                         return Err(self.make_error(
                                             hex_start - 2..self.position,
-                                            format!("Invalid unicode escape sequence: \\u{}", hex_digits),
+                                            format!(
+                                                "Invalid unicode escape sequence: \\u{}",
+                                                hex_digits
+                                            ),
                                         ));
                                     }
                                 } else {
                                     return Err(self.make_error(
                                         hex_start - 2..self.position,
-                                        format!("Invalid unicode escape sequence: \\u{}", hex_digits),
+                                        format!(
+                                            "Invalid unicode escape sequence: \\u{}",
+                                            hex_digits
+                                        ),
                                     ));
                                 }
                             }
@@ -373,7 +412,9 @@ impl<'a> Scanner<'a> {
 
     fn scan_text_block(&mut self, start: usize) -> Result<TokenInfo, ScanError> {
         // Skip |||
-        self.advance(); self.advance(); self.advance();
+        self.advance();
+        self.advance();
+        self.advance();
 
         // Check for optional -
         let strip_final_newline = if self.peek() == '-' {
@@ -443,7 +484,10 @@ impl<'a> Scanner<'a> {
             } else {
                 return Err(self.make_error(
                     line_start..self.position,
-                    format!("Text block line doesn't start with expected indentation: '{}'", indent),
+                    format!(
+                        "Text block line doesn't start with expected indentation: '{}'",
+                        indent
+                    ),
                 ));
             }
         }
@@ -559,7 +603,10 @@ impl<'a> Scanner<'a> {
             let new_operator = format!("{}{}", operator, ch);
 
             // Check forbidden sequences
-            if new_operator.contains("//") || new_operator.contains("/*") || new_operator.contains("|||") {
+            if new_operator.contains("//")
+                || new_operator.contains("/*")
+                || new_operator.contains("|||")
+            {
                 break;
             }
 
@@ -572,7 +619,9 @@ impl<'a> Scanner<'a> {
             self.advance();
 
             // Single character operators that shouldn't be extended
-            if operator.len() == 1 && matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | ',' | '.' | ';') {
+            if operator.len() == 1
+                && matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | ',' | '.' | ';')
+            {
                 break;
             }
         }
@@ -614,9 +663,18 @@ mod tests {
 
     #[test]
     fn test_identifiers() {
-        assert_eq!(scan_single_token("foo").unwrap(), Token::Identifier("foo".to_string()));
-        assert_eq!(scan_single_token("_bar").unwrap(), Token::Identifier("_bar".to_string()));
-        assert_eq!(scan_single_token("baz123").unwrap(), Token::Identifier("baz123".to_string()));
+        assert_eq!(
+            scan_single_token("foo").unwrap(),
+            Token::Identifier("foo".to_string())
+        );
+        assert_eq!(
+            scan_single_token("_bar").unwrap(),
+            Token::Identifier("_bar".to_string())
+        );
+        assert_eq!(
+            scan_single_token("baz123").unwrap(),
+            Token::Identifier("baz123".to_string())
+        );
     }
 
     #[test]
@@ -629,9 +687,18 @@ mod tests {
 
     #[test]
     fn test_strings() {
-        assert_eq!(scan_single_token("\"hello\"").unwrap(), Token::String("hello".to_string()));
-        assert_eq!(scan_single_token("'world'").unwrap(), Token::String("world".to_string()));
-        assert_eq!(scan_single_token("@\"verbatim\"").unwrap(), Token::String("verbatim".to_string()));
+        assert_eq!(
+            scan_single_token("\"hello\"").unwrap(),
+            Token::String("hello".to_string())
+        );
+        assert_eq!(
+            scan_single_token("'world'").unwrap(),
+            Token::String("world".to_string())
+        );
+        assert_eq!(
+            scan_single_token("@\"verbatim\"").unwrap(),
+            Token::String("verbatim".to_string())
+        );
     }
 
     #[test]
@@ -646,10 +713,22 @@ mod tests {
 
     #[test]
     fn test_operators() {
-        assert_eq!(scan_single_token("+").unwrap(), Token::Operator("+".to_string()));
-        assert_eq!(scan_single_token("==").unwrap(), Token::Operator("==".to_string()));
-        assert_eq!(scan_single_token("<=").unwrap(), Token::Operator("<=".to_string()));
-        assert_eq!(scan_single_token("&&").unwrap(), Token::Operator("&&".to_string()));
+        assert_eq!(
+            scan_single_token("+").unwrap(),
+            Token::Operator("+".to_string())
+        );
+        assert_eq!(
+            scan_single_token("==").unwrap(),
+            Token::Operator("==".to_string())
+        );
+        assert_eq!(
+            scan_single_token("<=").unwrap(),
+            Token::Operator("<=".to_string())
+        );
+        assert_eq!(
+            scan_single_token("&&").unwrap(),
+            Token::Operator("&&".to_string())
+        );
     }
 
     #[test]

@@ -1,10 +1,10 @@
+use chunk::{Chunk, Opcode, StringIndex, Value};
+use memory_manager::MemoryManager;
+use parser::Parser;
+use scanner::{ScanError, Scanner, Token, TokenInfo};
+use std::collections::HashMap;
 use std::fs;
 use std::ops::Range;
-use std::collections::HashMap;
-use chunk::{Chunk, Opcode, StringIndex, Value};
-use scanner::{Scanner, ScanError, Token, TokenInfo};
-use parser::Parser;
-use memory_manager::MemoryManager;
 
 pub type CompilerError = ScanError;
 
@@ -154,16 +154,15 @@ impl<'a> Compiler<'a> {
     }
 
     fn parse_prefix(&mut self) -> Result<(), CompilerError> {
-        let token = self.parser.current_token().cloned()
-            .ok_or_else(|| {
-                // Use the previous token's span end as the EOF location, or 0..0 if no previous token
-                let span = if let Some(previous) = self.parser.previous_token() {
-                    previous.span.end..previous.span.end
-                } else {
-                    0..0
-                };
-                self.unexpected_eof_error(span)
-            })?;
+        let token = self.parser.current_token().cloned().ok_or_else(|| {
+            // Use the previous token's span end as the EOF location, or 0..0 if no previous token
+            let span = if let Some(previous) = self.parser.previous_token() {
+                previous.span.end..previous.span.end
+            } else {
+                0..0
+            };
+            self.unexpected_eof_error(span)
+        })?;
 
         match &token.token {
             Token::Number(value) => {
@@ -239,7 +238,8 @@ impl<'a> Compiler<'a> {
             Token::LeftParen => {
                 self.parser.advance()?; // consume '('
                 self.parse_expr(0)?;
-                self.parser.consume(Token::RightParen, "Expected closing parenthesis")?;
+                self.parser
+                    .consume(Token::RightParen, "Expected closing parenthesis")?;
                 // Parentheses don't change the type
             }
             Token::LeftBrace => {
@@ -258,16 +258,15 @@ impl<'a> Compiler<'a> {
     }
 
     fn parse_infix(&mut self, left_bp: u8) -> Result<(), CompilerError> {
-        let token = self.parser.current_token().cloned()
-            .ok_or_else(|| {
-                // Use the previous token's span end as the EOF location
-                let span = if let Some(previous) = self.parser.previous_token() {
-                    previous.span.end..previous.span.end
-                } else {
-                    0..0
-                };
-                self.unexpected_eof_error(span)
-            })?;
+        let token = self.parser.current_token().cloned().ok_or_else(|| {
+            // Use the previous token's span end as the EOF location
+            let span = if let Some(previous) = self.parser.previous_token() {
+                previous.span.end..previous.span.end
+            } else {
+                0..0
+            };
+            self.unexpected_eof_error(span)
+        })?;
 
         self.parser.advance()?; // consume operator
         self.parse_expr(left_bp)?;
@@ -289,7 +288,9 @@ impl<'a> Compiler<'a> {
                     // Determine result type
                     if left_type == ExpressionType::String || right_type == ExpressionType::String {
                         self.push_type(ExpressionType::String);
-                    } else if left_type == ExpressionType::Number && right_type == ExpressionType::Number {
+                    } else if left_type == ExpressionType::Number
+                        && right_type == ExpressionType::Number
+                    {
                         self.push_type(ExpressionType::Number);
                     } else {
                         self.push_type(ExpressionType::Unknown);
@@ -368,7 +369,6 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-
     fn emit_opcode(&mut self, opcode: Opcode, span: Range<usize>) {
         self.compiling_chunk.write_opcode(opcode, span);
     }
@@ -379,7 +379,8 @@ impl<'a> Compiler<'a> {
         // Use the current token's span for the constant
         let span = self.current_span();
 
-        self.compiling_chunk.write_opcode_u16(Opcode::LoadConst, index, span);
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadConst, index, span);
         Ok(index)
     }
 
@@ -389,7 +390,8 @@ impl<'a> Compiler<'a> {
         // Use the current token's span for the constant
         let span = self.current_span();
 
-        self.compiling_chunk.write_opcode_u16(Opcode::LoadConst, index, span);
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadConst, index, span);
         Ok(index)
     }
 
@@ -421,7 +423,10 @@ impl<'a> Compiler<'a> {
     }
 
     fn peek_type(&self) -> ExpressionType {
-        self.type_stack.last().cloned().unwrap_or(ExpressionType::Unknown)
+        self.type_stack
+            .last()
+            .cloned()
+            .unwrap_or(ExpressionType::Unknown)
     }
 
     fn unexpected_eof_error(&self, span: Range<usize>) -> CompilerError {
@@ -431,14 +436,14 @@ impl<'a> Compiler<'a> {
     fn invalid_expression_error(&self, token: &TokenInfo) -> CompilerError {
         self.make_error(
             token.span.clone(),
-            format!("Invalid expression starting with {:?}", token.token)
+            format!("Invalid expression starting with {:?}", token.token),
         )
     }
 
     fn too_many_constants_error(&self) -> CompilerError {
         self.make_error(
             0..0, // This error doesn't relate to a specific token location
-            "Too many constants (maximum 65535)".to_string()
+            "Too many constants (maximum 65535)".to_string(),
         )
     }
 
@@ -447,7 +452,10 @@ impl<'a> Compiler<'a> {
             Token::RightParen => "Unexpected ')' - no matching opening parenthesis".to_string(),
             Token::RightBrace => "Unexpected '}' - no matching opening brace".to_string(),
             Token::RightBracket => "Unexpected ']' - no matching opening bracket".to_string(),
-            _ => format!("Unexpected token {:?} after complete expression", token.token),
+            _ => format!(
+                "Unexpected token {:?} after complete expression",
+                token.token
+            ),
         };
         self.make_error(token.span.clone(), message)
     }
@@ -464,28 +472,30 @@ impl<'a> Compiler<'a> {
     fn get_binding_power(&self, token: &Token) -> Option<(u8, u8)> {
         match token {
             // Multiplicative (left associative)
-            Token::Operator(op) if op == "*" || op == "/" =>
-                Some((PRECEDENCE_MULTIPLICATIVE, PRECEDENCE_MULTIPLICATIVE + 1)),
+            Token::Operator(op) if op == "*" || op == "/" => {
+                Some((PRECEDENCE_MULTIPLICATIVE, PRECEDENCE_MULTIPLICATIVE + 1))
+            }
 
             // Additive (left associative)
-            Token::Operator(op) if op == "+" || op == "-" =>
-                Some((PRECEDENCE_ADDITIVE, PRECEDENCE_ADDITIVE + 1)),
+            Token::Operator(op) if op == "+" || op == "-" => {
+                Some((PRECEDENCE_ADDITIVE, PRECEDENCE_ADDITIVE + 1))
+            }
 
             // Comparison (non-associative)
-            Token::Operator(op) if matches!(op.as_str(), "<" | "<=" | ">" | ">=") =>
-                Some((PRECEDENCE_COMPARISON, PRECEDENCE_COMPARISON + 1)),
+            Token::Operator(op) if matches!(op.as_str(), "<" | "<=" | ">" | ">=") => {
+                Some((PRECEDENCE_COMPARISON, PRECEDENCE_COMPARISON + 1))
+            }
 
             // Equality (left associative)
-            Token::Operator(op) if matches!(op.as_str(), "==" | "!=") =>
-                Some((PRECEDENCE_EQUALITY, PRECEDENCE_EQUALITY + 1)),
+            Token::Operator(op) if matches!(op.as_str(), "==" | "!=") => {
+                Some((PRECEDENCE_EQUALITY, PRECEDENCE_EQUALITY + 1))
+            }
 
             // Bitwise AND (left associative)
-            Token::Operator(op) if op == "&" =>
-                Some((PRECEDENCE_BITAND, PRECEDENCE_BITAND + 1)),
+            Token::Operator(op) if op == "&" => Some((PRECEDENCE_BITAND, PRECEDENCE_BITAND + 1)),
 
             // Bitwise OR (left associative)
-            Token::Operator(op) if op == "|" =>
-                Some((PRECEDENCE_BITOR, PRECEDENCE_BITOR + 1)),
+            Token::Operator(op) if op == "|" => Some((PRECEDENCE_BITOR, PRECEDENCE_BITOR + 1)),
 
             _ => None,
         }
@@ -500,27 +510,25 @@ impl<'a> Compiler<'a> {
     }
 
     fn parse_postfix(&mut self) -> Result<(), CompilerError> {
-        let token = self.parser.current_token().cloned()
-            .ok_or_else(|| {
-                // Use the previous token's span end as the EOF location
-                let span = if let Some(previous) = self.parser.previous_token() {
-                    previous.span.end..previous.span.end
-                } else {
-                    0..0
-                };
-                self.unexpected_eof_error(span)
-            })?;
+        let token = self.parser.current_token().cloned().ok_or_else(|| {
+            // Use the previous token's span end as the EOF location
+            let span = if let Some(previous) = self.parser.previous_token() {
+                previous.span.end..previous.span.end
+            } else {
+                0..0
+            };
+            self.unexpected_eof_error(span)
+        })?;
 
         match &token.token {
             Token::Dot => {
                 self.parser.advance()?; // consume '.'
 
                 // Expect an identifier for property name
-                let property_token = self.parser.current_token().cloned()
-                    .ok_or_else(|| {
-                        let span = token.span.end..token.span.end;
-                        self.unexpected_eof_error(span)
-                    })?;
+                let property_token = self.parser.current_token().cloned().ok_or_else(|| {
+                    let span = token.span.end..token.span.end;
+                    self.unexpected_eof_error(span)
+                })?;
 
                 match &property_token.token {
                     Token::Identifier(name) => {
@@ -550,7 +558,10 @@ impl<'a> Compiler<'a> {
                 self.parse_expr(0)?;
 
                 // Expect closing bracket
-                self.parser.consume(Token::RightBracket, "Expected ']' after property expression")?;
+                self.parser.consume(
+                    Token::RightBracket,
+                    "Expected ']' after property expression",
+                )?;
 
                 // Emit ObjectIndex opcode to access property
                 self.emit_opcode(Opcode::ObjectIndex, token.span);
@@ -579,7 +590,11 @@ impl<'a> Compiler<'a> {
         if let Some(current) = self.parser.current_token() {
             if current.token == Token::RightBrace {
                 self.parser.advance()?; // consume '}'
-                self.compiling_chunk.write_opcode_u16(Opcode::CreateObject, 0, start_token.span.clone());
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::CreateObject,
+                    0,
+                    start_token.span.clone(),
+                );
                 return Ok(());
             }
         }
@@ -608,7 +623,7 @@ impl<'a> Compiler<'a> {
                     _ => {
                         return Err(self.make_error(
                             key_token.span.clone(),
-                            "Object key must be a string literal or identifier".to_string()
+                            "Object key must be a string literal or identifier".to_string(),
                         ));
                     }
                 }
@@ -619,7 +634,7 @@ impl<'a> Compiler<'a> {
             // Expect ':' after key
             self.parser.consume(
                 Token::Operator(":".to_string()),
-                "Expected ':' after object key"
+                "Expected ':' after object key",
             )?;
 
             // Parse the value expression
@@ -647,7 +662,7 @@ impl<'a> Compiler<'a> {
                     _ => {
                         return Err(self.make_error(
                             current.span.clone(),
-                            "Expected ',' or '}' in object literal".to_string()
+                            "Expected ',' or '}' in object literal".to_string(),
                         ));
                     }
                 }
@@ -657,10 +672,15 @@ impl<'a> Compiler<'a> {
         }
 
         // Consume the closing '}'
-        self.parser.consume(Token::RightBrace, "Expected '}' to close object literal")?;
+        self.parser
+            .consume(Token::RightBrace, "Expected '}' to close object literal")?;
 
         // Emit CreateObject opcode with field count
-        self.compiling_chunk.write_opcode_u16(Opcode::CreateObject, field_count, start_token.span.clone());
+        self.compiling_chunk.write_opcode_u16(
+            Opcode::CreateObject,
+            field_count,
+            start_token.span.clone(),
+        );
 
         Ok(())
     }

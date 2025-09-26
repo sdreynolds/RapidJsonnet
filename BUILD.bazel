@@ -1,4 +1,4 @@
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rustfmt_test", "rust_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -122,4 +122,16 @@ rust_test(
 rust_test(
     name = "memory_manager_test",
     crate = ":memory_manager",
+)
+
+rustfmt_test(
+    name = "format_test",
+    targets = [
+        ":compiler",
+        ":virtual_machine",
+        ":scanner",
+        ":parser",
+        ":chunk",
+        ":memory_manager"
+    ],
 )

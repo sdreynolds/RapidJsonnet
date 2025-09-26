@@ -1,10 +1,10 @@
-use compiler::Compiler;
-use virtual_machine::execute;
-use scanner::Scanner;
 use ariadne::Source;
+use compiler::Compiler;
+use scanner::Scanner;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use virtual_machine::execute;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -31,8 +31,11 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
     match compiler.compile() {
         Ok((chunk, string_pool)) => {
             println!("✅ Compilation successful!");
-            println!("📊 Generated {} bytes of bytecode with {} constants",
-                     chunk.code.len(), chunk.constants.len());
+            println!(
+                "📊 Generated {} bytes of bytecode with {} constants",
+                chunk.code.len(),
+                chunk.constants.len()
+            );
 
             // Show debug compilation visualization
             let debug_report = chunk.debug_compilation();
@@ -61,7 +64,9 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
 }
 
 fn repl_mode() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🚀 Jsonnet Compiler & VM REPL - Enter expressions to compile and execute (Ctrl+C to exit)");
+    println!(
+        "🚀 Jsonnet Compiler & VM REPL - Enter expressions to compile and execute (Ctrl+C to exit)"
+    );
     println!("Examples: 42, 3 + 4, -5 * (10 + 2), (1 + 2) * 3");
 
     loop {
