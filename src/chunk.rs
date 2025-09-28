@@ -6,6 +6,11 @@ use std::ops::Range;
 /// Runtime error type - alias for ScanError to reuse existing infrastructure
 pub type RuntimeError = ScanError;
 
+/// Size of an opcode in bytes
+pub const OPCODE_SIZE_BYTES: usize = 1;
+/// Size of a 32-bit integer in bytes
+pub const I32_SIZE_BYTES: usize = 4;
+
 pub type ObjectIndex = DefaultKey;
 pub type StringIndex = DefaultKey;
 
@@ -424,7 +429,7 @@ impl<'a> Chunk<'a> {
 
     /// Read a u32 from the code at the given index (little-endian)
     pub fn read_u32(&self, index: usize) -> Option<u32> {
-        if index + 3 < self.code.len() {
+        if index + (I32_SIZE_BYTES - 1) < self.code.len() {
             let bytes = [
                 self.code[index],
                 self.code[index + 1],
@@ -437,9 +442,25 @@ impl<'a> Chunk<'a> {
         }
     }
 
-    /// Read an i32 from the code at the given index (little-endian)
+    /// Write a 32-bit signed integer to the bytecode (little-endian)
+    pub fn write_i32(&mut self, value: i32) {
+        let bytes = value.to_le_bytes();
+        for byte in bytes {
+            self.code.push(byte);
+        }
+    }
+
+    /// Patch a previously written i32 at the given position (little-endian)
+    pub fn patch_i32(&mut self, pos: usize, value: i32) {
+        if pos + I32_SIZE_BYTES <= self.code.len() {
+            let bytes = value.to_le_bytes();
+            self.code[pos..pos + I32_SIZE_BYTES].copy_from_slice(&bytes);
+        }
+    }
+
+    /// Read a 32-bit signed integer from the code at the given index (little-endian)
     pub fn read_i32(&self, index: usize) -> Option<i32> {
-        if index + 3 < self.code.len() {
+        if index + (I32_SIZE_BYTES - 1) < self.code.len() {
             let bytes = [
                 self.code[index],
                 self.code[index + 1],

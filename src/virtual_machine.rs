@@ -1,4 +1,4 @@
-use chunk::{Chunk, ObjectIndex, Opcode, RuntimeError, Value};
+use chunk::{Chunk, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError, Value};
 use memory_manager::MemoryManager;
 use std::ops::Range;
 
@@ -96,6 +96,21 @@ impl<'a> VirtualMachine<'a> {
             })?;
 
         self.program_counter += 3; // opcode + 2 bytes for u16
+        Ok(operand)
+    }
+
+    /// Read a i32 operand from the current position and advance PC
+    fn read_i32_operand(&mut self) -> Result<i32, RuntimeError> {
+        let chunk = self.current_chunk();
+        let operand = chunk
+            .read_i32(self.program_counter + OPCODE_SIZE_BYTES)
+            .ok_or_else(|| RuntimeError {
+                span: self.get_current_span(),
+                message: "Invalid bytecode - missing i32 operand".to_string(),
+                source_id: chunk.source_id.to_string(),
+            })?;
+
+        self.program_counter += OPCODE_SIZE_BYTES + I32_SIZE_BYTES;
         Ok(operand)
     }
 
@@ -641,6 +656,31 @@ impl<'a> VirtualMachine<'a> {
                         message: error_message,
                         source_id: self.current_chunk().source_id.to_string(),
                     });
+                }
+
+                // Jump opcodes
+                Opcode::Jump => {
+                    let offset = self.read_i32_operand()?;
+                    // PC is already advanced by read_i32_operand, adjust by offset
+                    self.program_counter = (self.program_counter as i32 + offset) as usize;
+                }
+
+                Opcode::JumpIfFalse => {
+                    let offset = self.read_i32_operand()?;
+                    let condition = self.pop()?;
+                    if !self.is_truthy(condition) {
+                        self.program_counter = (self.program_counter as i32 + offset) as usize;
+                    }
+                    // If truthy, PC already advanced past jump instruction
+                }
+
+                Opcode::JumpIfTrue => {
+                    let offset = self.read_i32_operand()?;
+                    let condition = self.pop()?;
+                    if self.is_truthy(condition) {
+                        self.program_counter = (self.program_counter as i32 + offset) as usize;
+                    }
+                    // If falsy, PC already advanced past jump instruction
                 }
 
                 Opcode::Return => {
@@ -1255,5 +1295,118 @@ mod tests {
         let error = result.unwrap_err();
         assert_eq!(error.message, "true"); // JSON boolean representation
         assert_eq!(error.span, 5..10); // Error keyword span
+    }
+
+    #[test]
+    fn test_jump_opcode() {
+        let mut chunk = create_test_chunk();
+
+        // LoadConst 1, Jump, LoadConst 2, Return, LoadConst 3, Return
+        let idx_1 = chunk.add_constant(Value::Number(1.0));
+        let idx_2 = chunk.add_constant(Value::Number(2.0));
+        let idx_3 = chunk.add_constant(Value::Number(3.0));
+
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_1 as u16, 0..5); // [0-2]: 3 bytes
+        chunk.write_opcode_i32(Opcode::Jump, 4, 5..10); // [3-7]: 5 bytes, jump +4 to skip next 4 bytes
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_2 as u16, 10..15); // [8-10]: 3 bytes (skipped)
+        chunk.write_opcode(Opcode::Return, 15..20); // [11]: 1 byte (skipped)
+        // Jump target is at position 8+4=12
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_3 as u16, 20..25); // [12-14]: jumped to
+        chunk.write_opcode(Opcode::Return, 25..30); // [15]
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        // Should load 1, jump over loading 2, load 3, return 3
+        assert_eq!(result, Value::Number(3.0));
+    }
+
+    #[test]
+    fn test_jump_if_false_truthy() {
+        let mut chunk = create_test_chunk();
+
+        let idx_42 = chunk.add_constant(Value::Number(42.0));
+        let idx_99 = chunk.add_constant(Value::Number(99.0));
+
+        chunk.write_opcode(Opcode::LoadTrue, 0..5); // [0]: 1 byte, condition = true
+        chunk.write_opcode_i32(Opcode::JumpIfFalse, 4, 5..10); // [1-5]: 5 bytes, jump +4 to skip next 4 bytes
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_42 as u16, 10..15); // [6-8]: 3 bytes, load 42 (executed)
+        chunk.write_opcode(Opcode::Return, 15..20); // [9]: 1 byte, return
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_99 as u16, 20..25); // [10-12]: 3 bytes, load 99 (skipped)
+        chunk.write_opcode(Opcode::Return, 25..30); // [13]: 1 byte, return
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        // true condition -> don't jump -> execute 42
+        assert_eq!(result, Value::Number(42.0));
+    }
+
+    #[test]
+    fn test_jump_if_false_falsy() {
+        let mut chunk = create_test_chunk();
+
+        let idx_42 = chunk.add_constant(Value::Number(42.0));
+        let idx_99 = chunk.add_constant(Value::Number(99.0));
+
+        chunk.write_opcode(Opcode::LoadFalse, 0..5); // [0]: 1 byte, condition = false
+        chunk.write_opcode_i32(Opcode::JumpIfFalse, 4, 5..10); // [1-5]: 5 bytes, jump +4 if false
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_42 as u16, 10..15); // [6-8]: 3 bytes, load 42 (skipped)
+        chunk.write_opcode(Opcode::Return, 15..20); // [9]: 1 byte, return (skipped)
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_99 as u16, 20..25); // [10-12]: 3 bytes, load 99 (executed after jump)
+        chunk.write_opcode(Opcode::Return, 25..30); // [13]: 1 byte, return
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        // false condition -> jump -> execute 99
+        assert_eq!(result, Value::Number(99.0));
+    }
+
+    #[test]
+    fn test_jump_if_true_truthy() {
+        let mut chunk = create_test_chunk();
+
+        let idx_42 = chunk.add_constant(Value::Number(42.0));
+        let idx_99 = chunk.add_constant(Value::Number(99.0));
+
+        chunk.write_opcode(Opcode::LoadTrue, 0..5); // [0]: 1 byte, condition = true
+        chunk.write_opcode_i32(Opcode::JumpIfTrue, 4, 5..10); // [1-5]: 5 bytes, jump +4 if true
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_42 as u16, 10..15); // [6-8]: 3 bytes, load 42 (skipped)
+        chunk.write_opcode(Opcode::Return, 15..20); // [9]: 1 byte, return (skipped)
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_99 as u16, 20..25); // [10-12]: 3 bytes, load 99 (executed after jump)
+        chunk.write_opcode(Opcode::Return, 25..30); // [13]: 1 byte, return
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        // true condition -> jump -> execute 99
+        assert_eq!(result, Value::Number(99.0));
+    }
+
+    #[test]
+    fn test_jump_if_true_falsy() {
+        let mut chunk = create_test_chunk();
+
+        let idx_42 = chunk.add_constant(Value::Number(42.0));
+        let idx_99 = chunk.add_constant(Value::Number(99.0));
+
+        chunk.write_opcode(Opcode::LoadFalse, 0..5); // [0]: 1 byte, condition = false
+        chunk.write_opcode_i32(Opcode::JumpIfTrue, 4, 5..10); // [1-5]: 5 bytes, don't jump if false
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_42 as u16, 10..15); // [6-8]: 3 bytes, load 42 (executed)
+        chunk.write_opcode(Opcode::Return, 15..20); // [9]: 1 byte, return
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_99 as u16, 20..25); // [10-12]: 3 bytes, load 99 (skipped)
+        chunk.write_opcode(Opcode::Return, 25..30); // [13]: 1 byte, return
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        // false condition -> don't jump -> execute 42
+        assert_eq!(result, Value::Number(42.0));
     }
 }

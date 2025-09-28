@@ -1,0 +1,1 @@
+if 0 then "zero is truthy" else "zero is falsy"

@@ -1,4 +1,4 @@
-use chunk::{Chunk, Opcode, StringIndex, Value};
+use chunk::{Chunk, I32_SIZE_BYTES, Opcode, StringIndex, Value};
 use memory_manager::MemoryManager;
 use parser::Parser;
 use scanner::{ScanError, Scanner, Token, TokenInfo};
@@ -274,6 +274,11 @@ impl<'a> Compiler<'a> {
                 // Error expressions never return a value
                 self.push_type(ExpressionType::Unknown);
             }
+            Token::If => {
+                self.parse_if_expression(memory_manager)?;
+                // If expressions can return any type depending on branches
+                self.push_type(ExpressionType::Unknown);
+            }
             _ => {
                 // Unknown expression type
                 self.push_type(ExpressionType::Unknown);
@@ -402,6 +407,30 @@ impl<'a> Compiler<'a> {
 
     fn emit_opcode(&mut self, opcode: Opcode, span: Range<usize>) {
         self.compiling_chunk.write_opcode(opcode, span);
+    }
+
+    /// Emit a 32-bit signed integer to the bytecode
+    fn emit_i32(&mut self, value: i32) {
+        self.compiling_chunk.write_i32(value);
+    }
+
+    /// Emit a jump instruction with a placeholder offset, return position for patching
+    fn emit_jump(&mut self, opcode: Opcode, span: Range<usize>) -> usize {
+        self.emit_opcode(opcode, span);
+        let jump_pos = self.compiling_chunk.count();
+        const PLACEHOLDER_OFFSET: i32 = 0x7FFFFFFF; // Use max i32 as placeholder
+        self.emit_i32(PLACEHOLDER_OFFSET);
+        jump_pos
+    }
+
+    /// Patch a previously emitted jump with the actual offset
+    fn patch_jump(&mut self, jump_pos: usize) {
+        let current_pos = self.compiling_chunk.count();
+        // Calculate relative offset from instruction end to current position
+        let offset = (current_pos - (jump_pos + I32_SIZE_BYTES)) as i32;
+
+        // Go back and write the actual offset
+        self.compiling_chunk.patch_i32(jump_pos, offset);
     }
 
     fn emit_constant(&mut self, value: f64) -> Result<u16, CompilerError> {
@@ -716,6 +745,54 @@ impl<'a> Compiler<'a> {
             field_count,
             start_token.span.clone(),
         );
+
+        Ok(())
+    }
+
+    fn parse_if_expression(
+        &mut self,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        let if_span = self.current_span();
+
+        // Consume 'if' token
+        self.parser.advance()?;
+
+        // Parse condition expression
+        self.parse_expr(0, memory_manager)?;
+
+        // Expect 'then'
+        self.parser
+            .consume(Token::Then, "Expected 'then' after if condition")?;
+
+        // Emit conditional jump to else/end - if condition is falsy, jump to else
+        let jump_to_else = self.emit_jump(Opcode::JumpIfFalse, if_span.clone());
+
+        // Parse then branch body
+        self.parse_expr(0, memory_manager)?;
+
+        // ALWAYS emit unconditional jump to skip else branch (even if no explicit else)
+        let jump_to_end = self.emit_jump(Opcode::Jump, if_span.clone());
+
+        // Patch the JumpIfFalse to jump here (start of else branch)
+        self.patch_jump(jump_to_else);
+
+        // Parse else branch or emit implicit null
+        if let Some(token) = self.parser.current_token() {
+            if matches!(token.token, Token::Else) {
+                self.parser.advance()?; // consume 'else'
+                self.parse_expr(0, memory_manager)?;
+            } else {
+                // No else clause: implicit null
+                self.emit_opcode(Opcode::LoadNull, if_span.clone());
+            }
+        } else {
+            // End of input: implicit null
+            self.emit_opcode(Opcode::LoadNull, if_span.clone());
+        }
+
+        // Patch the unconditional jump to jump here (after entire if expression)
+        self.patch_jump(jump_to_end);
 
         Ok(())
     }
