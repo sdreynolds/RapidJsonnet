@@ -1,0 +1,1 @@
+error ("prefix " + "suffix")

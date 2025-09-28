@@ -626,6 +626,23 @@ impl<'a> VirtualMachine<'a> {
                     self.advance_pc();
                 }
 
+                Opcode::Error => {
+                    // Pop the error message value from the stack
+                    let error_value = self.pop()?;
+
+                    // Convert the value to string using existing JSON conversion
+                    let mut visited = std::collections::HashSet::new();
+                    let json_value = self.value_to_json(&error_value, &mut visited)?;
+                    let error_message = json_value.to_string();
+
+                    // Return RuntimeError with the converted message
+                    return Err(RuntimeError {
+                        span: self.get_current_span(),
+                        message: error_message,
+                        source_id: self.current_chunk().source_id.to_string(),
+                    });
+                }
+
                 Opcode::Return => {
                     // Return the top value and halt execution
                     return self.pop();
@@ -1181,5 +1198,62 @@ mod tests {
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(27.0));
+    }
+
+    #[test]
+    fn test_error_string_execution() {
+        let mut chunk = create_test_chunk();
+        let mut memory_manager = MemoryManager::new();
+
+        // Allocate the string in memory manager first
+        let msg_string = memory_manager.allocate_string("test message");
+        let error_msg = chunk.add_constant(Value::String(msg_string.index));
+
+        chunk.write_opcode_u16(Opcode::LoadConst, error_msg as u16, 0..5);
+        chunk.write_opcode(Opcode::Error, 5..10);
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret();
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.message, "\"test message\""); // JSON string representation
+        assert_eq!(error.span, 5..10); // Error keyword span
+    }
+
+    #[test]
+    fn test_error_number_execution() {
+        let mut chunk = create_test_chunk();
+        let error_val = chunk.add_constant(Value::Number(42.0));
+
+        chunk.write_opcode_u16(Opcode::LoadConst, error_val as u16, 0..5);
+        chunk.write_opcode(Opcode::Error, 5..10);
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret();
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.message, "42.0"); // JSON number representation
+        assert_eq!(error.span, 5..10); // Error keyword span
+    }
+
+    #[test]
+    fn test_error_boolean_execution() {
+        let mut chunk = create_test_chunk();
+        let error_val = chunk.add_constant(Value::Boolean(true));
+
+        chunk.write_opcode_u16(Opcode::LoadConst, error_val as u16, 0..5);
+        chunk.write_opcode(Opcode::Error, 5..10);
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret();
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.message, "true"); // JSON boolean representation
+        assert_eq!(error.span, 5..10); // Error keyword span
     }
 }

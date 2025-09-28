@@ -252,6 +252,14 @@ impl<'a> Compiler<'a> {
                 // Object literal produces Object type
                 self.push_type(ExpressionType::Object);
             }
+            Token::Error => {
+                self.parser.advance()?; // consume 'error'
+                // Parse the error expression with precedence 0 to consume everything to the right
+                self.parse_expr(0, memory_manager)?;
+                self.emit_opcode(Opcode::Error, token.span);
+                // Error expressions never return a value
+                self.push_type(ExpressionType::Unknown);
+            }
             _ => {
                 // Unknown expression type
                 self.push_type(ExpressionType::Unknown);
@@ -861,5 +869,45 @@ mod tests {
         assert_eq!(chunk.code[0], Opcode::LoadConst as u8);
         assert_eq!(chunk.code[3], Opcode::Not as u8);
         assert_eq!(chunk.code[4], Opcode::Return as u8);
+    }
+
+    #[test]
+    fn test_error_string_literal() {
+        let mut scanner = Scanner::new("error \"test message\"", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should have one constant (the string)
+        assert_eq!(chunk.constants.len(), 1);
+        let expected_interned = memory_manager.allocate_string("test message");
+        assert_eq!(chunk.constants[0], Value::String(expected_interned.index));
+
+        // Should compile to: LoadConst + Error + Return
+        assert_eq!(chunk.code.len(), 5); // LoadConst (3 bytes) + Error (1 byte) + Return (1 byte)
+        assert_eq!(chunk.code[0], Opcode::LoadConst as u8);
+        assert_eq!(chunk.code[3], Opcode::Error as u8);
+        assert_eq!(chunk.code[4], Opcode::Return as u8);
+    }
+
+    #[test]
+    fn test_error_expression() {
+        let mut scanner = Scanner::new("error (1 + 2)", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should have two constants (1 and 2)
+        assert_eq!(chunk.constants.len(), 2);
+        assert_eq!(chunk.constants[0], Value::Number(1.0));
+        assert_eq!(chunk.constants[1], Value::Number(2.0));
+
+        // Should compile to: LoadConst(1) + LoadConst(2) + Add + Error + Return
+        assert_eq!(chunk.code.len(), 9); // LoadConst (3) + LoadConst (3) + Add (1) + Error (1) + Return (1)
+        assert_eq!(chunk.code[0], Opcode::LoadConst as u8);
+        assert_eq!(chunk.code[3], Opcode::LoadConst as u8);
+        assert_eq!(chunk.code[6], Opcode::Add as u8);
+        assert_eq!(chunk.code[7], Opcode::Error as u8);
+        assert_eq!(chunk.code[8], Opcode::Return as u8);
     }
 }
