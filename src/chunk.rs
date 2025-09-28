@@ -1,5 +1,6 @@
 use ariadne::{Label, Report, ReportKind};
 use scanner::ScanError;
+use serde::{Deserialize, Serialize};
 use slotmap::DefaultKey;
 use std::ops::Range;
 
@@ -10,7 +11,7 @@ pub type ObjectIndex = DefaultKey;
 pub type StringIndex = DefaultKey;
 
 /// Value type for the Jsonnet virtual machine
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Null,
     Boolean(bool),
@@ -287,7 +288,7 @@ pub enum FieldVisibility {
 /// Represents a run-length encoding for spans
 /// This struct maps code indices to their corresponding source code spans
 /// in an efficient way by storing only unique spans and their repetition counts
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpanRunLength {
     /// The span in the source code
     pub span: Range<usize>,
@@ -307,7 +308,7 @@ impl SpanRunLength {
 
 /// A chunk represents a collection of bytecode instructions and associated metadata
 /// for the virtual machine to execute
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Chunk<'a> {
     /// Source identifier used with ariadne library
     pub source_id: &'a str,

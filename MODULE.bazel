@@ -25,7 +25,19 @@ crate.spec(
 
 crate.spec(
     package = "slotmap",
-    version = "1.0.7"
+    version = "1.0.7",
+    features = ["serde"]
+)
+
+crate.spec(
+    package = "serde",
+    version = "1.0.228",
+    features = ["derive"],
+)
+
+crate.spec(
+    package = "ciborium",
+    version = "0.2.2"
 )
 
 crate.from_specs()

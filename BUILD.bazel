@@ -16,6 +16,19 @@ rust_binary(
     ]
 )
 
+rust_binary(
+    name = "compile_file",
+    srcs = ["src/only_compile.rs"],
+    deps = [
+        ":compiler",
+        ":chunk",
+        ":scanner",
+        "@crates//:ariadne",
+        "@crates//:ciborium",
+        "@crates//:serde",
+    ]
+)
+
 rust_library(
     name = "scanner",
     srcs = ["src/scanner.rs"],
@@ -44,7 +57,8 @@ rust_library(
     deps = [
         "@crates//:ariadne",
         ":scanner",
-        "@crates//:slotmap"
+        "@crates//:slotmap",
+        "@crates//:serde",
     ],
     crate_features = [
         "stress_gc"
