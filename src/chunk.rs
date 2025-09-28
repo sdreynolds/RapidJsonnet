@@ -20,20 +20,6 @@ pub enum Value {
 }
 
 impl Value {
-    /// Check if value is truthy according to Jsonnet rules
-    // @TODO: remove this and make is_truthy part of virtual machine
-    // The virutal machine has access to the memory manager so  can actually do
-    // truthy ness
-    pub fn is_truthy(&self) -> bool {
-        match self {
-            Value::Null => false,
-            Value::Boolean(b) => *b,
-            Value::Number(n) => *n != 0.0,
-            Value::String(_s) => true,
-            Value::Object(_key) => true, // Objects are always truthy
-        }
-    }
-
     /// Convert value to f64 for numeric operations
     // @TODO: these need to move virtual machine because of memory manager
     pub fn to_number<'a>(

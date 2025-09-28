@@ -475,22 +475,22 @@ impl<'a> VirtualMachine<'a> {
                 // Logical operations
                 Opcode::LogicalAnd => {
                     let a = self.pop()?;
-                    if !a.is_truthy() {
+                    if !self.is_truthy(a) {
                         self.push(Value::Boolean(false))?;
                     } else {
                         let b = self.pop()?;
-                        self.push(Value::Boolean(b.is_truthy()))?;
+                        self.push(Value::Boolean(self.is_truthy(b)))?;
                     }
                     self.advance_pc();
                 }
 
                 Opcode::LogicalOr => {
                     let a = self.pop()?;
-                    if a.is_truthy() {
+                    if self.is_truthy(a) {
                         self.push(Value::Boolean(true))?;
                     } else {
                         let b = self.pop()?;
-                        self.push(Value::Boolean(b.is_truthy()))?;
+                        self.push(Value::Boolean(self.is_truthy(b)))?;
                     }
                     self.advance_pc();
                 }
@@ -514,7 +514,7 @@ impl<'a> VirtualMachine<'a> {
 
                 Opcode::Not => {
                     let a = self.pop()?;
-                    let result = !a.is_truthy();
+                    let result = !self.is_truthy(a);
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -754,6 +754,16 @@ impl<'a> VirtualMachine<'a> {
 
         self.memory_manager.run_garbage_collect(roots);
     }
+
+    fn is_truthy(&self, value: Value) -> bool {
+        match value {
+            Value::Null => false,
+            Value::Boolean(b) => b,
+            Value::Number(n) => n > 0.0,
+            Value::String(s) => self.memory_manager.load_string(s) != "",
+            Value::Object(x) => self.memory_manager.load_object(x).len() > 0,
+        }
+    }
 }
 
 /// Main execution function - entry point for running Jsonnet bytecode
@@ -782,13 +792,17 @@ mod tests {
 
     #[test]
     fn test_value_truthiness() {
-        assert!(!Value::Null.is_truthy());
-        assert!(!Value::Boolean(false).is_truthy());
-        assert!(Value::Boolean(true).is_truthy());
-        assert!(!Value::Number(0.0).is_truthy());
-        assert!(Value::Number(1.0).is_truthy());
-        assert!(Value::Number(-1.0).is_truthy());
-        assert!(Value::Number(0.1).is_truthy());
+        let chunk = create_test_chunk();
+        let memory_manager = MemoryManager::new();
+        let vm = VirtualMachine::new(chunk, memory_manager);
+
+        assert!(!vm.is_truthy(Value::Null));
+        assert!(!vm.is_truthy(Value::Boolean(false)));
+        assert!(vm.is_truthy(Value::Boolean(true)));
+        assert!(!vm.is_truthy(Value::Number(0.0)));
+        assert!(vm.is_truthy(Value::Number(1.0)));
+        assert!(!vm.is_truthy(Value::Number(-1.0)));
+        assert!(vm.is_truthy(Value::Number(0.1)));
     }
 
     #[test]
