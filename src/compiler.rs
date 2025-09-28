@@ -39,7 +39,6 @@ pub struct Compiler<'a> {
     parser: Parser<'a>,
     type_stack: Vec<ExpressionType>,
     constant_pool: HashMap<Value, u16>,
-    memory_manager: MemoryManager,
 }
 
 impl<'a> Compiler<'a> {
@@ -52,7 +51,6 @@ impl<'a> Compiler<'a> {
             parser,
             type_stack: Vec::new(),
             constant_pool: HashMap::new(),
-            memory_manager: MemoryManager::new(),
         }
     }
 
@@ -83,12 +81,15 @@ impl<'a> Compiler<'a> {
         Ok(index_u16)
     }
 
-    pub fn compile(mut self) -> Result<(Chunk<'a>, MemoryManager), CompilerError> {
+    pub fn compile(
+        mut self,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<Chunk<'a>, CompilerError> {
         // Advance to get the first token
         self.parser.advance()?;
 
         // Parse the entire expression
-        self.parse_expr(0)?;
+        self.parse_expr(0, memory_manager)?;
 
         // Validate that no unexpected tokens remain after parsing the expression
         self.check_end_of_input()?;
@@ -97,12 +98,16 @@ impl<'a> Compiler<'a> {
         let span = self.current_span();
         self.emit_opcode(Opcode::Return, span);
 
-        Ok((self.compiling_chunk, self.memory_manager))
+        Ok(self.compiling_chunk)
     }
 
-    fn parse_expr(&mut self, min_bp: u8) -> Result<(), CompilerError> {
+    fn parse_expr(
+        &mut self,
+        min_bp: u8,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
         // Parse left-hand side (prefix)
-        self.parse_prefix()?;
+        self.parse_prefix(memory_manager)?;
 
         // Parse infix operators
         loop {
@@ -121,7 +126,7 @@ impl<'a> Compiler<'a> {
                     break;
                 }
 
-                self.parse_infix(right_bp)?;
+                self.parse_infix(right_bp, memory_manager)?;
             } else {
                 break;
             }
@@ -144,7 +149,7 @@ impl<'a> Compiler<'a> {
                     break;
                 }
 
-                self.parse_postfix()?;
+                self.parse_postfix(memory_manager)?;
             } else {
                 break;
             }
@@ -153,7 +158,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn parse_prefix(&mut self) -> Result<(), CompilerError> {
+    fn parse_prefix(&mut self, memory_manager: &mut MemoryManager) -> Result<(), CompilerError> {
         let token = self.parser.current_token().cloned().ok_or_else(|| {
             // Use the previous token's span end as the EOF location, or 0..0 if no previous token
             let span = if let Some(previous) = self.parser.previous_token() {
@@ -171,7 +176,7 @@ impl<'a> Compiler<'a> {
                 self.parser.advance()?; // consume the number
             }
             Token::String(value) => {
-                let allocation_result = self.memory_manager.allocate_string(value);
+                let allocation_result = memory_manager.allocate_string(value);
                 self.emit_string_constant(allocation_result.index)?;
                 self.push_type(ExpressionType::String);
                 self.parser.advance()?;
@@ -193,7 +198,7 @@ impl<'a> Compiler<'a> {
             }
             Token::Operator(op) if op == "-" => {
                 self.parser.advance()?; // consume the operator
-                self.parse_expr(PRECEDENCE_UNARY)?;
+                self.parse_expr(PRECEDENCE_UNARY, memory_manager)?;
                 self.emit_opcode(Opcode::Neg, token.span);
                 // Unary minus: if operand was number, result is number; otherwise unknown
                 let operand_type = self.pop_type();
@@ -205,7 +210,7 @@ impl<'a> Compiler<'a> {
             }
             Token::Operator(op) if op == "+" => {
                 self.parser.advance()?; // consume the operator
-                self.parse_expr(PRECEDENCE_UNARY)?;
+                self.parse_expr(PRECEDENCE_UNARY, memory_manager)?;
                 self.emit_opcode(Opcode::Pos, token.span);
                 // Unary plus: if operand was number, result is number; otherwise unknown
                 let operand_type = self.pop_type();
@@ -217,7 +222,7 @@ impl<'a> Compiler<'a> {
             }
             Token::Operator(op) if op == "!" => {
                 self.parser.advance()?; // consume the operator
-                self.parse_expr(PRECEDENCE_UNARY)?;
+                self.parse_expr(PRECEDENCE_UNARY, memory_manager)?;
                 self.emit_opcode(Opcode::Not, token.span);
                 // Logical NOT always produces boolean
                 self.pop_type();
@@ -225,7 +230,7 @@ impl<'a> Compiler<'a> {
             }
             Token::Operator(op) if op == "~" => {
                 self.parser.advance()?; // consume the operator
-                self.parse_expr(PRECEDENCE_UNARY)?;
+                self.parse_expr(PRECEDENCE_UNARY, memory_manager)?;
                 self.emit_opcode(Opcode::BitNot, token.span);
                 // Bitwise NOT: if operand was number, result is number; otherwise unknown
                 let operand_type = self.pop_type();
@@ -237,13 +242,13 @@ impl<'a> Compiler<'a> {
             }
             Token::LeftParen => {
                 self.parser.advance()?; // consume '('
-                self.parse_expr(0)?;
+                self.parse_expr(0, memory_manager)?;
                 self.parser
                     .consume(Token::RightParen, "Expected closing parenthesis")?;
                 // Parentheses don't change the type
             }
             Token::LeftBrace => {
-                self.parse_object_literal(&token)?;
+                self.parse_object_literal(&token, memory_manager)?;
                 // Object literal produces Object type
                 self.push_type(ExpressionType::Object);
             }
@@ -257,7 +262,11 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn parse_infix(&mut self, left_bp: u8) -> Result<(), CompilerError> {
+    fn parse_infix(
+        &mut self,
+        left_bp: u8,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
         let token = self.parser.current_token().cloned().ok_or_else(|| {
             // Use the previous token's span end as the EOF location
             let span = if let Some(previous) = self.parser.previous_token() {
@@ -269,7 +278,7 @@ impl<'a> Compiler<'a> {
         })?;
 
         self.parser.advance()?; // consume operator
-        self.parse_expr(left_bp)?;
+        self.parse_expr(left_bp, memory_manager)?;
 
         match &token.token {
             Token::Operator(op) if op == "+" => {
@@ -509,7 +518,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn parse_postfix(&mut self) -> Result<(), CompilerError> {
+    fn parse_postfix(&mut self, memory_manager: &mut MemoryManager) -> Result<(), CompilerError> {
         let token = self.parser.current_token().cloned().ok_or_else(|| {
             // Use the previous token's span end as the EOF location
             let span = if let Some(previous) = self.parser.previous_token() {
@@ -533,7 +542,7 @@ impl<'a> Compiler<'a> {
                 match &property_token.token {
                     Token::Identifier(name) => {
                         self.parser.advance()?; // consume identifier
-                        let allocation_result = self.memory_manager.allocate_string(name);
+                        let allocation_result = memory_manager.allocate_string(name);
 
                         let _index = self.emit_string_constant(allocation_result.index)?;
 
@@ -555,7 +564,7 @@ impl<'a> Compiler<'a> {
                 self.parser.advance()?; // consume '['
 
                 // Parse the expression inside brackets
-                self.parse_expr(0)?;
+                self.parse_expr(0, memory_manager)?;
 
                 // Expect closing bracket
                 self.parser.consume(
@@ -581,7 +590,11 @@ impl<'a> Compiler<'a> {
     }
 
     /// Parse an object literal: { key1: value1, key2: value2, ... }
-    fn parse_object_literal(&mut self, start_token: &TokenInfo) -> Result<(), CompilerError> {
+    fn parse_object_literal(
+        &mut self,
+        start_token: &TokenInfo,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
         self.parser.advance()?; // consume '{'
 
         let mut field_count = 0u16;
@@ -605,7 +618,7 @@ impl<'a> Compiler<'a> {
             if let Some(key_token) = self.parser.current_token() {
                 match &key_token.token {
                     Token::String(key_value) => {
-                        let allocation_result = self.memory_manager.allocate_string(key_value);
+                        let allocation_result = memory_manager.allocate_string(key_value);
                         let interned_key = allocation_result.index;
                         let _key_index = self.emit_string_constant(interned_key)?;
                         self.push_type(ExpressionType::String);
@@ -613,7 +626,7 @@ impl<'a> Compiler<'a> {
                         self.parser.advance()?; // consume the key
                     }
                     Token::Identifier(key_name) => {
-                        let allocation_result = self.memory_manager.allocate_string(key_name);
+                        let allocation_result = memory_manager.allocate_string(key_name);
                         let interned_key = allocation_result.index;
                         let _key_index = self.emit_string_constant(interned_key)?;
                         self.push_type(ExpressionType::String);
@@ -638,7 +651,7 @@ impl<'a> Compiler<'a> {
             )?;
 
             // Parse the value expression
-            self.parse_expr(0)?;
+            self.parse_expr(0, memory_manager)?;
 
             field_count += 1;
 
@@ -694,7 +707,8 @@ mod tests {
     fn test_simple_number() {
         let mut scanner = Scanner::new("42", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _memory_manager) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 1);
         assert_eq!(chunk.constants[0], Value::Number(42.0));
@@ -705,7 +719,8 @@ mod tests {
     fn test_simple_addition() {
         let mut scanner = Scanner::new("3 + 4", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _memory_manager) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 2);
         assert_eq!(chunk.constants[0], Value::Number(3.0));
@@ -718,7 +733,8 @@ mod tests {
     fn test_unary_minus() {
         let mut scanner = Scanner::new("-42", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _memory_manager) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 1);
         assert_eq!(chunk.constants[0], Value::Number(42.0));
@@ -730,7 +746,8 @@ mod tests {
     fn test_grouped_expression() {
         let mut scanner = Scanner::new("(1 + 2) * 3", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _memory_manager) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 3);
         // LoadConst (3) + LoadConst (3) + Add (1) + LoadConst (3) + Mul (1) + Return (1) = 12 bytes
@@ -741,7 +758,8 @@ mod tests {
     fn test_precedence() {
         let mut scanner = Scanner::new("2 + 3 * 4", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _memory_manager) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         // Should parse as 2 + (3 * 4), so constants should be in order 2, 3, 4
         assert_eq!(chunk.constants.len(), 3);
@@ -754,7 +772,8 @@ mod tests {
     fn test_true_literal() {
         let mut scanner = Scanner::new("true", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _memory_manager) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 2); // LoadTrue (1 byte) + Return (1 byte)
@@ -766,7 +785,8 @@ mod tests {
     fn test_false_literal() {
         let mut scanner = Scanner::new("false", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _string_pool) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 2); // LoadFalse (1 byte) + Return (1 byte)
@@ -778,7 +798,8 @@ mod tests {
     fn test_null_literal() {
         let mut scanner = Scanner::new("null", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _memory_manager) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 2); // LoadNull (1 byte) + Return (1 byte)
@@ -790,7 +811,8 @@ mod tests {
     fn test_logical_not_with_true() {
         let mut scanner = Scanner::new("!true", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, _memory_manager) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 0); // No constants for literals
         assert_eq!(chunk.code.len(), 3); // LoadTrue (1 byte) + Not (1 byte) + Return (1 byte)
@@ -803,7 +825,8 @@ mod tests {
     fn test_string_literal() {
         let mut scanner = Scanner::new("\"hello world\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, mut memory_manager) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 1);
         let expected_interned = memory_manager.allocate_string("hello world");
@@ -814,8 +837,9 @@ mod tests {
     #[test]
     fn test_empty_string_literal() {
         let mut scanner = Scanner::new("\"\"", "test");
+        let mut memory_manager = MemoryManager::new();
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, mut memory_manager) = compiler.compile().unwrap();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 1);
         let expected_interned = memory_manager.allocate_string("");
@@ -827,7 +851,8 @@ mod tests {
     fn test_string_with_logical_not() {
         let mut scanner = Scanner::new("!\"test\"", "test");
         let compiler = Compiler::new(&mut scanner, "test");
-        let (chunk, mut memory_manager) = compiler.compile().unwrap();
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 1);
         let expected_interned = memory_manager.allocate_string("test");

@@ -5,6 +5,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use virtual_machine::execute;
+use memory_manager::MemoryManager;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -27,9 +28,10 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
 
     // Compile the input
     let mut scanner = Scanner::new(content, source_id);
+    let mut memory_manager = MemoryManager::new();
     let compiler = Compiler::new(&mut scanner, source_id);
-    match compiler.compile() {
-        Ok((chunk, string_pool)) => {
+    match compiler.compile(&mut memory_manager) {
+        Ok(chunk) => {
             println!("✅ Compilation successful!");
             println!(
                 "📊 Generated {} bytes of bytecode with {} constants",
@@ -42,7 +44,7 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
             debug_report.print((source_id, &source))?;
 
             // Execute the compiled chunk
-            match execute(chunk, string_pool) {
+            match execute(chunk, memory_manager) {
                 Ok(result) => {
                     println!("🎯 Execution result: {}", result);
                 }
