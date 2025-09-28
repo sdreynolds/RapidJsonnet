@@ -233,13 +233,7 @@ impl<'a> VirtualMachine<'a> {
                         }
                         // Numeric addition for all other cases
                         _ => {
-                            let result = a.to_number(
-                                self.get_current_span(),
-                                self.current_chunk().source_id,
-                            )? + b.to_number(
-                                self.get_current_span(),
-                                self.current_chunk().source_id,
-                            )?;
+                            let result = self.to_number(a)? + self.to_number(b)?;
                             self.push(Value::Number(result))?;
                         }
                     }
@@ -249,9 +243,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Sub => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a
-                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
-                        - b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = self.to_number(a)? - self.to_number(b)?;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -259,9 +251,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Mul => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a
-                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
-                        * b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = self.to_number(a)? * self.to_number(b)?;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -269,8 +259,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Div => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let b_num =
-                        b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let b_num = self.to_number(b)?;
                     if b_num == 0.0 {
                         return Err(RuntimeError {
                             span: self.get_current_span(),
@@ -278,9 +267,7 @@ impl<'a> VirtualMachine<'a> {
                             source_id: self.current_chunk().source_id.to_string(),
                         });
                     }
-                    let result = a
-                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
-                        / b_num;
+                    let result = self.to_number(a)? / b_num;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -289,9 +276,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Lt => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a
-                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
-                        < b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = self.to_number(a)? < self.to_number(b)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -299,9 +284,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Le => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a
-                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
-                        <= b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = self.to_number(a)? <= self.to_number(b)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -309,9 +292,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Gt => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a
-                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
-                        > b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = self.to_number(a)? > self.to_number(b)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -319,9 +300,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Ge => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = a
-                        .to_number(self.get_current_span(), self.current_chunk().source_id)?
-                        >= b.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = self.to_number(a)? >= self.to_number(b)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -409,9 +388,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Shl => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let shift_count = (b
-                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
-                        % 64) as u32;
+                    let shift_count = (self.to_integer(b)? % 64) as u32;
                     if shift_count >= 64 {
                         return Err(RuntimeError {
                             span: self.get_current_span(),
@@ -419,9 +396,7 @@ impl<'a> VirtualMachine<'a> {
                             source_id: self.current_chunk().source_id.to_string(),
                         });
                     }
-                    let result = (a
-                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
-                        << shift_count) as f64;
+                    let result = (self.to_integer(a)? << shift_count) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -429,12 +404,8 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Shr => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let shift_count = (b
-                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
-                        % 64) as u32;
-                    let result = (a
-                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
-                        >> shift_count) as f64;
+                    let shift_count = (self.to_integer(b)? % 64) as u32;
+                    let result = (self.to_integer(a)? >> shift_count) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -442,10 +413,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::BitAnd => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = (a
-                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
-                        & b.to_integer(self.get_current_span(), self.current_chunk().source_id)?)
-                        as f64;
+                    let result = (self.to_integer(a)? & self.to_integer(b)?) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -453,10 +421,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::BitXor => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = (a
-                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
-                        ^ b.to_integer(self.get_current_span(), self.current_chunk().source_id)?)
-                        as f64;
+                    let result = (self.to_integer(a)? ^ self.to_integer(b)?) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -464,10 +429,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::BitOr => {
                     let b = self.pop()?;
                     let a = self.pop()?;
-                    let result = (a
-                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?
-                        | b.to_integer(self.get_current_span(), self.current_chunk().source_id)?)
-                        as f64;
+                    let result = (self.to_integer(a)? | self.to_integer(b)?) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -498,16 +460,14 @@ impl<'a> VirtualMachine<'a> {
                 // Unary operations
                 Opcode::Neg => {
                     let a = self.pop()?;
-                    let result =
-                        -a.to_number(self.get_current_span(), self.current_chunk().source_id)?;
+                    let result = -self.to_number(a)?;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::Pos => {
                     let a = self.pop()?;
-                    let result =
-                        a.to_number(self.get_current_span(), self.current_chunk().source_id)?; // Unary + is essentially a no-op for numbers
+                    let result = self.to_number(a)?; // Unary + is essentially a no-op for numbers
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -521,9 +481,7 @@ impl<'a> VirtualMachine<'a> {
 
                 Opcode::BitNot => {
                     let a = self.pop()?;
-                    let result = (!a
-                        .to_integer(self.get_current_span(), self.current_chunk().source_id)?)
-                        as f64;
+                    let result = (!self.to_integer(a)?) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
@@ -762,6 +720,41 @@ impl<'a> VirtualMachine<'a> {
             Value::Number(n) => n > 0.0,
             Value::String(s) => self.memory_manager.load_string(s) != "",
             Value::Object(x) => self.memory_manager.load_object(x).len() > 0,
+        }
+    }
+
+    fn to_number(&self, value: Value) -> Result<f64, RuntimeError> {
+        match value {
+            Value::Number(n) => Ok(n),
+            Value::String(key) => {
+                // @TODO: this is weird. should refactor to map_err or someother
+                match self.memory_manager.load_string(key).parse::<f64>() {
+                    Ok(n) => Ok(n),
+                    Err(e) => Err(RuntimeError {
+                        span: self.get_current_span(),
+                        message: format!("Failed to parse string {} to f64", e),
+                        source_id: self.current_chunk().source_id.to_string(),
+                    }),
+                }
+            }
+            _ => Err(RuntimeError {
+                span: self.get_current_span(),
+                message: format!("Cannot convert {:?} to f64", value),
+                source_id: self.current_chunk().source_id.to_string(),
+            }),
+        }
+    }
+
+    fn to_integer(&self, value: Value) -> Result<i64, RuntimeError> {
+        let n = self.to_number(value)?;
+        if n.is_nan() || n.is_infinite() {
+            Err(RuntimeError {
+                span: self.get_current_span(),
+                message: "Cannot convert NaN or Infinity to integer".to_string(),
+                source_id: self.current_chunk().source_id.to_string(),
+            })
+        } else {
+            Ok(n as i64)
         }
     }
 }

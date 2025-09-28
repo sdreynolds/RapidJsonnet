@@ -19,53 +19,6 @@ pub enum Value {
     Object(ObjectIndex),
 }
 
-impl Value {
-    /// Convert value to f64 for numeric operations
-    // @TODO: these need to move virtual machine because of memory manager
-    pub fn to_number<'a>(
-        &self,
-        span: Range<usize>,
-        source_id: &'a str,
-    ) -> Result<f64, RuntimeError> {
-        match self {
-            Value::Number(n) => Ok(*n),
-            _ => Err(RuntimeError {
-                span,
-                message: format!("Cannot convert {:?} to number", self),
-                source_id: source_id.to_string(),
-            }),
-        }
-    }
-
-    /// Convert to integer for bitwise operations (per Jsonnet spec)
-    // @TODO: these need to move virtual machine because of memory manager
-    pub fn to_integer<'a>(
-        &self,
-        span: Range<usize>,
-        source_id: &'a str,
-    ) -> Result<i64, RuntimeError> {
-        match self {
-            Value::Number(n) => {
-                if n.is_nan() || n.is_infinite() {
-                    Err(RuntimeError {
-                        span,
-                        message: "Cannot convert NaN or Infinity to integer".to_string(),
-                        source_id: source_id.to_string(),
-                    })
-                } else {
-                    Ok(*n as i64)
-                }
-            }
-            // @TODO: turn string into integer
-            _ => Err(RuntimeError {
-                span,
-                message: format!("Cannot convert {:?} to integer", self),
-                source_id: source_id.to_string(),
-            }),
-        }
-    }
-}
-
 // Manual implementation of Eq for Value
 impl Eq for Value {}
 

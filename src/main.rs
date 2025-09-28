@@ -1,11 +1,11 @@
 use ariadne::Source;
 use compiler::Compiler;
+use memory_manager::MemoryManager;
 use scanner::Scanner;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 use virtual_machine::execute;
-use memory_manager::MemoryManager;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
