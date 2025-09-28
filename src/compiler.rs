@@ -253,10 +253,24 @@ impl<'a> Compiler<'a> {
                 self.push_type(ExpressionType::Object);
             }
             Token::Error => {
+                let error_start = token.span.start;
                 self.parser.advance()?; // consume 'error'
+
                 // Parse the error expression with precedence 0 to consume everything to the right
                 self.parse_expr(0, memory_manager)?;
-                self.emit_opcode(Opcode::Error, token.span);
+
+                // Calculate the full span from error keyword to end of expression
+                let error_end = if let Some(prev_token) = self.parser.previous_token() {
+                    prev_token.span.end
+                } else if let Some(curr_token) = self.parser.current_token() {
+                    // If current token exists, the expression ended just before this token
+                    curr_token.span.start
+                } else {
+                    token.span.end // fallback to just the error keyword if no tokens
+                };
+                let full_error_span = error_start..error_end;
+
+                self.emit_opcode(Opcode::Error, full_error_span);
                 // Error expressions never return a value
                 self.push_type(ExpressionType::Unknown);
             }
@@ -909,5 +923,68 @@ mod tests {
         assert_eq!(chunk.code[6], Opcode::Add as u8);
         assert_eq!(chunk.code[7], Opcode::Error as u8);
         assert_eq!(chunk.code[8], Opcode::Return as u8);
+    }
+
+    #[test]
+    fn test_error_string_span_coverage() {
+        let input = "error \"test message\"";
+        let mut scanner = Scanner::new(input, "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Find the Error opcode and check its span
+        let error_opcode_pos = chunk
+            .code
+            .iter()
+            .position(|&x| x == Opcode::Error as u8)
+            .unwrap();
+        let error_span = chunk.get_span(error_opcode_pos).unwrap();
+
+        // Span should cover the entire error expression
+        assert_eq!(error_span.start, 0); // start of "error"
+        assert_eq!(error_span.end, input.len()); // end of "test message"
+    }
+
+    #[test]
+    fn test_error_expression_span_coverage() {
+        let input = "error (\"prefix \" + \"suffix\")";
+        let mut scanner = Scanner::new(input, "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Find the Error opcode and check its span
+        let error_opcode_pos = chunk
+            .code
+            .iter()
+            .position(|&x| x == Opcode::Error as u8)
+            .unwrap();
+        let error_span = chunk.get_span(error_opcode_pos).unwrap();
+
+        // Span should cover the entire error expression including parentheses
+        assert_eq!(error_span.start, 0); // start of "error"
+        assert_eq!(error_span.end, input.len()); // end of closing parenthesis
+    }
+
+    #[test]
+    fn test_error_number_span_coverage() {
+        let input = "error 42";
+        let mut scanner = Scanner::new(input, "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Find the Error opcode and check its span
+        let error_opcode_pos = chunk
+            .code
+            .iter()
+            .position(|&x| x == Opcode::Error as u8)
+            .unwrap();
+        let error_span = chunk.get_span(error_opcode_pos).unwrap();
+
+        // Span should cover "error 42"
+        assert_eq!(error_span.start, 0); // start of "error"
+        assert_eq!(error_span.end, input.len()); // end of "42"
     }
 }
