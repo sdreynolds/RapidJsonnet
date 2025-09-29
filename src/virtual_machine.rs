@@ -449,29 +449,6 @@ impl<'a> VirtualMachine<'a> {
                     self.advance_pc();
                 }
 
-                // Logical operations
-                Opcode::LogicalAnd => {
-                    let a = self.pop()?;
-                    if !self.is_truthy(a) {
-                        self.push(Value::Boolean(false))?;
-                    } else {
-                        let b = self.pop()?;
-                        self.push(Value::Boolean(self.is_truthy(b)))?;
-                    }
-                    self.advance_pc();
-                }
-
-                Opcode::LogicalOr => {
-                    let a = self.pop()?;
-                    if self.is_truthy(a) {
-                        self.push(Value::Boolean(true))?;
-                    } else {
-                        let b = self.pop()?;
-                        self.push(Value::Boolean(self.is_truthy(b)))?;
-                    }
-                    self.advance_pc();
-                }
-
                 // Unary operations
                 Opcode::Neg => {
                     let a = self.pop()?;
@@ -1033,36 +1010,6 @@ mod tests {
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(32.0)); // 8 << 2 = 32
-    }
-
-    #[test]
-    fn test_logical_and() {
-        let mut chunk = create_test_chunk();
-        chunk.write_opcode(Opcode::LoadTrue, 0..5);
-        chunk.write_opcode(Opcode::LoadFalse, 5..10);
-        chunk.write_opcode(Opcode::LogicalAnd, 10..15);
-        chunk.write_opcode(Opcode::Return, 15..20);
-
-        let memory_manager = MemoryManager::new();
-        let mut vm = VirtualMachine::new(chunk, memory_manager);
-        let result = vm.interpret().unwrap();
-
-        assert_eq!(result, Value::Boolean(false));
-    }
-
-    #[test]
-    fn test_logical_or() {
-        let mut chunk = create_test_chunk();
-        chunk.write_opcode(Opcode::LoadTrue, 0..5);
-        chunk.write_opcode(Opcode::LoadFalse, 5..10);
-        chunk.write_opcode(Opcode::LogicalOr, 10..15);
-        chunk.write_opcode(Opcode::Return, 15..20);
-
-        let memory_manager = MemoryManager::new();
-        let mut vm = VirtualMachine::new(chunk, memory_manager);
-        let result = vm.interpret().unwrap();
-
-        assert_eq!(result, Value::Boolean(true));
     }
 
     #[test]

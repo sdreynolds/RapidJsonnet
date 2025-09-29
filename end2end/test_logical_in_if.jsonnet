@@ -1,0 +1,1 @@
+if 22 > 10 && 6 < 40 then {awesome: true} else {awesome: false}

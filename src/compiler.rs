@@ -304,8 +304,15 @@ impl<'a> Compiler<'a> {
             self.unexpected_eof_error(span)
         })?;
 
+        // Check for special short-circuit operators that manage their own parsing
+        let is_short_circuit_op =
+            matches!(&token.token, Token::Operator(op) if op == "&&" || op == "||");
+
         self.parser.advance()?; // consume operator
-        self.parse_expr(left_bp, memory_manager)?;
+
+        if !is_short_circuit_op {
+            self.parse_expr(left_bp, memory_manager)?;
+        }
 
         match &token.token {
             Token::Operator(op) if op == "+" => {
@@ -398,6 +405,66 @@ impl<'a> Compiler<'a> {
                 self.pop_type(); // right operand
                 self.pop_type(); // left operand
                 self.push_type(ExpressionType::Number); // bitwise ops produce numbers
+            }
+            Token::Operator(op) if op == "&&" => {
+                // Short-circuit logical AND: left && right
+                // If left is falsy, return false (don't evaluate right)
+                // If left is truthy, evaluate and return right
+
+                // At this point, left operand is on stack: [left_value]
+                // We need to consume the && token and conditionally parse right
+
+                // Dup left for testing: [left_value, left_value]
+                self.emit_opcode(Opcode::Dup, token.span.clone());
+
+                // Jump if left is falsy: [left_value] (dup was popped)
+                let jump_falsy = self.emit_jump(Opcode::JumpIfFalse, token.span.clone());
+
+                // Left is truthy: pop left and evaluate right: []
+                self.emit_opcode(Opcode::Pop, token.span.clone());
+                self.parse_expr(left_bp, memory_manager)?; // Parse right operand
+                let jump_end = self.emit_jump(Opcode::Jump, token.span.clone());
+
+                // Left is falsy: pop left and return false: []
+                self.patch_jump(jump_falsy);
+                self.emit_opcode(Opcode::Pop, token.span.clone());
+                self.emit_opcode(Opcode::LoadFalse, token.span.clone());
+
+                self.patch_jump(jump_end);
+
+                // Type tracking
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Unknown); // Could be Boolean or right's type
+            }
+            Token::Operator(op) if op == "||" => {
+                // Short-circuit logical OR: left || right
+                // If left is truthy, return true (don't evaluate right)
+                // If left is falsy, evaluate and return right
+
+                // At this point, left operand is on stack: [left_value]
+                // We need to consume the || token and conditionally parse right
+
+                // Dup left for testing: [left_value, left_value]
+                self.emit_opcode(Opcode::Dup, token.span.clone());
+
+                // Jump if left is truthy: [left_value] (dup was popped)
+                let jump_truthy = self.emit_jump(Opcode::JumpIfTrue, token.span.clone());
+
+                // Left is falsy: pop left and evaluate right: []
+                self.emit_opcode(Opcode::Pop, token.span.clone());
+                self.parse_expr(left_bp, memory_manager)?; // Parse right operand
+                let jump_end = self.emit_jump(Opcode::Jump, token.span.clone());
+
+                // Left is truthy: pop left and return true: []
+                self.patch_jump(jump_truthy);
+                self.emit_opcode(Opcode::Pop, token.span.clone());
+                self.emit_opcode(Opcode::LoadTrue, token.span.clone());
+
+                self.patch_jump(jump_end);
+
+                // Type tracking
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Unknown); // Could be Boolean or right's type
             }
             _ => return Err(self.invalid_expression_error(&token)),
         }
@@ -556,6 +623,16 @@ impl<'a> Compiler<'a> {
 
             // Bitwise OR (left associative)
             Token::Operator(op) if op == "|" => Some((PRECEDENCE_BITOR, PRECEDENCE_BITOR + 1)),
+
+            // Logical AND (left associative)
+            Token::Operator(op) if op == "&&" => {
+                Some((PRECEDENCE_LOGICAL_AND, PRECEDENCE_LOGICAL_AND + 1))
+            }
+
+            // Logical OR (left associative)
+            Token::Operator(op) if op == "||" => {
+                Some((PRECEDENCE_LOGICAL_OR, PRECEDENCE_LOGICAL_OR + 1))
+            }
 
             _ => None,
         }
