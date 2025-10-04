@@ -173,6 +173,27 @@ impl<'a> VirtualMachine<'a> {
                     self.push(constant)?;
                 }
 
+                Opcode::LoadVar => {
+                    let stack_slot = self.read_u16_operand()? as usize;
+
+                    // Validate stack slot
+                    if stack_slot >= self.stack.len() {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!(
+                                "Invalid stack slot {} (stack size: {})",
+                                stack_slot,
+                                self.stack.len()
+                            ),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+
+                    // Copy value from slot to top of stack
+                    let value = self.stack[stack_slot].clone();
+                    self.push(value)?;
+                }
+
                 // Binary arithmetic operations
                 Opcode::Add => {
                     let b = self.pop()?;
@@ -1355,5 +1376,64 @@ mod tests {
 
         // false condition -> don't jump -> execute 42
         assert_eq!(result, Value::Number(42.0));
+    }
+
+    // LoadVar opcode tests
+
+    #[test]
+    fn test_loadvar_opcode() {
+        let mut chunk = create_test_chunk();
+
+        // Push two values on stack
+        let idx_1 = chunk.add_constant(Value::Number(10.0));
+        let idx_2 = chunk.add_constant(Value::Number(20.0));
+
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_1 as u16, 0..5); // stack[0] = 10
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_2 as u16, 5..10); // stack[1] = 20
+        chunk.write_opcode_u16(Opcode::LoadVar, 0, 10..15); // Load from slot 0
+        chunk.write_opcode(Opcode::Return, 15..20);
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        // Should return value from slot 0 (10.0)
+        assert_eq!(result, Value::Number(10.0));
+    }
+
+    #[test]
+    fn test_loadvar_multiple_slots() {
+        let mut chunk = create_test_chunk();
+
+        let idx_1 = chunk.add_constant(Value::Number(10.0));
+        let idx_2 = chunk.add_constant(Value::Number(20.0));
+
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_1 as u16, 0..5); // stack[0] = 10
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_2 as u16, 5..10); // stack[1] = 20
+        chunk.write_opcode_u16(Opcode::LoadVar, 0, 10..15); // Load slot 0 (10)
+        chunk.write_opcode_u16(Opcode::LoadVar, 1, 15..20); // Load slot 1 (20)
+        chunk.write_opcode(Opcode::Add, 20..25); // 10 + 20
+        chunk.write_opcode(Opcode::Return, 25..30);
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        assert_eq!(result, Value::Number(30.0));
+    }
+
+    #[test]
+    fn test_loadvar_invalid_slot() {
+        let mut chunk = create_test_chunk();
+
+        chunk.write_opcode_u16(Opcode::LoadVar, 99, 0..5); // Invalid slot
+        chunk.write_opcode(Opcode::Return, 5..10);
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("Invalid stack slot"));
     }
 }

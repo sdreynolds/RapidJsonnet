@@ -19,6 +19,14 @@ enum ExpressionType {
     Unknown,
 }
 
+// Local variable tracking for compile-time stack slot assignment
+#[derive(Debug, Clone)]
+struct Local {
+    name: String,      // Variable name
+    depth: u32,        // Scope nesting level
+    stack_slot: usize, // Absolute position from stack bottom
+}
+
 // Precedence constants
 const PRECEDENCE_POSTFIX: u8 = 90;
 const PRECEDENCE_UNARY: u8 = 80;
@@ -39,6 +47,8 @@ pub struct Compiler<'a> {
     parser: Parser<'a>,
     type_stack: Vec<ExpressionType>,
     constant_pool: HashMap<Value, u16>,
+    locals: Vec<Local>, // Tracks all local variables currently in scope
+    scope_depth: u32,   // Current scope nesting depth (0 = module level)
 }
 
 impl<'a> Compiler<'a> {
@@ -51,6 +61,8 @@ impl<'a> Compiler<'a> {
             parser,
             type_stack: Vec::new(),
             constant_pool: HashMap::new(),
+            locals: Vec::new(),
+            scope_depth: 0,
         }
     }
 
@@ -278,6 +290,30 @@ impl<'a> Compiler<'a> {
                 self.parse_if_expression(memory_manager)?;
                 // If expressions can return any type depending on branches
                 self.push_type(ExpressionType::Unknown);
+            }
+            Token::Local => {
+                self.parse_local_statement(memory_manager)?;
+                // Local statement result is the body expression value
+                // Type depends on body expression
+                self.push_type(ExpressionType::Unknown);
+            }
+            Token::Identifier(name) => {
+                let name_clone = name.clone();
+                let span = token.span.clone();
+                self.parser.advance()?; // consume identifier
+
+                // Try to resolve as local variable
+                if let Some(stack_slot) = self.resolve_local(&name_clone) {
+                    // Emit LoadVar with absolute stack slot
+                    self.compiling_chunk
+                        .write_opcode_u16(Opcode::LoadVar, stack_slot as u16, span);
+                    self.push_type(ExpressionType::Unknown);
+                } else {
+                    // Variable not found
+                    return Err(
+                        self.make_error(span, format!("Undefined variable '{}'", name_clone))
+                    );
+                }
             }
             _ => {
                 // Unknown expression type
@@ -826,6 +862,153 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// Parse: local x = expr, y = expr; body_expr
+    fn parse_local_statement(
+        &mut self,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        self.parser.advance()?; // consume 'local'
+
+        // Enter new scope for these locals
+        self.begin_scope();
+
+        // Parse comma-separated bindings
+        loop {
+            // Expect identifier
+            let name_token = self
+                .parser
+                .current_token()
+                .cloned()
+                .ok_or_else(|| self.unexpected_eof_error(self.current_span()))?;
+
+            let var_name = match &name_token.token {
+                Token::Identifier(name) => name.clone(),
+                _ => {
+                    return Err(self.make_error(
+                        name_token.span,
+                        "Expected variable name after 'local'".to_string(),
+                    ));
+                }
+            };
+
+            self.parser.advance()?; // consume identifier
+
+            // Expect '='
+            self.parser.consume(
+                Token::Operator("=".to_string()),
+                "Expected '=' after variable name",
+            )?;
+
+            // Parse binding expression
+            self.parse_expr(0, memory_manager)?;
+            // Expression leaves value on stack
+
+            // Declare the local (value is now on stack)
+            self.declare_local(var_name)?;
+
+            // Check for comma (more bindings) or semicolon (end of bindings)
+            if let Some(token) = self.parser.current_token() {
+                match &token.token {
+                    Token::Comma => {
+                        self.parser.advance()?; // consume ','
+                        continue; // Parse next binding
+                    }
+                    Token::Semicolon => {
+                        self.parser.advance()?; // consume ';'
+                        break; // Done with bindings
+                    }
+                    _ => {
+                        return Err(self.make_error(
+                            token.span.clone(),
+                            "Expected ',' or ';' in local statement".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                return Err(self.unexpected_eof_error(self.current_span()));
+            }
+        }
+
+        // Parse body expression (with locals in scope)
+        self.parse_expr(0, memory_manager)?;
+        // Body expression result stays on stack
+
+        // Exit scope - emit Pop for each local
+        self.end_scope();
+
+        Ok(())
+    }
+
+    // Scope and Local Variable Management
+
+    /// Enter a new lexical scope (increments depth)
+    fn begin_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    /// Exit current scope, emitting Pop instructions for locals at this depth
+    fn end_scope(&mut self) {
+        let span = self.current_span();
+
+        // Pop all locals at current depth (in reverse declaration order)
+        // The body expression result is on top of the stack, and locals are below it.
+        // For each local to pop, we swap it with the result and then pop it.
+        // This keeps the result on top while removing locals underneath.
+        while let Some(local) = self.locals.last() {
+            if local.depth == self.scope_depth {
+                // Swap result with this local, then pop the local
+                self.emit_opcode(Opcode::Swap, span.clone());
+                self.emit_opcode(Opcode::Pop, span.clone());
+                self.locals.pop();
+            } else {
+                break; // Reached locals from outer scope
+            }
+        }
+
+        self.scope_depth -= 1;
+    }
+
+    /// Declare a new local variable at the current scope depth
+    /// The value must already be on the stack
+    fn declare_local(&mut self, name: String) -> Result<(), CompilerError> {
+        // Check for duplicate in current scope
+        for local in self.locals.iter().rev() {
+            if local.depth < self.scope_depth {
+                break; // Reached outer scope
+            }
+            if local.name == name {
+                return Err(self.make_error(
+                    self.current_span(),
+                    format!("Variable '{}' already declared in this scope", name),
+                ));
+            }
+        }
+
+        // Stack slot is simply the current number of locals (0-indexed)
+        // All previous locals are on the stack below this one
+        let stack_slot = self.locals.len();
+
+        self.locals.push(Local {
+            name,
+            depth: self.scope_depth,
+            stack_slot,
+        });
+
+        Ok(())
+    }
+
+    /// Resolve a variable name to its stack slot
+    /// Returns None if not found in local scope
+    fn resolve_local(&self, name: &str) -> Option<usize> {
+        // Search from innermost to outermost scope (reverse order)
+        for local in self.locals.iter().rev() {
+            if local.name == name {
+                return Some(local.stack_slot);
+            }
+        }
+        None
+    }
+
     fn parse_if_expression(
         &mut self,
         memory_manager: &mut MemoryManager,
@@ -1140,5 +1323,122 @@ mod tests {
         // Span should cover "error 42"
         assert_eq!(error_span.start, 0); // start of "error"
         assert_eq!(error_span.end, input.len()); // end of "42"
+    }
+
+    // Local variable tests
+
+    #[test]
+    fn test_simple_local() {
+        // local x = 5; x
+        let mut scanner = Scanner::new("local x = 5; x", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should have constant for 5
+        assert_eq!(chunk.constants.len(), 1);
+        assert_eq!(chunk.constants[0], Value::Number(5.0));
+    }
+
+    #[test]
+    fn test_multiple_locals() {
+        // local x = 1, y = 2; x + y
+        let mut scanner = Scanner::new("local x = 1, y = 2; x + y", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should have constants for 1 and 2
+        assert_eq!(chunk.constants.len(), 2);
+    }
+
+    #[test]
+    fn test_local_using_local() {
+        // local x = 1, y = x + 1; y
+        let mut scanner = Scanner::new("local x = 1, y = x + 1; y", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_forward_reference_error() {
+        // local x = y + 1, y = 5; x (should fail)
+        let mut scanner = Scanner::new("local x = y + 1, y = 5; x", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let result = compiler.compile(&mut memory_manager);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("Undefined variable 'y'")
+        );
+    }
+
+    #[test]
+    fn test_duplicate_local_error() {
+        // local x = 1, x = 2; x (should fail)
+        let mut scanner = Scanner::new("local x = 1, x = 2; x", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let result = compiler.compile(&mut memory_manager);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("already declared"));
+    }
+
+    #[test]
+    fn test_nested_local_scopes() {
+        // local x = 1; local y = x + 1; y
+        let mut scanner = Scanner::new("local x = 1; local y = x + 1; y", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_local_shadowing() {
+        // local x = 1; local x = 2; x (shadowing in nested scope)
+        let mut scanner = Scanner::new("local x = 1; local x = 2; x", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_local_with_object() {
+        // local x = {awesome: true}; x
+        let mut scanner = Scanner::new("local x = {awesome: true}; x", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_local_with_nested_object() {
+        let input = r#"local x = {
+            awesome: true,
+            nestedObj: {
+                anotherNest: 45,
+                someString: "this is great"
+            }
+        }; x"#;
+        let mut scanner = Scanner::new(input, "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert!(chunk.code.len() > 0);
     }
 }
