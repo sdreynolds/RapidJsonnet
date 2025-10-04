@@ -97,6 +97,7 @@ impl<'a> Compiler<'a> {
         mut self,
         memory_manager: &mut MemoryManager,
     ) -> Result<Chunk<'a>, CompilerError> {
+        self.begin_scope();
         // Advance to get the first token
         self.parser.advance()?;
 
@@ -109,6 +110,8 @@ impl<'a> Compiler<'a> {
         // Emit return opcode at the end - use the span of the last token or end of input
         let span = self.current_span();
         self.emit_opcode(Opcode::Return, span);
+
+        self.end_scope();
 
         Ok(self.compiling_chunk)
     }
@@ -869,9 +872,6 @@ impl<'a> Compiler<'a> {
     ) -> Result<(), CompilerError> {
         self.parser.advance()?; // consume 'local'
 
-        // Enter new scope for these locals
-        self.begin_scope();
-
         // Parse comma-separated bindings
         loop {
             // Expect identifier
@@ -932,9 +932,6 @@ impl<'a> Compiler<'a> {
         // Parse body expression (with locals in scope)
         self.parse_expr(0, memory_manager)?;
         // Body expression result stays on stack
-
-        // Exit scope - emit Pop for each local
-        self.end_scope();
 
         Ok(())
     }
