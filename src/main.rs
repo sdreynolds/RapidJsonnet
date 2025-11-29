@@ -7,6 +7,24 @@ use std::fs;
 use std::io::{self, Write};
 use virtual_machine::execute;
 
+
+#[derive(Debug)]
+enum MainError {
+    CompilerError,
+    RuntimeError,
+}
+
+impl std::fmt::Display for MainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MainError::CompilerError => write!(f, "Compilation failed"),
+            MainError::RuntimeError => write!(f, "Runtime error"),
+        }
+    }
+}
+
+impl std::error::Error for MainError {}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
@@ -47,11 +65,13 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
             match execute(chunk, memory_manager) {
                 Ok(result) => {
                     println!("🎯 Execution result: {}", result);
+                    Ok(())
                 }
                 Err(runtime_error) => {
                     println!("❌ Runtime error during execution:");
                     let report = runtime_error.into_report();
                     report.print((source_id, &source))?;
+                    Err(Box::new(MainError::RuntimeError))
                 }
             }
         }
@@ -59,10 +79,9 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
             println!("❌ Compilation failed:");
             let report = compile_error.into_report();
             report.print((source_id, &source))?;
+            Err(Box::new(MainError::CompilerError))
         }
     }
-
-    Ok(())
 }
 
 fn repl_mode() -> Result<(), Box<dyn std::error::Error>> {

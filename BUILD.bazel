@@ -1,4 +1,5 @@
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rustfmt_test", "rust_library", "rust_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -135,4 +136,16 @@ rustfmt_test(
         ":chunk",
         ":memory_manager"
     ],
+)
+
+sh_test(
+    name = "jsonnet_validation_test",
+     srcs = ["test_runner.sh"],
+
+     data = glob(["end2end/*.jsonnet"]) + [
+        ":main",
+    ],
+
+    # We set this to true to ensure the test is executed.
+    local = True,
 )

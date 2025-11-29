@@ -1,4 +1,4 @@
-use chunk::{ObjectIndex, StringIndex, Value};
+use chunk::{ArrayIndex, ObjectIndex, StringIndex, Value};
 use slotmap::SlotMap;
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -103,6 +103,43 @@ impl std::fmt::Display for ManagedString {
     }
 }
 
+/// A Jsonnet array containing a vector of values
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagedArray {
+    /// Array elements
+    pub elements: Vec<Value>,
+    // GC marking
+    marked: Cell<bool>,
+}
+
+impl ManagedArray {
+    /// Calculate the actual size of this array including Vec overhead
+    fn size(&self) -> usize {
+        let base_size = std::mem::size_of::<Self>();
+        // Vec capacity accounts for actual allocated memory
+        let vec_capacity_bytes = self.elements.capacity() * std::mem::size_of::<Value>();
+        base_size + vec_capacity_bytes
+    }
+
+    /// Create a new Jsonnet array with the given elements
+    pub fn new(elements: Vec<Value>) -> Self {
+        Self {
+            elements,
+            marked: Cell::new(false),
+        }
+    }
+
+    /// Get the number of elements
+    pub fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    /// Check if array is empty
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+}
+
 /// A HashSet-based string interning system with garbage collection support
 pub struct MemoryManager {
     /// HashSet containing all interned strings
@@ -110,6 +147,8 @@ pub struct MemoryManager {
     strings: SlotMap<StringIndex, ManagedString>,
     /// Collection of Objects
     objects: SlotMap<ObjectIndex, ManagedObject>,
+    /// Collection of Arrays
+    arrays: SlotMap<ArrayIndex, ManagedArray>,
     /// Total bytes allocated for all strings
     allocated_bytes: usize,
     /// GC threshold for triggering collection
@@ -123,6 +162,7 @@ impl MemoryManager {
             interned_strings: HashMap::new(),
             strings: SlotMap::new(),
             objects: SlotMap::new(),
+            arrays: SlotMap::new(),
             allocated_bytes: 0,
             gc_threshold: 1024 * 1024, // 1MB initial threshold
         }
@@ -176,6 +216,16 @@ impl MemoryManager {
         let obj = ManagedObject::with_properties(properties);
         self.allocated_bytes += obj.size();
         let index = self.objects.insert(obj);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    pub fn allocate_array(&mut self, elements: Vec<Value>) -> AllocationResult<ArrayIndex> {
+        let arr = ManagedArray::new(elements);
+        self.allocated_bytes += arr.size();
+        let index = self.arrays.insert(arr);
         AllocationResult {
             should_garbage_collect: self.should_collect(),
             index,
@@ -252,6 +302,28 @@ impl MemoryManager {
                         }
                     }
                 }
+                Value::Array(array_index) => {
+                    if let Some(managed_array) = self.arrays.get_mut(array_index) {
+                        managed_array.marked.set(true);
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] Marking Array {:?}", array_index)
+                        }
+
+                        // Mark all elements in the array
+                        for element in &managed_array.elements {
+                            values.push_back(*element);
+                        }
+                    } else {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[MemoryManager] WARNING: Failed to mark Array {:?} - not found",
+                                array_index
+                            )
+                        }
+                    }
+                }
 
                 _ => continue,
             };
@@ -279,6 +351,16 @@ impl MemoryManager {
             }
         }
 
+        let mut arrays_to_delete: Vec<ArrayIndex> = Vec::new();
+        for (arr_idx, arr) in self.arrays.iter_mut() {
+            if arr.marked.get() {
+                arr.marked.set(false);
+            } else {
+                arrays_to_delete.push(arr_idx);
+                self.allocated_bytes -= arr.size();
+            }
+        }
+
         for string_idx in strings_to_delete {
             #[cfg(feature = "gc_debug")]
             {
@@ -293,6 +375,14 @@ impl MemoryManager {
                 eprintln!("[MemoryManager] Removing Object {:?}", obj_idx)
             }
             self.objects.remove(obj_idx);
+        }
+
+        for arr_idx in arrays_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing Array {:?}", arr_idx)
+            }
+            self.arrays.remove(arr_idx);
         }
 
         self.gc_threshold = self.allocated_bytes * 2;
@@ -310,6 +400,12 @@ impl MemoryManager {
             .get(key)
             .expect(format!("String not found in SlotMap: {:?}", key).as_str())
             .content
+    }
+
+    pub fn load_array(&self, key: ArrayIndex) -> &ManagedArray {
+        self.arrays
+            .get(key)
+            .expect(format!("Array not found in SlotMap: {:?}", key).as_str())
     }
 
     /// Get current statistics

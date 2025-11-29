@@ -16,6 +16,7 @@ enum ExpressionType {
     Boolean,
     Null,
     Object,
+    Array,
     Unknown,
 }
 
@@ -263,6 +264,11 @@ impl<'a> Compiler<'a> {
                 self.parse_object_literal(&token, memory_manager)?;
                 // Object literal produces Object type
                 self.push_type(ExpressionType::Object);
+            }
+            Token::LeftBracket => {
+                self.parse_array_literal(&token, memory_manager)?;
+                // Array literal produces Array type
+                self.push_type(ExpressionType::Array);
             }
             Token::Error => {
                 let error_start = token.span.start;
@@ -736,8 +742,8 @@ impl<'a> Compiler<'a> {
                     "Expected ']' after property expression",
                 )?;
 
-                // Emit ObjectIndex opcode to access property
-                self.emit_opcode(Opcode::ObjectIndex, token.span);
+                // Emit ArrayIndex opcode - handles both arrays and objects at runtime
+                self.emit_opcode(Opcode::ArrayIndex, token.span);
 
                 // Property access can return any type
                 self.push_type(ExpressionType::Unknown);
@@ -856,6 +862,78 @@ impl<'a> Compiler<'a> {
         self.compiling_chunk.write_opcode_u16(
             Opcode::CreateObject,
             field_count,
+            start_token.span.clone(),
+        );
+
+        Ok(())
+    }
+
+    /// Parse an array literal: [element1, element2, ...]
+    fn parse_array_literal(
+        &mut self,
+        start_token: &TokenInfo,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        self.parser.advance()?; // consume '['
+
+        let mut element_count = 0u16;
+
+        // Handle empty array: []
+        if let Some(current) = self.parser.current_token() {
+            if current.token == Token::RightBracket {
+                self.parser.advance()?; // consume ']'
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::CreateArray,
+                    0,
+                    start_token.span.clone(),
+                );
+                return Ok(());
+            }
+        }
+
+        // Parse array elements
+        loop {
+            // Parse element value expression
+            self.parse_expr(0, memory_manager)?;
+            element_count += 1;
+
+            // Check for more elements or end of array
+            if let Some(current) = self.parser.current_token() {
+                match &current.token {
+                    Token::Comma => {
+                        self.parser.advance()?; // consume ','
+
+                        // Check for trailing comma followed by ']'
+                        if let Some(next) = self.parser.current_token() {
+                            if next.token == Token::RightBracket {
+                                break;
+                            }
+                        }
+                        // Continue parsing next element
+                    }
+                    Token::RightBracket => {
+                        break; // End of array
+                    }
+                    _ => {
+                        return Err(self.make_error(
+                            current.span.clone(),
+                            "Expected ',' or ']' in array literal".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                return Err(self.unexpected_eof_error(start_token.span.clone()));
+            }
+        }
+
+        // Consume the closing ']'
+        self.parser
+            .consume(Token::RightBracket, "Expected ']' to close array literal")?;
+
+        // Emit CreateArray opcode with element count
+        self.compiling_chunk.write_opcode_u16(
+            Opcode::CreateArray,
+            element_count,
             start_token.span.clone(),
         );
 

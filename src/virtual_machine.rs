@@ -237,6 +237,42 @@ impl<'a> VirtualMachine<'a> {
                                 source_id: self.current_chunk().source_id.to_string(),
                             });
                         }
+                        // Array concatenation
+                        (Value::Array(left_key), Value::Array(right_key)) => {
+                            let (left_array, right_array) = (
+                                self.memory_manager.load_array(*left_key),
+                                self.memory_manager.load_array(*right_key),
+                            );
+
+                            // Create concatenated elements
+                            let mut concatenated =
+                                Vec::with_capacity(left_array.len() + right_array.len());
+                            concatenated.extend_from_slice(&left_array.elements);
+                            concatenated.extend_from_slice(&right_array.elements);
+
+                            // Allocate new concatenated array
+                            let concat_allocation =
+                                self.memory_manager.allocate_array(concatenated);
+                            self.push(Value::Array(concat_allocation.index))?;
+
+                            if concat_allocation.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (Array concatenation)",
+                                        self.program_counter
+                                    );
+                                }
+                                self.run_garbage_collection();
+                            }
+                        }
+                        (Value::Array(_), _) | (_, Value::Array(_)) => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Must concatenate arrays with other arrays".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
                         // String concatenation if either operand is a string
                         (Value::String(_), _) | (_, Value::String(_)) => {
                             let a_str = match &a {
@@ -244,14 +280,14 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
-                                Value::Object(_) => unreachable!(),
+                                Value::Object(_) | Value::Array(_) => unreachable!(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
-                                Value::Object(_) => unreachable!(),
+                                Value::Object(_) | Value::Array(_) => unreachable!(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -394,6 +430,7 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
+                                Value::Array(_) => "{array}".to_string(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
@@ -401,6 +438,7 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
+                                Value::Array(_) => "{array}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -557,6 +595,34 @@ impl<'a> VirtualMachine<'a> {
                     }
                 }
 
+                Opcode::CreateArray => {
+                    let element_count = self.read_u16_operand()? as usize;
+
+                    // Pre-allocate vector and fill backwards (per docs/arrays.md)
+                    let mut elements = Vec::with_capacity(element_count);
+                    elements.resize(element_count, Value::Null);
+
+                    for i in (0..element_count).rev() {
+                        elements[i] = self.pop()?;
+                    }
+
+                    // Allocate array in memory manager
+                    let array_allocation = self.memory_manager.allocate_array(elements);
+                    self.push(Value::Array(array_allocation.index))?;
+
+                    // Check if GC should run
+                    if array_allocation.should_garbage_collect {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[VirtualMachine] Running GC at PC={} (Array construction)",
+                                self.program_counter
+                            );
+                        }
+                        self.run_garbage_collection();
+                    }
+                }
+
                 Opcode::ObjectIndex => {
                     let field_name = self.pop()?; // Property name to access
                     let object_value = self.pop()?; // Object to index into
@@ -592,6 +658,98 @@ impl<'a> VirtualMachine<'a> {
                             source_id: self.current_chunk().source_id.to_string(),
                         });
                     }
+                    self.advance_pc();
+                }
+
+                Opcode::ArrayIndex => {
+                    let index_value = self.pop()?;
+                    let container_value = self.pop()?;
+
+                    match container_value {
+                        Value::Array(array_key) => {
+                            // Array indexing with number
+                            if let Value::Number(index_num) = index_value {
+                                // Check for negative index
+                                if index_num < 0.0 {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Array index cannot be negative, got {}",
+                                            index_num
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+
+                                // Check for non-integer index
+                                if index_num.fract() != 0.0 {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Array index must be an integer, got {}",
+                                            index_num
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+
+                                let index = index_num as usize;
+                                let array = self.memory_manager.load_array(array_key);
+
+                                // Bounds check
+                                if index >= array.len() {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Array index {} out of bounds (length: {})",
+                                            index,
+                                            array.len()
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+
+                                self.push(array.elements[index])?;
+                            } else {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Array index must be a number, got {:?}",
+                                        index_value
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        }
+                        Value::Object(object_key) => {
+                            // Object indexing with string
+                            if let Value::String(field_key) = index_value {
+                                let object = self.memory_manager.load_object(object_key);
+                                if let Some(value) = object.get(&field_key) {
+                                    self.push(value.clone())?;
+                                } else {
+                                    self.push(Value::Null)?;
+                                }
+                            } else {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Object index must be a string, got {:?}",
+                                        index_value
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        }
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!("Cannot index into value: {:?}", container_value),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+
                     self.advance_pc();
                 }
 
@@ -755,6 +913,17 @@ impl<'a> VirtualMachine<'a> {
                 visited.remove(object_key); // Remove after processing
                 Ok(serde_json::Value::Object(json_object))
             }
+            Value::Array(array_key) => {
+                let array = self.memory_manager.load_array(*array_key);
+                let mut json_array = Vec::new();
+
+                for element in &array.elements {
+                    let json_value = self.value_to_json(element, visited)?;
+                    json_array.push(json_value);
+                }
+
+                Ok(serde_json::Value::Array(json_array))
+            }
         }
     }
 
@@ -775,6 +944,7 @@ impl<'a> VirtualMachine<'a> {
             Value::Number(n) => n > 0.0,
             Value::String(s) => self.memory_manager.load_string(s) != "",
             Value::Object(x) => self.memory_manager.load_object(x).len() > 0,
+            Value::Array(x) => self.memory_manager.load_array(x).len() > 0,
         }
     }
 
@@ -1172,7 +1342,7 @@ mod tests {
     #[test]
     fn test_unimplemented_opcode() {
         let mut chunk = create_test_chunk();
-        chunk.write_opcode(Opcode::CreateArray, 0..5); // Unimplemented opcode
+        chunk.write_opcode(Opcode::CreateObjectComp, 0..5); // Unimplemented opcode
         chunk.write_opcode(Opcode::Return, 5..10);
 
         let memory_manager = MemoryManager::new();
