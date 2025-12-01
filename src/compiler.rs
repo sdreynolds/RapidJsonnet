@@ -28,20 +28,19 @@ struct Local {
     stack_slot: usize, // Absolute position from stack bottom
 }
 
-// Precedence constants
-const PRECEDENCE_POSTFIX: u8 = 90;
-const PRECEDENCE_UNARY: u8 = 80;
-const PRECEDENCE_EXPONENTIATION: u8 = 70;
-const PRECEDENCE_MULTIPLICATIVE: u8 = 60;
-const PRECEDENCE_ADDITIVE: u8 = 50;
-const PRECEDENCE_COMPARISON: u8 = 40;
-const PRECEDENCE_EQUALITY: u8 = 35;
-const PRECEDENCE_BITAND: u8 = 30;
-const PRECEDENCE_BITXOR: u8 = 25;
-const PRECEDENCE_BITOR: u8 = 20;
-const PRECEDENCE_LOGICAL_AND: u8 = 15;
-const PRECEDENCE_LOGICAL_OR: u8 = 10;
-const PRECEDENCE_TERNARY: u8 = 5;
+// Precedence constants (per Jsonnet spec, decreasing order)
+const PRECEDENCE_POSTFIX: u8 = 90; // e(...) e[...] e.f
+const PRECEDENCE_UNARY: u8 = 80; // + - ! ~
+const PRECEDENCE_MULTIPLICATIVE: u8 = 60; // * / %
+const PRECEDENCE_ADDITIVE: u8 = 50; // + -
+const PRECEDENCE_SHIFT: u8 = 45; // << >>
+const PRECEDENCE_COMPARISON: u8 = 40; // < > <= >= in
+const PRECEDENCE_EQUALITY: u8 = 35; // == !=
+const PRECEDENCE_BITAND: u8 = 30; // &
+const PRECEDENCE_BITXOR: u8 = 25; // ^
+const PRECEDENCE_BITOR: u8 = 20; // |
+const PRECEDENCE_LOGICAL_AND: u8 = 15; // &&
+const PRECEDENCE_LOGICAL_OR: u8 = 10; // ||
 
 pub struct Compiler<'a> {
     compiling_chunk: Chunk<'a>,
@@ -436,8 +435,26 @@ impl<'a> Compiler<'a> {
                 self.pop_type(); // left operand
                 self.push_type(ExpressionType::Boolean); // inequality always produces boolean
             }
+            Token::Operator(op) if op == "<<" => {
+                self.emit_opcode(Opcode::Shl, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Number); // shift ops produce numbers
+            }
+            Token::Operator(op) if op == ">>" => {
+                self.emit_opcode(Opcode::Shr, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Number); // shift ops produce numbers
+            }
             Token::Operator(op) if op == "&" => {
                 self.emit_opcode(Opcode::BitAnd, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Number); // bitwise ops produce numbers
+            }
+            Token::Operator(op) if op == "^" => {
+                self.emit_opcode(Opcode::BitXor, token.span);
                 self.pop_type(); // right operand
                 self.pop_type(); // left operand
                 self.push_type(ExpressionType::Number); // bitwise ops produce numbers
@@ -660,8 +677,16 @@ impl<'a> Compiler<'a> {
                 Some((PRECEDENCE_EQUALITY, PRECEDENCE_EQUALITY + 1))
             }
 
+            // Shift operators (left associative)
+            Token::Operator(op) if op == "<<" || op == ">>" => {
+                Some((PRECEDENCE_SHIFT, PRECEDENCE_SHIFT + 1))
+            }
+
             // Bitwise AND (left associative)
             Token::Operator(op) if op == "&" => Some((PRECEDENCE_BITAND, PRECEDENCE_BITAND + 1)),
+
+            // Bitwise XOR (left associative)
+            Token::Operator(op) if op == "^" => Some((PRECEDENCE_BITXOR, PRECEDENCE_BITXOR + 1)),
 
             // Bitwise OR (left associative)
             Token::Operator(op) if op == "|" => Some((PRECEDENCE_BITOR, PRECEDENCE_BITOR + 1)),
@@ -1517,6 +1542,78 @@ mod tests {
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
 
+        assert!(chunk.code.len() > 0);
+    }
+
+    // Bitwise operator tests
+
+    #[test]
+    fn test_bitwise_xor() {
+        let mut scanner = Scanner::new("5 ^ 3", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should have constants for 5 and 3
+        assert_eq!(chunk.constants.len(), 2);
+        assert_eq!(chunk.constants[0], Value::Number(5.0));
+        assert_eq!(chunk.constants[1], Value::Number(3.0));
+        // LoadConst (3) + LoadConst (3) + BitXor (1) + Return (1) = 8 bytes
+        assert_eq!(chunk.code.len(), 8);
+        assert_eq!(chunk.code[6], Opcode::BitXor as u8);
+    }
+
+    #[test]
+    fn test_shift_left() {
+        let mut scanner = Scanner::new("8 << 2", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert_eq!(chunk.constants.len(), 2);
+        assert_eq!(chunk.constants[0], Value::Number(8.0));
+        assert_eq!(chunk.constants[1], Value::Number(2.0));
+        assert_eq!(chunk.code[6], Opcode::Shl as u8);
+    }
+
+    #[test]
+    fn test_shift_right() {
+        let mut scanner = Scanner::new("16 >> 2", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert_eq!(chunk.constants.len(), 2);
+        assert_eq!(chunk.constants[0], Value::Number(16.0));
+        assert_eq!(chunk.constants[1], Value::Number(2.0));
+        assert_eq!(chunk.code[6], Opcode::Shr as u8);
+    }
+
+    #[test]
+    fn test_bitwise_precedence() {
+        // Test: 1 | 2 ^ 4 & 8 should parse as 1 | (2 ^ (4 & 8))
+        // Because & has higher precedence than ^, and ^ has higher precedence than |
+        let mut scanner = Scanner::new("1 | 2 ^ 4 & 8", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should have constants for 1, 2, 4, 8
+        assert_eq!(chunk.constants.len(), 4);
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_shift_precedence() {
+        // Test: 1 + 2 << 3 should parse as (1 + 2) << 3
+        // Because + has higher precedence than <<
+        let mut scanner = Scanner::new("1 + 2 << 3", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert_eq!(chunk.constants.len(), 3);
+        // Verify order of operations: LoadConst(1), LoadConst(2), Add, LoadConst(3), Shl
         assert!(chunk.code.len() > 0);
     }
 }
