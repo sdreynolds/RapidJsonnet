@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 
 pub type FunctionIndex = DefaultKey;
 pub type UpvalueIndex = DefaultKey;
+pub type ClosureIndex = DefaultKey;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AllocationResult<T> {
@@ -231,6 +232,35 @@ impl ManagedUpvalue {
     /// Calculate the size of this upvalue
     fn size(&self) -> usize {
         std::mem::size_of::<Self>()
+    }
+}
+
+/// A heap-allocated closure combining a function with its captured upvalues
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagedClosure {
+    /// The function this closure wraps
+    pub function: FunctionIndex,
+    /// Captured upvalues for this closure
+    pub upvalues: Vec<UpvalueIndex>,
+    /// GC marking flag
+    marked: Cell<bool>,
+}
+
+impl ManagedClosure {
+    /// Create a new closure wrapping a function with its upvalues
+    pub fn new(function: FunctionIndex, upvalues: Vec<UpvalueIndex>) -> Self {
+        Self {
+            function,
+            upvalues,
+            marked: Cell::new(false),
+        }
+    }
+
+    /// Calculate the size of this closure including its upvalue vector
+    fn size(&self) -> usize {
+        let base_size = std::mem::size_of::<Self>();
+        let upvalues_size = self.upvalues.capacity() * std::mem::size_of::<UpvalueIndex>();
+        base_size + upvalues_size
     }
 }
 
