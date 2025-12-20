@@ -173,6 +173,64 @@ impl VirtualMachine {
         self.current_frame_mut().ip += 1;
     }
 
+    /// Capture an upvalue for the given stack location.
+    /// If an upvalue already exists for this location, returns the existing one.
+    /// Otherwise, creates a new upvalue and inserts it into the open_upvalues linked list.
+    fn capture_upvalue(&mut self, stack_location: usize) -> UpvalueIndex {
+        // Walk through the open_upvalues linked list
+        let mut prev_upvalue: Option<UpvalueIndex> = None;
+        let mut current_upvalue = self.open_upvalues;
+
+        // Find the position to insert or return existing upvalue
+        while let Some(upvalue_index) = current_upvalue {
+            let upvalue = self.memory_manager.load_upvalue(upvalue_index);
+
+            if let Some(location) = upvalue.stack_location {
+                if location == stack_location {
+                    // Found existing upvalue for this location
+                    return upvalue_index;
+                }
+
+                if location < stack_location {
+                    // We've passed the location where this upvalue should be
+                    break;
+                }
+            }
+
+            prev_upvalue = Some(upvalue_index);
+            current_upvalue = upvalue.next;
+        }
+
+        // Create a new upvalue
+        let upvalue_allocation = self.memory_manager.allocate_upvalue(stack_location);
+        let new_upvalue_index = upvalue_allocation.index;
+
+        // Insert the new upvalue into the linked list
+        if let Some(prev) = prev_upvalue {
+            // Insert after prev
+            let current_next = self.memory_manager.load_upvalue(prev).next;
+            self.memory_manager.load_upvalue_mut(new_upvalue_index).next = current_next;
+            self.memory_manager.load_upvalue_mut(prev).next = Some(new_upvalue_index);
+        } else {
+            // Insert at the head of the list
+            self.memory_manager.load_upvalue_mut(new_upvalue_index).next = self.open_upvalues;
+            self.open_upvalues = Some(new_upvalue_index);
+        }
+
+        if upvalue_allocation.should_garbage_collect {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!(
+                    "[VirtualMachine] Running GC at PC={} (Upvalue allocation)",
+                    self.current_frame().ip
+                );
+            }
+            self.run_garbage_collection();
+        }
+
+        new_upvalue_index
+    }
+
     /// Main interpretation loop
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
         loop {
@@ -912,6 +970,123 @@ impl VirtualMachine {
                 Opcode::Return => {
                     // Return the top value and halt execution
                     return self.pop();
+                }
+
+                Opcode::Closure => {
+                    // Read function index from constants
+                    let func_index_in_constants = self.read_u16_operand()?;
+                    let chunk = self.current_chunk();
+
+                    if func_index_in_constants as usize >= chunk.constants.len() {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!("Invalid constant index: {}", func_index_in_constants),
+                            source_id: chunk.source_id.to_string(),
+                        });
+                    }
+
+                    let func_value = chunk.constants[func_index_in_constants as usize];
+                    let func_index = if let Value::Function(idx) = func_value {
+                        idx
+                    } else {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!(
+                                "Expected function in constants, got {:?}",
+                                func_value
+                            ),
+                            source_id: chunk.source_id.to_string(),
+                        });
+                    };
+
+                    // Read upvalue count from bytecode
+                    let frame = self.current_frame();
+                    if frame.ip >= chunk.count() {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing upvalue count".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        });
+                    }
+                    let upvalue_count = chunk.code[frame.ip] as usize;
+                    self.current_frame_mut().ip += 1;
+
+                    // Collect upvalue indices
+                    let mut upvalue_indices = Vec::with_capacity(upvalue_count);
+
+                    for _ in 0..upvalue_count {
+                        let frame = self.current_frame();
+                        let chunk = self.current_chunk();
+
+                        // Read is_local flag
+                        if frame.ip >= chunk.count() {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Invalid bytecode - missing upvalue is_local flag"
+                                    .to_string(),
+                                source_id: chunk.source_id.to_string(),
+                            });
+                        }
+                        let is_local = chunk.code[frame.ip] != 0;
+                        self.current_frame_mut().ip += 1;
+
+                        // Read index (u16)
+                        let frame = self.current_frame();
+                        let chunk = self.current_chunk();
+                        if frame.ip + 1 >= chunk.count() {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Invalid bytecode - missing upvalue index".to_string(),
+                                source_id: chunk.source_id.to_string(),
+                            });
+                        }
+                        let index_bytes = [chunk.code[frame.ip], chunk.code[frame.ip + 1]];
+                        let index = u16::from_le_bytes(index_bytes) as usize;
+                        self.current_frame_mut().ip += 2;
+
+                        // Capture or copy upvalue
+                        let upvalue_index = if is_local {
+                            // Capture from stack
+                            let frame = self.current_frame();
+                            let stack_location = frame.stack_base + index;
+                            self.capture_upvalue(stack_location)
+                        } else {
+                            // Copy from current closure's upvalues
+                            let frame = self.current_frame();
+                            let current_closure = self.memory_manager.load_closure(frame.closure);
+                            if index >= current_closure.upvalues.len() {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Invalid upvalue index {} (closure has {} upvalues)",
+                                        index,
+                                        current_closure.upvalues.len()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                            current_closure.upvalues[index]
+                        };
+
+                        upvalue_indices.push(upvalue_index);
+                    }
+
+                    // Create closure
+                    let closure_allocation = self
+                        .memory_manager
+                        .allocate_closure(func_index, upvalue_indices);
+                    self.push(Value::Closure(closure_allocation.index))?;
+
+                    if closure_allocation.should_garbage_collect {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[VirtualMachine] Running GC at PC={} (Closure allocation)",
+                                self.current_frame().ip
+                            );
+                        }
+                        self.run_garbage_collection();
+                    }
                 }
 
                 // All other opcodes result in runtime error
