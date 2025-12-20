@@ -1,8 +1,8 @@
 use chunk::{
-    Chunk, ClosureIndex, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError,
-    Value,
+    Chunk, ClosureIndex, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, OwnedChunk,
+    RuntimeError, Value,
 };
-use memory_manager::MemoryManager;
+use memory_manager::{MemoryManager, UpvalueIndex};
 use std::ops::Range;
 
 /// Maximum number of nested function calls
@@ -31,37 +31,62 @@ impl CallFrame {
 }
 
 /// Virtual machine for executing Jsonnet bytecode
-pub struct VirtualMachine<'a> {
-    /// Collection of chunks that can be executed
-    chunks: Vec<Chunk<'a>>,
-    /// Index of the currently executing chunk
-    current_chunk: usize,
-    /// Program counter within the current chunk
-    program_counter: usize,
+pub struct VirtualMachine {
+    /// Call frame stack for function calls
+    frames: Vec<CallFrame>,
+    /// Number of active frames (logical size of frames vec)
+    frame_count: usize,
+    /// Linked list of open upvalues (pointing to stack locations)
+    open_upvalues: Option<UpvalueIndex>,
     /// Execution stack
     stack: Vec<Value>,
     /// String pool for string interning and GC
     memory_manager: MemoryManager,
 }
 
-impl<'a> VirtualMachine<'a> {
+impl VirtualMachine {
     /// Create a new virtual machine with the given starting chunk and string pool
-    pub fn new(chunk: Chunk<'a>, memory_manager: MemoryManager) -> Self {
-        let mut vm = Self {
-            chunks: Vec::new(),
-            current_chunk: 0,
-            program_counter: 0,
+    pub fn new(chunk: Chunk, mut memory_manager: MemoryManager) -> Self {
+        // Convert chunk to owned chunk for function storage
+        let owned_chunk = chunk.into_owned();
+
+        // Create a top-level function from the chunk
+        let func_result = memory_manager.allocate_function(None, 0, 0, owned_chunk);
+
+        // Create a closure wrapping the top-level function
+        let closure_result = memory_manager.allocate_closure(func_result.index, Vec::new());
+
+        // Create initial frame with the top-level closure
+        let initial_frame = CallFrame::new(closure_result.index, 0, 0);
+
+        let mut frames = Vec::with_capacity(MAX_FRAMES);
+        frames.push(initial_frame);
+
+        Self {
+            frames,
+            frame_count: 1,
+            open_upvalues: None,
             stack: Vec::with_capacity(1024),
             memory_manager,
-        };
-
-        vm.chunks.push(chunk);
-        vm
+        }
     }
 
-    /// Get the current chunk being executed
-    fn current_chunk(&self) -> &Chunk<'a> {
-        &self.chunks[self.current_chunk]
+    /// Get the current call frame
+    fn current_frame(&self) -> &CallFrame {
+        &self.frames[self.frame_count - 1]
+    }
+
+    /// Get mutable reference to the current call frame
+    fn current_frame_mut(&mut self) -> &mut CallFrame {
+        &mut self.frames[self.frame_count - 1]
+    }
+
+    /// Get the current chunk being executed from the current frame's closure
+    fn current_chunk(&self) -> &OwnedChunk {
+        let frame = self.current_frame();
+        let closure = self.memory_manager.load_closure(frame.closure);
+        let function = self.memory_manager.load_function(closure.function);
+        &function.chunk
     }
 
     /// Push a value onto the stack, checking for overflow
@@ -106,54 +131,56 @@ impl<'a> VirtualMachine<'a> {
 
     /// Get the source span for the current instruction
     fn get_current_span(&self) -> Range<usize> {
+        let frame = self.current_frame();
         self.current_chunk()
-            .get_span(self.program_counter)
+            .get_span(frame.ip)
             .cloned()
             .unwrap_or(0..0)
     }
 
     /// Read a u16 operand from the current position and advance PC
     fn read_u16_operand(&mut self) -> Result<u16, RuntimeError> {
+        let frame = self.current_frame();
         let chunk = self.current_chunk();
-        let operand = chunk
-            .read_u16(self.program_counter + 1)
-            .ok_or_else(|| RuntimeError {
-                span: self.get_current_span(),
-                message: "Invalid bytecode - missing operand".to_string(),
-                source_id: chunk.source_id.to_string(),
-            })?;
+        let operand = chunk.read_u16(frame.ip + 1).ok_or_else(|| RuntimeError {
+            span: self.get_current_span(),
+            message: "Invalid bytecode - missing operand".to_string(),
+            source_id: chunk.source_id.to_string(),
+        })?;
 
-        self.program_counter += 3; // opcode + 2 bytes for u16
+        self.current_frame_mut().ip += 3; // opcode + 2 bytes for u16
         Ok(operand)
     }
 
     /// Read a i32 operand from the current position and advance PC
     fn read_i32_operand(&mut self) -> Result<i32, RuntimeError> {
+        let frame = self.current_frame();
         let chunk = self.current_chunk();
         let operand = chunk
-            .read_i32(self.program_counter + OPCODE_SIZE_BYTES)
+            .read_i32(frame.ip + OPCODE_SIZE_BYTES)
             .ok_or_else(|| RuntimeError {
                 span: self.get_current_span(),
                 message: "Invalid bytecode - missing i32 operand".to_string(),
                 source_id: chunk.source_id.to_string(),
             })?;
 
-        self.program_counter += OPCODE_SIZE_BYTES + I32_SIZE_BYTES;
+        self.current_frame_mut().ip += OPCODE_SIZE_BYTES + I32_SIZE_BYTES;
         Ok(operand)
     }
 
     /// Advance program counter by 1 (for opcodes with no operands)
     fn advance_pc(&mut self) {
-        self.program_counter += 1;
+        self.current_frame_mut().ip += 1;
     }
 
     /// Main interpretation loop
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
         loop {
+            let frame = self.current_frame();
             let chunk = self.current_chunk();
 
             // Check if we've reached the end
-            if self.program_counter >= chunk.count() {
+            if frame.ip >= chunk.count() {
                 return Err(RuntimeError {
                     span: self.get_current_span(),
                     message: "Unexpected end of bytecode - missing Return instruction".to_string(),
@@ -161,13 +188,11 @@ impl<'a> VirtualMachine<'a> {
                 });
             }
 
-            let opcode = chunk
-                .read_opcode(self.program_counter)
-                .ok_or_else(|| RuntimeError {
-                    span: self.get_current_span(),
-                    message: "Invalid opcode in bytecode".to_string(),
-                    source_id: chunk.source_id.to_string(),
-                })?;
+            let opcode = chunk.read_opcode(frame.ip).ok_or_else(|| RuntimeError {
+                span: self.get_current_span(),
+                message: "Invalid opcode in bytecode".to_string(),
+                source_id: chunk.source_id.to_string(),
+            })?;
 
             match opcode {
                 Opcode::LoadNull => {
@@ -202,7 +227,11 @@ impl<'a> VirtualMachine<'a> {
                 }
 
                 Opcode::LoadVar => {
-                    let stack_slot = self.read_u16_operand()? as usize;
+                    let slot_offset = self.read_u16_operand()? as usize;
+                    let frame = self.current_frame();
+
+                    // Calculate absolute stack position: frame base + slot offset
+                    let stack_slot = frame.stack_base + slot_offset;
 
                     // Validate stack slot
                     if stack_slot >= self.stack.len() {
@@ -252,7 +281,7 @@ impl<'a> VirtualMachine<'a> {
                                 {
                                     eprintln!(
                                         "[VirtualMachine] Running GC at PC={} (Object merge in Concat)",
-                                        self.program_counter
+                                        self.current_frame().ip
                                     );
                                 }
                                 self.run_garbage_collection();
@@ -288,7 +317,7 @@ impl<'a> VirtualMachine<'a> {
                                 {
                                     eprintln!(
                                         "[VirtualMachine] Running GC at PC={} (Array concatenation)",
-                                        self.program_counter
+                                        self.current_frame().ip
                                     );
                                 }
                                 self.run_garbage_collection();
@@ -331,7 +360,7 @@ impl<'a> VirtualMachine<'a> {
                                 {
                                     eprintln!(
                                         "[VirtualMachine] Running GC at PC={} (String concat in Concat fallback)",
-                                        self.program_counter
+                                        self.current_frame().ip
                                     );
                                 }
                                 self.run_garbage_collection();
@@ -449,7 +478,7 @@ impl<'a> VirtualMachine<'a> {
                                 {
                                     eprintln!(
                                         "[VirtualMachine] Running GC at PC={} (String concat in StringConcat)",
-                                        self.program_counter
+                                        self.current_frame().ip
                                     );
                                 }
                                 self.run_garbage_collection();
@@ -486,7 +515,7 @@ impl<'a> VirtualMachine<'a> {
                                 {
                                     eprintln!(
                                         "[VirtualMachine] Running GC at PC={} (String concat in Multiply)",
-                                        self.program_counter
+                                        self.current_frame().ip
                                     );
                                 }
                                 self.run_garbage_collection();
@@ -626,7 +655,7 @@ impl<'a> VirtualMachine<'a> {
                         {
                             eprintln!(
                                 "[VirtualMachine] Running GC at PC={} (Object construction)",
-                                self.program_counter
+                                self.current_frame().ip
                             );
                         }
                         self.run_garbage_collection();
@@ -654,7 +683,7 @@ impl<'a> VirtualMachine<'a> {
                         {
                             eprintln!(
                                 "[VirtualMachine] Running GC at PC={} (Array construction)",
-                                self.program_counter
+                                self.current_frame().ip
                             );
                         }
                         self.run_garbage_collection();
@@ -820,7 +849,7 @@ impl<'a> VirtualMachine<'a> {
                             {
                                 eprintln!(
                                     "[VirtualMachine] Running GC at PC={} (Object merge in Add)",
-                                    self.program_counter
+                                    self.current_frame().ip
                                 );
                             }
                             self.run_garbage_collection();
@@ -855,26 +884,29 @@ impl<'a> VirtualMachine<'a> {
                 // Jump opcodes
                 Opcode::Jump => {
                     let offset = self.read_i32_operand()?;
-                    // PC is already advanced by read_i32_operand, adjust by offset
-                    self.program_counter = (self.program_counter as i32 + offset) as usize;
+                    // IP is already advanced by read_i32_operand, adjust by offset
+                    let frame = self.current_frame_mut();
+                    frame.ip = (frame.ip as i32 + offset) as usize;
                 }
 
                 Opcode::JumpIfFalse => {
                     let offset = self.read_i32_operand()?;
                     let condition = self.pop()?;
                     if !self.is_truthy(condition) {
-                        self.program_counter = (self.program_counter as i32 + offset) as usize;
+                        let frame = self.current_frame_mut();
+                        frame.ip = (frame.ip as i32 + offset) as usize;
                     }
-                    // If truthy, PC already advanced past jump instruction
+                    // If truthy, IP already advanced past jump instruction
                 }
 
                 Opcode::JumpIfTrue => {
                     let offset = self.read_i32_operand()?;
                     let condition = self.pop()?;
                     if self.is_truthy(condition) {
-                        self.program_counter = (self.program_counter as i32 + offset) as usize;
+                        let frame = self.current_frame_mut();
+                        frame.ip = (frame.ip as i32 + offset) as usize;
                     }
-                    // If falsy, PC already advanced past jump instruction
+                    // If falsy, IP already advanced past jump instruction
                 }
 
                 Opcode::Return => {
@@ -980,8 +1012,9 @@ impl<'a> VirtualMachine<'a> {
     fn run_garbage_collection(&mut self) {
         let mut roots = Vec::from(self.stack.clone());
 
-        for chunk in &self.chunks {
-            roots.extend_from_slice(&chunk.constants);
+        // Add all active frames' closures as roots
+        for i in 0..self.frame_count {
+            roots.push(Value::Closure(self.frames[i].closure));
         }
 
         self.memory_manager.run_garbage_collect(roots);

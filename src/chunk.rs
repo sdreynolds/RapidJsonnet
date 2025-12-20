@@ -678,6 +678,57 @@ impl<'a> Chunk<'a> {
     }
 }
 
+impl OwnedChunk {
+    /// Gets the span for a given instruction index
+    pub fn get_span(&self, instruction_index: usize) -> Option<&Range<usize>> {
+        let mut current_index = 0;
+
+        for span_info in &self.spans {
+            if instruction_index < current_index + span_info.repeated_values {
+                return Some(&span_info.span);
+            }
+            current_index += span_info.repeated_values;
+        }
+
+        None
+    }
+
+    /// Returns the number of instructions in the chunk
+    pub fn count(&self) -> usize {
+        self.code.len()
+    }
+
+    /// Read a u16 from the code at the given index (little-endian)
+    pub fn read_u16(&self, index: usize) -> Option<u16> {
+        if index + 1 < self.code.len() {
+            let bytes = [self.code[index], self.code[index + 1]];
+            Some(u16::from_le_bytes(bytes))
+        } else {
+            None
+        }
+    }
+
+    /// Read a 32-bit signed integer from the code at the given index (little-endian)
+    pub fn read_i32(&self, index: usize) -> Option<i32> {
+        if index + (I32_SIZE_BYTES - 1) < self.code.len() {
+            let bytes = [
+                self.code[index],
+                self.code[index + 1],
+                self.code[index + 2],
+                self.code[index + 3],
+            ];
+            Some(i32::from_le_bytes(bytes))
+        } else {
+            None
+        }
+    }
+
+    /// Read an opcode from the code at the given index
+    pub fn read_opcode(&self, index: usize) -> Option<Opcode> {
+        self.code.get(index).and_then(|&byte| Opcode::from_u8(byte))
+    }
+}
+
 impl<'a> Default for Chunk<'a> {
     fn default() -> Self {
         Self::new("")
