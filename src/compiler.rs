@@ -607,6 +607,48 @@ impl<'a> Compiler<'a> {
         Ok(index)
     }
 
+    /// Emit a Closure instruction with function and upvalue descriptors
+    fn emit_closure(
+        &mut self,
+        chunk: chunk::Chunk,
+        upvalues: Vec<CompilerUpvalue>,
+        arity: u8,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        let span = self.current_span();
+
+        // Convert chunk to owned chunk for storage
+        let owned_chunk = chunk.into_owned();
+
+        // Allocate function in memory manager
+        let func_result =
+            memory_manager.allocate_function(None, arity, upvalues.len() as u8, owned_chunk);
+
+        // Add function to constants pool
+        let func_index = self.add_constant_pooled(Value::Function(func_result.index))?;
+
+        // Emit Closure opcode with function index (opcode + u16)
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::Closure, func_index, span.clone());
+
+        // Manually push upvalue count byte to code vector
+        self.compiling_chunk.code.push(upvalues.len() as u8);
+
+        // Emit upvalue descriptors
+        for upvalue in upvalues {
+            // Emit is_local (1 if local, 0 if upvalue)
+            let is_local_byte = if upvalue.is_local { 1u8 } else { 0u8 };
+            self.compiling_chunk.code.push(is_local_byte);
+
+            // Emit index (u16) in little-endian
+            let index_bytes = (upvalue.index as u16).to_le_bytes();
+            self.compiling_chunk.code.push(index_bytes[0]);
+            self.compiling_chunk.code.push(index_bytes[1]);
+        }
+
+        Ok(())
+    }
+
     fn current_span(&self) -> Range<usize> {
         if let Some(current) = self.parser.current_token() {
             current.span.clone()
@@ -1325,10 +1367,10 @@ impl<'a> Compiler<'a> {
         self.end_scope();
 
         // End function compilation and restore previous state
-        let (_chunk, _upvalues) = self.end_function(saved_state);
+        let (chunk, upvalues) = self.end_function(saved_state);
 
-        // TODO: In future tasks, we'll allocate the function in memory_manager
-        // and emit a Closure opcode here. For now, this is just the infrastructure.
+        // Emit closure instruction with the compiled function
+        self.emit_closure(chunk, upvalues, arity, memory_manager)?;
 
         Ok(())
     }
