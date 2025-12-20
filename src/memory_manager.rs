@@ -273,6 +273,12 @@ pub struct MemoryManager {
     objects: SlotMap<ObjectIndex, ManagedObject>,
     /// Collection of Arrays
     arrays: SlotMap<ArrayIndex, ManagedArray>,
+    /// Collection of Functions
+    functions: SlotMap<FunctionIndex, ManagedFunction>,
+    /// Collection of Closures
+    closures: SlotMap<ClosureIndex, ManagedClosure>,
+    /// Collection of Upvalues
+    upvalues: SlotMap<UpvalueIndex, ManagedUpvalue>,
     /// Total bytes allocated for all strings
     allocated_bytes: usize,
     /// GC threshold for triggering collection
@@ -287,6 +293,9 @@ impl MemoryManager {
             strings: SlotMap::new(),
             objects: SlotMap::new(),
             arrays: SlotMap::new(),
+            functions: SlotMap::new(),
+            closures: SlotMap::new(),
+            upvalues: SlotMap::new(),
             allocated_bytes: 0,
             gc_threshold: 1024 * 1024, // 1MB initial threshold
         }
@@ -350,6 +359,46 @@ impl MemoryManager {
         let arr = ManagedArray::new(elements);
         self.allocated_bytes += arr.size();
         let index = self.arrays.insert(arr);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    pub fn allocate_function(
+        &mut self,
+        name: Option<StringIndex>,
+        arity: u8,
+        upvalue_count: u8,
+        chunk: OwnedChunk,
+    ) -> AllocationResult<FunctionIndex> {
+        let func = ManagedFunction::new(name, arity, upvalue_count, chunk);
+        self.allocated_bytes += func.size();
+        let index = self.functions.insert(func);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    pub fn allocate_closure(
+        &mut self,
+        function: FunctionIndex,
+        upvalues: Vec<UpvalueIndex>,
+    ) -> AllocationResult<ClosureIndex> {
+        let closure = ManagedClosure::new(function, upvalues);
+        self.allocated_bytes += closure.size();
+        let index = self.closures.insert(closure);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    pub fn allocate_upvalue(&mut self, stack_location: usize) -> AllocationResult<UpvalueIndex> {
+        let upvalue = ManagedUpvalue::new_open(stack_location);
+        self.allocated_bytes += upvalue.size();
+        let index = self.upvalues.insert(upvalue);
         AllocationResult {
             should_garbage_collect: self.should_collect(),
             index,
@@ -530,6 +579,30 @@ impl MemoryManager {
         self.arrays
             .get(key)
             .expect(format!("Array not found in SlotMap: {:?}", key).as_str())
+    }
+
+    pub fn load_function(&self, key: FunctionIndex) -> &ManagedFunction {
+        self.functions
+            .get(key)
+            .expect(format!("Function not found in SlotMap: {:?}", key).as_str())
+    }
+
+    pub fn load_closure(&self, key: ClosureIndex) -> &ManagedClosure {
+        self.closures
+            .get(key)
+            .expect(format!("Closure not found in SlotMap: {:?}", key).as_str())
+    }
+
+    pub fn load_upvalue(&self, key: UpvalueIndex) -> &ManagedUpvalue {
+        self.upvalues
+            .get(key)
+            .expect(format!("Upvalue not found in SlotMap: {:?}", key).as_str())
+    }
+
+    pub fn load_upvalue_mut(&mut self, key: UpvalueIndex) -> &mut ManagedUpvalue {
+        self.upvalues
+            .get_mut(key)
+            .expect(format!("Upvalue not found in SlotMap: {:?}", key).as_str())
     }
 
     /// Get current statistics
