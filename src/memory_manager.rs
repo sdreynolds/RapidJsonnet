@@ -1,8 +1,10 @@
-use chunk::{ArrayIndex, ObjectIndex, StringIndex, Value};
-use slotmap::SlotMap;
+use chunk::{ArrayIndex, ObjectIndex, OwnedChunk, SpanRunLength, StringIndex, Value};
+use slotmap::{DefaultKey, SlotMap};
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+
+pub type FunctionIndex = DefaultKey;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AllocationResult<T> {
@@ -137,6 +139,45 @@ impl ManagedArray {
     /// Check if array is empty
     pub fn is_empty(&self) -> bool {
         self.elements.is_empty()
+    }
+}
+
+/// A heap-allocated function object with its bytecode and metadata
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagedFunction {
+    /// Optional function name for debugging and error reporting
+    pub name: Option<StringIndex>,
+    /// Number of parameters this function accepts
+    pub arity: u8,
+    /// Number of upvalues this function closes over
+    pub upvalue_count: u8,
+    /// The bytecode chunk containing the function's instructions
+    pub chunk: OwnedChunk,
+    /// GC marking flag
+    marked: Cell<bool>,
+}
+
+impl ManagedFunction {
+    /// Create a new function object
+    pub fn new(name: Option<StringIndex>, arity: u8, upvalue_count: u8, chunk: OwnedChunk) -> Self {
+        Self {
+            name,
+            arity,
+            upvalue_count,
+            chunk,
+            marked: Cell::new(false),
+        }
+    }
+
+    /// Calculate the actual size of this function including its chunk
+    fn size(&self) -> usize {
+        let base_size = std::mem::size_of::<Self>();
+        // Add the size of the owned chunk's allocated memory
+        let chunk_size = self.chunk.code.capacity()
+            + (self.chunk.spans.capacity() * std::mem::size_of::<SpanRunLength>())
+            + (self.chunk.constants.capacity() * std::mem::size_of::<Value>())
+            + self.chunk.source_id.capacity();
+        base_size + chunk_size
     }
 }
 
