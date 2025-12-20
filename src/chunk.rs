@@ -162,6 +162,14 @@ pub enum Opcode {
     Pop = 90,
     Dup = 91,
     Swap = 92,
+
+    // Closure and Upvalue Operations
+    Closure = 100, // operand: u16 function_index + variable upvalue descriptors
+    // Format: Closure <func_idx:u16> <upvalue_count:u8>
+    //         For each upvalue: <is_local:u8> <index:u16>
+    GetUpvalue = 101,   // operand: u16 slot
+    SetUpvalue = 102,   // operand: u16 slot (for future use)
+    CloseUpvalue = 103, // no operand
 }
 
 impl Opcode {
@@ -217,6 +225,10 @@ impl Opcode {
             90 => Some(Opcode::Pop),
             91 => Some(Opcode::Dup),
             92 => Some(Opcode::Swap),
+            100 => Some(Opcode::Closure),
+            101 => Some(Opcode::GetUpvalue),
+            102 => Some(Opcode::SetUpvalue),
+            103 => Some(Opcode::CloseUpvalue),
             _ => None,
         }
     }
@@ -533,6 +545,16 @@ impl<'a> Chunk<'a> {
                     Opcode::LocalScope => 2,     // opcode + u8
                     Opcode::StdCall => 4,        // opcode + u16 + u8
                     Opcode::BindDefault => 3,    // opcode + u16
+                    Opcode::Closure => {
+                        // opcode + u16 (func_idx) + u8 (upvalue_count) + upvalue_count * 3
+                        // Each upvalue is: u8 (is_local) + u16 (index)
+                        if let Some(upvalue_count) = self.read_u8(ip + 3) {
+                            4 + (upvalue_count as usize * 3)
+                        } else {
+                            4 // Fallback to minimum size if we can't read upvalue_count
+                        }
+                    }
+                    Opcode::GetUpvalue | Opcode::SetUpvalue => 3, // opcode + u16
                     // All other opcodes have no operands
                     _ => 1,
                 };
