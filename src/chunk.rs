@@ -278,6 +278,20 @@ pub struct Chunk<'a> {
     pub constants: Vec<Value>,
 }
 
+/// An owned version of Chunk that owns its source_id.
+/// Needed because function objects must outlive compilation and cannot have lifetime parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnedChunk {
+    /// Owned source identifier
+    pub source_id: String,
+    /// Vector of bytecode containing opcodes and operands
+    pub code: Vec<u8>,
+    /// Vector mapping code indices to spans using run-length encoding
+    pub spans: Vec<SpanRunLength>,
+    /// Vector of constant values referenced by the bytecode
+    pub constants: Vec<Value>,
+}
+
 impl<'a> Chunk<'a> {
     /// Creates a new empty chunk with the given source identifier
     pub fn new(source_id: &'a str) -> Self {
@@ -638,6 +652,16 @@ impl<'a> Chunk<'a> {
 
         report.finish()
     }
+
+    /// Converts this Chunk into an OwnedChunk that owns its source_id
+    pub fn into_owned(self) -> OwnedChunk {
+        OwnedChunk {
+            source_id: self.source_id.to_string(),
+            code: self.code,
+            spans: self.spans,
+            constants: self.constants,
+        }
+    }
 }
 
 impl<'a> Default for Chunk<'a> {
@@ -936,5 +960,79 @@ mod tests {
         assert!(string_display.ends_with("]"));
         assert!(object_display.starts_with("Object["));
         assert!(object_display.ends_with("]"));
+    }
+
+    #[test]
+    fn test_owned_chunk_creation() {
+        let owned_chunk = OwnedChunk {
+            source_id: "test.jsonnet".to_string(),
+            code: vec![0, 1, 2],
+            spans: vec![SpanRunLength::new(0..5, 3)],
+            constants: vec![Value::Number(42.0)],
+        };
+
+        assert_eq!(owned_chunk.source_id, "test.jsonnet");
+        assert_eq!(owned_chunk.code, vec![0, 1, 2]);
+        assert_eq!(owned_chunk.spans.len(), 1);
+        assert_eq!(owned_chunk.constants.len(), 1);
+    }
+
+    #[test]
+    fn test_chunk_into_owned() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode(Opcode::LoadNull, 0..5);
+        chunk.write_opcode(Opcode::LoadTrue, 5..10);
+        let const_idx = chunk.add_constant(Value::Number(3.14));
+
+        let owned = chunk.into_owned();
+
+        assert_eq!(owned.source_id, "test.jsonnet");
+        assert_eq!(owned.code.len(), 2);
+        assert_eq!(owned.spans.len(), 2);
+        assert_eq!(owned.constants.len(), 1);
+        assert_eq!(owned.constants[const_idx], Value::Number(3.14));
+    }
+
+    #[test]
+    fn test_owned_chunk_clone() {
+        let owned_chunk = OwnedChunk {
+            source_id: "test.jsonnet".to_string(),
+            code: vec![0, 1, 2],
+            spans: vec![SpanRunLength::new(0..5, 3)],
+            constants: vec![Value::Number(42.0)],
+        };
+
+        let cloned = owned_chunk.clone();
+
+        assert_eq!(owned_chunk, cloned);
+        assert_eq!(cloned.source_id, "test.jsonnet");
+        assert_eq!(cloned.code, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_owned_chunk_equality() {
+        let owned1 = OwnedChunk {
+            source_id: "test.jsonnet".to_string(),
+            code: vec![0, 1, 2],
+            spans: vec![SpanRunLength::new(0..5, 3)],
+            constants: vec![Value::Number(42.0)],
+        };
+
+        let owned2 = OwnedChunk {
+            source_id: "test.jsonnet".to_string(),
+            code: vec![0, 1, 2],
+            spans: vec![SpanRunLength::new(0..5, 3)],
+            constants: vec![Value::Number(42.0)],
+        };
+
+        let owned3 = OwnedChunk {
+            source_id: "other.jsonnet".to_string(),
+            code: vec![0, 1, 2],
+            spans: vec![SpanRunLength::new(0..5, 3)],
+            constants: vec![Value::Number(42.0)],
+        };
+
+        assert_eq!(owned1, owned2);
+        assert_ne!(owned1, owned3);
     }
 }
