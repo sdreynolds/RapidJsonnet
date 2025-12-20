@@ -26,6 +26,21 @@ struct Local {
     name: String,      // Variable name
     depth: u32,        // Scope nesting level
     stack_slot: usize, // Absolute position from stack bottom
+    is_captured: bool, // Whether this local is captured by a closure
+}
+
+// Upvalue tracking for closure compilation
+#[derive(Debug, Clone)]
+struct CompilerUpvalue {
+    index: u8,      // Index in enclosing function's locals or upvalues
+    is_local: bool, // True if captures local, false if captures upvalue
+}
+
+// Type of function being compiled
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FunctionType {
+    Script,   // Top-level script
+    Function, // Named or anonymous function
 }
 
 // Precedence constants (per Jsonnet spec, decreasing order)
@@ -49,6 +64,9 @@ pub struct Compiler<'a> {
     constant_pool: HashMap<Value, u16>,
     locals: Vec<Local>, // Tracks all local variables currently in scope
     scope_depth: u32,   // Current scope nesting depth (0 = module level)
+    upvalues: Vec<CompilerUpvalue>, // Upvalues for this function
+    function_type: FunctionType, // Type of function being compiled
+    enclosing: Option<Box<Compiler<'a>>>, // Enclosing compiler for nested functions
 }
 
 impl<'a> Compiler<'a> {
@@ -63,6 +81,9 @@ impl<'a> Compiler<'a> {
             constant_pool: HashMap::new(),
             locals: Vec::new(),
             scope_depth: 0,
+            upvalues: Vec::new(),
+            function_type: FunctionType::Script,
+            enclosing: None,
         }
     }
 
@@ -1049,16 +1070,20 @@ impl<'a> Compiler<'a> {
         self.scope_depth += 1;
     }
 
-    /// Exit current scope, emitting Pop instructions for locals at this depth
+    /// Exit current scope, emitting Pop or CloseUpvalue instructions for locals at this depth
     fn end_scope(&mut self) {
         let span = self.current_span();
 
         // Pop all locals at current depth (in reverse declaration order)
         // The body expression result is on top of the stack, and locals are below it.
-        // For each local to pop, we swap it with the result and then pop it.
+        // For each local to pop, we swap it with the result and then pop/close it.
         // This keeps the result on top while removing locals underneath.
         while let Some(local) = self.locals.last() {
             if local.depth == self.scope_depth {
+                if local.is_captured {
+                    // Emit CloseUpvalue to move captured local from stack to heap
+                    self.emit_opcode(Opcode::CloseUpvalue, span.clone());
+                }
                 // Swap result with this local, then pop the local
                 self.emit_opcode(Opcode::Swap, span.clone());
                 self.emit_opcode(Opcode::Pop, span.clone());
@@ -1095,6 +1120,7 @@ impl<'a> Compiler<'a> {
             name,
             depth: self.scope_depth,
             stack_slot,
+            is_captured: false,
         });
 
         Ok(())
@@ -1109,6 +1135,47 @@ impl<'a> Compiler<'a> {
                 return Some(local.stack_slot);
             }
         }
+        None
+    }
+
+    /// Add an upvalue to this function's upvalue list
+    /// Returns the index of the upvalue (reusing existing entry if found)
+    fn add_upvalue(&mut self, index: u8, is_local: bool) -> u8 {
+        // Check if we already have this upvalue
+        for (i, upvalue) in self.upvalues.iter().enumerate() {
+            if upvalue.index == index && upvalue.is_local == is_local {
+                return i as u8;
+            }
+        }
+
+        // Add new upvalue
+        let upvalue_index = self.upvalues.len() as u8;
+        self.upvalues.push(CompilerUpvalue { index, is_local });
+        upvalue_index
+    }
+
+    /// Resolve an upvalue by name, checking enclosing functions
+    /// Returns the upvalue index if found, None otherwise
+    fn resolve_upvalue(&mut self, name: &str) -> Option<u8> {
+        // No enclosing function means we can't capture anything
+        let enclosing = self.enclosing.as_mut()?;
+
+        // Try to find in enclosing function's locals
+        for (i, local) in enclosing.locals.iter_mut().enumerate().rev() {
+            if local.name == name {
+                // Mark the local as captured
+                local.is_captured = true;
+                // Add as upvalue capturing a local
+                return Some(self.add_upvalue(i as u8, true));
+            }
+        }
+
+        // Try to find in enclosing function's upvalues (recursive)
+        if let Some(upvalue_index) = enclosing.resolve_upvalue(name) {
+            // Add as upvalue capturing another upvalue
+            return Some(self.add_upvalue(upvalue_index, false));
+        }
+
         None
     }
 
