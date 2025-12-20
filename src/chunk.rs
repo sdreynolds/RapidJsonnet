@@ -131,6 +131,8 @@ pub enum Opcode {
     CreateArray = 20, // operand: u16 element_count
     ArrayIndex = 21,
     ArrayConcat = 22,
+    ArrayLength = 23, // no operand - pops array, pushes length as number
+    ArrayAppend = 24, // no operand - pops value, pops array, pushes new array with value appended
 
     // Function Operations
     CreateFunction = 30, // operands: u8 param_count, u32 code_offset
@@ -206,6 +208,8 @@ impl Opcode {
             20 => Some(Opcode::CreateArray),
             21 => Some(Opcode::ArrayIndex),
             22 => Some(Opcode::ArrayConcat),
+            23 => Some(Opcode::ArrayLength),
+            24 => Some(Opcode::ArrayAppend),
             30 => Some(Opcode::CreateFunction),
             31 => Some(Opcode::Call),
             32 => Some(Opcode::Return),

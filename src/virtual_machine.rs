@@ -986,6 +986,71 @@ impl VirtualMachine {
                     self.advance_pc();
                 }
 
+                Opcode::ArrayLength => {
+                    let array_value = self.pop()?;
+
+                    match array_value {
+                        Value::Array(array_key) => {
+                            let array = self.memory_manager.load_array(array_key);
+                            let length = array.len() as f64;
+                            self.push(Value::Number(length))?;
+                        }
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!(
+                                    "Cannot get length of non-array value: {:?}",
+                                    array_value
+                                ),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+
+                    self.advance_pc();
+                }
+
+                Opcode::ArrayAppend => {
+                    let value_to_append = self.pop()?;
+                    let array_value = self.pop()?;
+
+                    match array_value {
+                        Value::Array(array_key) => {
+                            let array = self.memory_manager.load_array(array_key);
+                            // Create new array with appended value
+                            let mut new_elements = array.elements.clone();
+                            new_elements.push(value_to_append);
+
+                            let new_array_allocation =
+                                self.memory_manager.allocate_array(new_elements);
+                            self.push(Value::Array(new_array_allocation.index))?;
+
+                            if new_array_allocation.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (ArrayAppend)",
+                                        self.current_frame().ip
+                                    );
+                                }
+                                self.run_garbage_collection();
+                            }
+                        }
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!(
+                                    "Cannot append to non-array value: {:?}",
+                                    array_value
+                                ),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+
+                    self.advance_pc();
+                }
+
                 Opcode::ObjectMerge => {
                     let right_value = self.pop()?; // Right-hand side object
                     let left_value = self.pop()?; // Left-hand side object
