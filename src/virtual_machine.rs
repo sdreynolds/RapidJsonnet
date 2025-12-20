@@ -790,6 +790,31 @@ impl VirtualMachine {
                     self.advance_pc();
                 }
 
+                Opcode::StoreVar => {
+                    let slot = self.read_u16_operand()? as usize;
+                    let value = self.pop()?;
+
+                    // Calculate absolute stack position for current frame
+                    let frame_base = self.current_frame().stack_base;
+                    let abs_slot = frame_base + slot;
+
+                    if abs_slot >= self.stack.len() {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!(
+                                "StoreVar: slot {} is out of range (stack size: {})",
+                                slot,
+                                self.stack.len()
+                            ),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+
+                    self.stack[abs_slot] = value;
+                    // Note: read_u16_operand() already advanced PC by 3 (opcode + u16)
+                    // No need to call advance_pc() here
+                }
+
                 Opcode::CreateObject => {
                     let field_count = self.read_u16_operand()?;
 

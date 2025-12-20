@@ -1065,6 +1065,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Parse an array literal: [element1, element2, ...]
+    /// or an array comprehension: [expr for x in array]
     fn parse_array_literal(
         &mut self,
         start_token: &TokenInfo,
@@ -1087,12 +1088,58 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        // Parse array elements
+        // Check if this is a comprehension using lookahead (before parsing)
+        // Look for pattern: expr for x in ...
+        // We need to find 'for' at depth 0 (not inside nested brackets/parens)
+        let mut is_comprehension = false;
+        let mut depth = 0;
+        let mut lookahead_idx = 0;
         loop {
-            // Parse element value expression
-            self.parse_expr(0, memory_manager)?;
-            element_count += 1;
+            let token = self.parser.peek_ahead(lookahead_idx)?;
+            match token {
+                Some(t) => {
+                    match &t.token {
+                        Token::For if depth == 0 => {
+                            is_comprehension = true;
+                            break;
+                        }
+                        Token::LeftParen | Token::LeftBracket | Token::LeftBrace => depth += 1,
+                        Token::RightParen | Token::RightBrace => {
+                            if depth > 0 {
+                                depth -= 1;
+                            }
+                        }
+                        Token::RightBracket => {
+                            if depth > 0 {
+                                depth -= 1;
+                            } else {
+                                // End of array without finding 'for' - not a comprehension
+                                break;
+                            }
+                        }
+                        Token::Eof => break,
+                        _ => {}
+                    }
+                    lookahead_idx += 1;
+                }
+                None => break,
+            }
+        }
 
+        if is_comprehension {
+            // We already know for_offset from the lookahead, pass it to avoid re-scanning
+            return self.parse_array_comprehension(start_token, lookahead_idx, memory_manager);
+        }
+
+        // For regular arrays, we don't commit - let the buffer be consumed naturally
+        // during parsing. The buffered tokens are still valid lookahead that we'll use.
+
+        // Regular array literal - parse first element
+        self.parse_expr(0, memory_manager)?;
+        element_count += 1;
+
+        // Regular array literal - continue parsing elements
+        loop {
             // Check for more elements or end of array
             if let Some(current) = self.parser.current_token() {
                 match &current.token {
@@ -1105,7 +1152,9 @@ impl<'a> Compiler<'a> {
                                 break;
                             }
                         }
-                        // Continue parsing next element
+                        // Parse next element
+                        self.parse_expr(0, memory_manager)?;
+                        element_count += 1;
                     }
                     Token::RightBracket => {
                         break; // End of array
@@ -1132,6 +1181,211 @@ impl<'a> Compiler<'a> {
             element_count,
             start_token.span.clone(),
         );
+
+        Ok(())
+    }
+
+    /// Emit StoreVar opcode to store top of stack at given slot
+    fn emit_store_var(&mut self, slot: usize, span: Range<usize>) {
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::StoreVar, slot as u16, span);
+    }
+
+    /// Parse array comprehension: [expr for var in source_array]
+    /// Stack layout during loop: [source, result, counter, length]
+    /// for_offset is the token offset where 'for' keyword is located (already found by caller)
+    fn parse_array_comprehension(
+        &mut self,
+        start_token: &TokenInfo,
+        for_offset: usize,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        let span = start_token.span.clone();
+
+        // We need to parse: expr for var in source_array
+        // for_offset tells us where 'for' is located (already determined by caller)
+        // Save checkpoint for the body expression (we'll come back to it)
+        let body_checkpoint = self.parser.save_checkpoint();
+
+        // Skip past the body to 'for'
+        for _ in 0..for_offset {
+            self.parser.advance()?;
+        }
+
+        // Current token should be 'for'
+        self.parser.consume(Token::For, "Expected 'for'")?;
+
+        // Get loop variable name
+        let var_name = if let Some(token) = self.parser.current_token() {
+            if let Token::Identifier(name) = &token.token {
+                name.clone()
+            } else {
+                return Err(self.make_error(
+                    token.span.clone(),
+                    "Expected identifier after 'for'".to_string(),
+                ));
+            }
+        } else {
+            return Err(self.unexpected_eof_error(span));
+        };
+        self.parser.advance()?; // consume variable name
+
+        // Expect 'in'
+        self.parser
+            .consume(Token::In, "Expected 'in' after variable")?;
+
+        // Now we've consumed through 'in', commit the buffer
+        // so nested parsing doesn't get confused by stale lookahead tokens
+        self.parser.commit();
+
+        // Enter a scope for the comprehension state
+        self.begin_scope();
+
+        // Parse source array expression and declare as hidden local
+        self.parse_expr(0, memory_manager)?;
+        self.declare_local("__comp_source".to_string())?;
+        let source_slot = self.locals.len() - 1;
+        // Stack: [source]
+
+        // Dup source and get length, declare as hidden local
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadVar, source_slot as u16, span.clone());
+        self.emit_opcode(Opcode::ArrayLength, span.clone());
+        self.declare_local("__comp_length".to_string())?;
+        let length_slot = self.locals.len() - 1;
+        // Stack: [source, length]
+
+        // Create empty result array, declare as hidden local
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::CreateArray, 0, span.clone());
+        self.declare_local("__comp_result".to_string())?;
+        let result_slot = self.locals.len() - 1;
+        // Stack: [source, length, result]
+
+        // Push initial counter = 0, declare as hidden local
+        self.emit_constant(0.0)?;
+        self.declare_local("__comp_counter".to_string())?;
+        let counter_slot = self.locals.len() - 1;
+        // Stack: [source, length, result, counter]
+
+        // Consume ']' that closes the comprehension
+        self.parser.consume(
+            Token::RightBracket,
+            "Expected ']' to close array comprehension",
+        )?;
+
+        // Save checkpoint position for after the comprehension
+        let source_end_checkpoint = self.parser.save_checkpoint();
+
+        // Now emit the loop
+        // LOOP_START:
+        let loop_start = self.compiling_chunk.count();
+
+        // Check: counter < length
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadVar, counter_slot as u16, span.clone());
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadVar, length_slot as u16, span.clone());
+        self.emit_opcode(Opcode::Lt, span.clone());
+
+        // JumpIfFalse to end
+        let jump_to_end = self.emit_jump(Opcode::JumpIfFalse, span.clone());
+
+        // Get element: source[counter]
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadVar, source_slot as u16, span.clone());
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadVar, counter_slot as u16, span.clone());
+        self.emit_opcode(Opcode::ArrayIndex, span.clone());
+        // Stack: [source, length, result, counter, element]
+
+        // Enter scope and declare loop variable
+        self.begin_scope();
+        self.declare_local(var_name)?;
+        // element is now bound to var_name
+
+        // Restore parser to body expression and parse it
+        self.parser.restore_checkpoint(body_checkpoint);
+
+        // Parse body expression (with loop variable in scope)
+        self.parse_expr(0, memory_manager)?;
+        // Stack: [source, length, result, counter, element, body_value]
+
+        // End scope for loop variable - this pops element
+        self.end_scope();
+        // Stack: [source, length, result, counter, body_value]
+
+        // Append body_value to result
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadVar, result_slot as u16, span.clone());
+        self.emit_opcode(Opcode::Swap, span.clone());
+        self.emit_opcode(Opcode::ArrayAppend, span.clone());
+        // Stack: [source, length, result, counter, new_result]
+
+        // Store new_result back to result slot
+        self.emit_store_var(result_slot, span.clone());
+        // Stack: [source, length, result, counter]
+
+        // Increment counter
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadVar, counter_slot as u16, span.clone());
+        self.emit_constant(1.0)?;
+        self.emit_opcode(Opcode::Add, span.clone());
+        // Stack: [source, length, result, counter, new_counter]
+
+        // Store new_counter back to counter slot
+        self.emit_store_var(counter_slot, span.clone());
+        // Stack: [source, length, result, counter]
+
+        // Jump back to loop start
+        let jump_back_offset = self.compiling_chunk.count();
+        self.emit_opcode(Opcode::Jump, span.clone());
+        let back_offset = loop_start as i32 - (jump_back_offset as i32 + 1 + 4); // opcode + i32
+        self.emit_i32(back_offset);
+
+        // LOOP_END:
+        self.patch_jump(jump_to_end);
+        // Stack: [source, length, result, counter]
+
+        // Load result before we clean up
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadVar, result_slot as u16, span.clone());
+        // Stack: [source, length, result, counter, result]
+
+        // End the comprehension scope - this will clean up all hidden locals
+        // but we need to preserve the result on top
+        // Pop counter
+        self.emit_opcode(Opcode::Swap, span.clone());
+        self.emit_opcode(Opcode::Pop, span.clone());
+        // Stack: [source, length, result, result]
+
+        // Pop result (the original slot)
+        self.emit_opcode(Opcode::Swap, span.clone());
+        self.emit_opcode(Opcode::Pop, span.clone());
+        // Stack: [source, length, result]
+
+        // Pop length
+        self.emit_opcode(Opcode::Swap, span.clone());
+        self.emit_opcode(Opcode::Pop, span.clone());
+        // Stack: [source, result]
+
+        // Pop source
+        self.emit_opcode(Opcode::Swap, span.clone());
+        self.emit_opcode(Opcode::Pop, span.clone());
+        // Stack: [result]
+
+        // Manually remove the hidden locals from tracking (we've already popped them)
+        // Pop them in reverse order of declaration
+        self.locals.pop(); // counter
+        self.locals.pop(); // result
+        self.locals.pop(); // length
+        self.locals.pop(); // source
+
+        // End the comprehension scope
+        self.scope_depth -= 1;
+
+        // Restore parser to after the comprehension
+        self.parser.restore_checkpoint(source_end_checkpoint);
 
         Ok(())
     }

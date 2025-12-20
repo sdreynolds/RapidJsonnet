@@ -178,6 +178,7 @@ pub enum Opcode {
     Pop = 90,
     Dup = 91,
     Swap = 92,
+    StoreVar = 93, // operand: u16 slot - pops top value and stores at absolute stack slot
 
     // Closure and Upvalue Operations
     Closure = 100, // operand: u16 function_index + variable upvalue descriptors
@@ -243,6 +244,7 @@ impl Opcode {
             90 => Some(Opcode::Pop),
             91 => Some(Opcode::Dup),
             92 => Some(Opcode::Swap),
+            93 => Some(Opcode::StoreVar),
             100 => Some(Opcode::Closure),
             101 => Some(Opcode::GetUpvalue),
             102 => Some(Opcode::SetUpvalue),
