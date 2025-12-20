@@ -339,6 +339,14 @@ impl<'a> Compiler<'a> {
                     self.compiling_chunk
                         .write_opcode_u16(Opcode::LoadVar, stack_slot as u16, span);
                     self.push_type(ExpressionType::Unknown);
+                } else if let Some(upvalue_slot) = self.resolve_upvalue(&name_clone) {
+                    // Emit GetUpvalue with upvalue slot
+                    self.compiling_chunk.write_opcode_u16(
+                        Opcode::GetUpvalue,
+                        upvalue_slot as u16,
+                        span,
+                    );
+                    self.push_type(ExpressionType::Unknown);
                 } else {
                     // Variable not found
                     return Err(
@@ -777,6 +785,7 @@ impl<'a> Compiler<'a> {
         match token {
             Token::Dot => Some(PRECEDENCE_POSTFIX),
             Token::LeftBracket => Some(PRECEDENCE_POSTFIX),
+            Token::LeftParen => Some(PRECEDENCE_POSTFIX),
             _ => None,
         }
     }
@@ -839,6 +848,49 @@ impl<'a> Compiler<'a> {
                 self.emit_opcode(Opcode::ArrayIndex, token.span);
 
                 // Property access can return any type
+                self.push_type(ExpressionType::Unknown);
+            }
+            Token::LeftParen => {
+                self.parser.advance()?; // consume '('
+
+                // Parse argument list
+                let mut arg_count = 0u8;
+
+                // Check for empty argument list
+                if let Some(current) = self.parser.current_token() {
+                    if current.token != Token::RightParen {
+                        loop {
+                            // Parse argument expression
+                            self.parse_expr(0, memory_manager)?;
+                            arg_count += 1;
+
+                            // Check for more arguments
+                            if let Some(current) = self.parser.current_token() {
+                                if current.token == Token::Comma {
+                                    self.parser.advance()?; // consume ','
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Expect closing paren
+                self.parser
+                    .consume(Token::RightParen, "Expected ')' after arguments")?;
+
+                // Emit Call opcode with positional_count and named_count
+                // For now, we only support positional arguments
+                let span = token.span;
+                self.compiling_chunk
+                    .write_opcode(Opcode::Call, span.clone());
+                self.compiling_chunk.code.push(arg_count); // positional_count
+                self.compiling_chunk.code.push(0); // named_count (not yet supported)
+
+                // Function call can return any type
                 self.push_type(ExpressionType::Unknown);
             }
             _ => {
@@ -1350,6 +1402,11 @@ impl<'a> Compiler<'a> {
 
         // Enter function scope and declare parameters as locals
         self.begin_scope();
+
+        // Reserve slot 0 for the closure itself
+        // This ensures parameters start at slot 1
+        self.declare_local("<closure>".to_string())?;
+
         for param_name in parameters {
             // Parameters are implicitly on the stack (passed by caller)
             // We just need to declare them as locals
