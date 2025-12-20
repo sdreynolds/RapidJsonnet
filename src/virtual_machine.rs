@@ -1201,10 +1201,9 @@ impl VirtualMachine {
                 }
 
                 Opcode::CloseUpvalue => {
-                    // Close upvalue for top of stack
+                    // Close upvalue for top of stack (does NOT pop - compiler emits separate Pop)
                     let stack_top = self.stack.len() - 1;
                     self.close_upvalues(stack_top);
-                    self.pop()?;
                     self.advance_pc();
                 }
 
@@ -1428,7 +1427,17 @@ impl VirtualMachine {
             roots.push(Value::Closure(self.frames[i].closure));
         }
 
-        self.memory_manager.run_garbage_collect(roots);
+        // Collect open upvalues - these are upvalues that point to stack locations
+        // and haven't been closed yet. They must be kept alive even if not yet part of a closure.
+        let mut open_upvalue_roots = Vec::new();
+        let mut upvalue = self.open_upvalues;
+        while let Some(upvalue_index) = upvalue {
+            open_upvalue_roots.push(upvalue_index);
+            upvalue = self.memory_manager.load_upvalue(upvalue_index).next;
+        }
+
+        self.memory_manager
+            .run_garbage_collect(roots, open_upvalue_roots);
     }
 
     fn is_truthy(&self, value: Value) -> bool {

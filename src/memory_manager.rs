@@ -454,8 +454,18 @@ impl MemoryManager {
     }
 
     /// Runs a mark and sweep pass starting from roots
-    pub fn run_garbage_collect(&mut self, roots: Vec<Value>) {
+    /// open_upvalue_roots: upvalues that are still on the open upvalues list and must be kept alive
+    pub fn run_garbage_collect(
+        &mut self,
+        roots: Vec<Value>,
+        open_upvalue_roots: Vec<UpvalueIndex>,
+    ) {
         let mut values = VecDeque::from(roots);
+
+        // Mark open upvalues as roots - these haven't been captured into closures yet
+        for upvalue_index in open_upvalue_roots {
+            self.mark_upvalue(upvalue_index, &mut values);
+        }
 
         // Mark Phase, iterate over the roots, mark Values that need to remain
         while let Some(head) = values.pop_front() {
@@ -846,7 +856,7 @@ mod tests {
         let mut roots: Vec<Value> = Vec::new();
         roots.push(Value::Object(object_index));
 
-        manager.run_garbage_collect(roots);
+        manager.run_garbage_collect(roots, vec![]);
         assert_eq!(
             object_size + string_size,
             manager.allocated_bytes,
@@ -855,7 +865,7 @@ mod tests {
 
         let mut only_string: Vec<Value> = Vec::new();
         only_string.push(Value::String(name));
-        manager.run_garbage_collect(only_string);
+        manager.run_garbage_collect(only_string, vec![]);
         assert_eq!(
             string_size, manager.allocated_bytes,
             "GC should have collected the object but left the string around"
@@ -864,7 +874,7 @@ mod tests {
         // This would panic since the object was garbage collected:
         assert_eq!(None, manager.objects.get(object_index));
 
-        manager.run_garbage_collect(vec![]);
+        manager.run_garbage_collect(vec![], vec![]);
         assert_eq!(0, manager.allocated_bytes);
         // This would panic since the string was garbage collected:
         assert_eq!(None, manager.strings.get(name));

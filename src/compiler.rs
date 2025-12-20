@@ -36,6 +36,57 @@ struct CompilerUpvalue {
     is_local: bool, // True if captures local, false if captures upvalue
 }
 
+// Enclosing scope state for upvalue resolution during nested function compilation
+// This holds the frozen state of outer scopes needed for closure variable capture
+#[derive(Debug)]
+struct EnclosingScope {
+    locals: Vec<Local>,
+    upvalues: Vec<CompilerUpvalue>,
+    enclosing: Option<Box<EnclosingScope>>,
+}
+
+impl EnclosingScope {
+    /// Add an upvalue to this scope's upvalue list
+    /// Returns the index of the upvalue (reusing existing entry if found)
+    fn add_upvalue(&mut self, index: u8, is_local: bool) -> u8 {
+        // Check if we already have this upvalue
+        for (i, upvalue) in self.upvalues.iter().enumerate() {
+            if upvalue.index == index && upvalue.is_local == is_local {
+                return i as u8;
+            }
+        }
+
+        // Add new upvalue
+        let upvalue_index = self.upvalues.len() as u8;
+        self.upvalues.push(CompilerUpvalue { index, is_local });
+        upvalue_index
+    }
+
+    /// Resolve an upvalue by name, checking this scope and its enclosing scopes
+    /// Returns the upvalue index if found, None otherwise
+    fn resolve_upvalue(&mut self, name: &str) -> Option<u8> {
+        // Try to find in this scope's locals
+        for (i, local) in self.locals.iter_mut().enumerate().rev() {
+            if local.name == name {
+                // Mark the local as captured
+                local.is_captured = true;
+                // Add as upvalue capturing a local
+                return Some(self.add_upvalue(i as u8, true));
+            }
+        }
+
+        // Try to find in enclosing scope's upvalues (recursive)
+        if let Some(enclosing) = self.enclosing.as_mut() {
+            if let Some(upvalue_index) = enclosing.resolve_upvalue(name) {
+                // Add as upvalue capturing another upvalue
+                return Some(self.add_upvalue(upvalue_index, false));
+            }
+        }
+
+        None
+    }
+}
+
 // Type of function being compiled
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FunctionType {
@@ -66,7 +117,7 @@ pub struct Compiler<'a> {
     scope_depth: u32,   // Current scope nesting depth (0 = module level)
     upvalues: Vec<CompilerUpvalue>, // Upvalues for this function
     function_type: FunctionType, // Type of function being compiled
-    enclosing: Option<Box<Compiler<'a>>>, // Enclosing compiler for nested functions
+    enclosing: Option<Box<EnclosingScope>>, // Enclosing scope for upvalue resolution
 }
 
 impl<'a> Compiler<'a> {
@@ -1278,26 +1329,24 @@ impl<'a> Compiler<'a> {
         None
     }
 
-    /// Begin compiling a new function, saving current state
-    /// Returns the saved state (chunk, upvalues, locals, etc.)
-    fn begin_function(
-        &mut self,
-        _name: Option<String>,
-        _arity: u8,
-    ) -> (
-        Chunk<'a>,
-        Vec<CompilerUpvalue>,
-        Vec<Local>,
-        u32,
-        FunctionType,
-    ) {
+    /// Begin compiling a new function, setting up enclosing scope chain
+    /// Returns the saved state (chunk, scope_depth, function_type) for restoration
+    fn begin_function(&mut self) -> (Chunk<'a>, u32, FunctionType) {
         // Save source_id before we move compiling_chunk
         let source_id = self.compiling_chunk.source_id;
 
-        // Save current compilation state
+        // Create enclosing scope from current state for upvalue resolution
+        let enclosing_scope = EnclosingScope {
+            locals: std::mem::take(&mut self.locals),
+            upvalues: std::mem::take(&mut self.upvalues),
+            enclosing: self.enclosing.take(),
+        };
+
+        // Set up enclosing chain
+        self.enclosing = Some(Box::new(enclosing_scope));
+
+        // Save chunk state
         let old_chunk = std::mem::replace(&mut self.compiling_chunk, Chunk::new(source_id));
-        let old_upvalues = std::mem::take(&mut self.upvalues);
-        let old_locals = std::mem::take(&mut self.locals);
         let old_scope_depth = self.scope_depth;
         let old_function_type = self.function_type;
 
@@ -1305,35 +1354,29 @@ impl<'a> Compiler<'a> {
         self.scope_depth = 0;
         self.function_type = FunctionType::Function;
 
-        (
-            old_chunk,
-            old_upvalues,
-            old_locals,
-            old_scope_depth,
-            old_function_type,
-        )
+        (old_chunk, old_scope_depth, old_function_type)
     }
 
-    /// End function compilation, restoring previous state
+    /// End function compilation, restoring previous state from enclosing scope
     /// Returns the compiled function chunk and upvalues
     fn end_function(
         &mut self,
-        saved_state: (
-            Chunk<'a>,
-            Vec<CompilerUpvalue>,
-            Vec<Local>,
-            u32,
-            FunctionType,
-        ),
+        saved_state: (Chunk<'a>, u32, FunctionType),
     ) -> (Chunk<'a>, Vec<CompilerUpvalue>) {
-        let (old_chunk, old_upvalues, old_locals, old_scope_depth, old_function_type) = saved_state;
+        let (old_chunk, old_scope_depth, old_function_type) = saved_state;
 
-        // Get the compiled function
+        // Get the compiled function's chunk and upvalues
         let function_chunk = std::mem::replace(&mut self.compiling_chunk, old_chunk);
-        let function_upvalues = std::mem::replace(&mut self.upvalues, old_upvalues);
+        let function_upvalues = std::mem::take(&mut self.upvalues);
 
-        // Restore previous state
-        self.locals = old_locals;
+        // Restore locals and upvalues from enclosing scope
+        if let Some(enclosing) = self.enclosing.take() {
+            self.locals = enclosing.locals;
+            self.upvalues = enclosing.upvalues;
+            self.enclosing = enclosing.enclosing;
+        }
+
+        // Restore other state
         self.scope_depth = old_scope_depth;
         self.function_type = old_function_type;
 
@@ -1398,7 +1441,7 @@ impl<'a> Compiler<'a> {
         let arity = parameters.len() as u8;
 
         // Save current compilation state and begin function
-        let saved_state = self.begin_function(None, arity);
+        let saved_state = self.begin_function();
 
         // Enter function scope and declare parameters as locals
         self.begin_scope();
