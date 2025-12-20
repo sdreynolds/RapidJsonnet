@@ -5,6 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 
 pub type FunctionIndex = DefaultKey;
+pub type UpvalueIndex = DefaultKey;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AllocationResult<T> {
@@ -178,6 +179,58 @@ impl ManagedFunction {
             + (self.chunk.constants.capacity() * std::mem::size_of::<Value>())
             + self.chunk.source_id.capacity();
         base_size + chunk_size
+    }
+}
+
+/// A heap-allocated upvalue for capturing variables in closures
+/// Upvalues can be "open" (pointing to a stack location) or "closed" (holding a captured value)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagedUpvalue {
+    /// Stack location when upvalue is open, None when closed
+    pub stack_location: Option<usize>,
+    /// Captured value when upvalue is closed, None when open
+    pub closed_value: Option<Value>,
+    /// Pointer to next upvalue in linked list of open upvalues
+    pub next: Option<UpvalueIndex>,
+    /// GC marking flag
+    marked: Cell<bool>,
+}
+
+impl ManagedUpvalue {
+    /// Create a new open upvalue pointing to a stack location
+    pub fn new_open(stack_location: usize) -> Self {
+        Self {
+            stack_location: Some(stack_location),
+            closed_value: None,
+            next: None,
+            marked: Cell::new(false),
+        }
+    }
+
+    /// Create a new closed upvalue with a captured value
+    pub fn new_closed(value: Value) -> Self {
+        Self {
+            stack_location: None,
+            closed_value: Some(value),
+            next: None,
+            marked: Cell::new(false),
+        }
+    }
+
+    /// Close this upvalue by capturing the value from the stack
+    pub fn close(&mut self, value: Value) {
+        self.stack_location = None;
+        self.closed_value = Some(value);
+    }
+
+    /// Check if this upvalue is closed
+    pub fn is_closed(&self) -> bool {
+        self.stack_location.is_none()
+    }
+
+    /// Calculate the size of this upvalue
+    fn size(&self) -> usize {
+        std::mem::size_of::<Self>()
     }
 }
 
