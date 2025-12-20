@@ -1,6 +1,34 @@
-use chunk::{Chunk, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError, Value};
+use chunk::{
+    Chunk, ClosureIndex, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError,
+    Value,
+};
 use memory_manager::MemoryManager;
 use std::ops::Range;
+
+/// Maximum number of nested function calls
+const MAX_FRAMES: usize = 256;
+
+/// Represents a function call frame on the call stack
+#[derive(Debug, Clone, Copy)]
+pub struct CallFrame {
+    /// The closure being executed in this frame
+    pub closure: ClosureIndex,
+    /// Instruction pointer within the frame's function
+    pub ip: usize,
+    /// Base position in VM stack where this frame's locals begin
+    pub stack_base: usize,
+}
+
+impl CallFrame {
+    /// Create a new call frame
+    pub fn new(closure: ClosureIndex, ip: usize, stack_base: usize) -> Self {
+        Self {
+            closure,
+            ip,
+            stack_base,
+        }
+    }
+}
 
 /// Virtual machine for executing Jsonnet bytecode
 pub struct VirtualMachine<'a> {
