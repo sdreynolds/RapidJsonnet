@@ -173,6 +173,37 @@ impl VirtualMachine {
         self.current_frame_mut().ip += 1;
     }
 
+    /// Close upvalues for stack slots at or above last_slot.
+    /// This captures values from the stack into the upvalue's closed_value,
+    /// effectively moving them from stack to heap.
+    fn close_upvalues(&mut self, last_slot: usize) {
+        while let Some(upvalue_index) = self.open_upvalues {
+            let upvalue = self.memory_manager.load_upvalue(upvalue_index);
+
+            if let Some(location) = upvalue.stack_location {
+                if location >= last_slot {
+                    // This upvalue needs to be closed
+                    let value = self.stack[location];
+                    let next = upvalue.next;
+
+                    // Close the upvalue (move from stack to heap)
+                    self.memory_manager
+                        .load_upvalue_mut(upvalue_index)
+                        .close(value);
+
+                    // Remove from open list
+                    self.open_upvalues = next;
+                } else {
+                    // Lower stack slots remain open
+                    break;
+                }
+            } else {
+                // Already closed, move to next
+                self.open_upvalues = upvalue.next;
+            }
+        }
+    }
+
     /// Capture an upvalue for the given stack location.
     /// If an upvalue already exists for this location, returns the existing one.
     /// Otherwise, creates a new upvalue and inserts it into the open_upvalues linked list.
@@ -970,6 +1001,63 @@ impl VirtualMachine {
                 Opcode::Return => {
                     // Return the top value and halt execution
                     return self.pop();
+                }
+
+                Opcode::GetUpvalue => {
+                    let upvalue_slot = self.read_u16_operand()? as usize;
+                    let frame = self.current_frame();
+                    let current_closure = self.memory_manager.load_closure(frame.closure);
+
+                    if upvalue_slot >= current_closure.upvalues.len() {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!(
+                                "Invalid upvalue slot {} (closure has {} upvalues)",
+                                upvalue_slot,
+                                current_closure.upvalues.len()
+                            ),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+
+                    let upvalue_index = current_closure.upvalues[upvalue_slot];
+                    let upvalue = self.memory_manager.load_upvalue(upvalue_index);
+
+                    let value = if let Some(location) = upvalue.stack_location {
+                        // Upvalue is open - read from stack
+                        if location >= self.stack.len() {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!(
+                                    "Invalid upvalue stack location {} (stack size: {})",
+                                    location,
+                                    self.stack.len()
+                                ),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                        self.stack[location]
+                    } else if let Some(closed_value) = upvalue.closed_value {
+                        // Upvalue is closed - read from heap
+                        closed_value
+                    } else {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Upvalue has neither stack location nor closed value"
+                                .to_string(),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    };
+
+                    self.push(value)?;
+                }
+
+                Opcode::CloseUpvalue => {
+                    // Close upvalue for top of stack
+                    let stack_top = self.stack.len() - 1;
+                    self.close_upvalues(stack_top);
+                    self.pop()?;
+                    self.advance_pc();
                 }
 
                 Opcode::Closure => {
