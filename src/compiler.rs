@@ -323,6 +323,11 @@ impl<'a> Compiler<'a> {
                 // Type depends on body expression
                 self.push_type(ExpressionType::Unknown);
             }
+            Token::Function => {
+                self.parse_function_expression(memory_manager)?;
+                // Function expressions produce function values
+                self.push_type(ExpressionType::Unknown);
+            }
             Token::Identifier(name) => {
                 let name_clone = name.clone();
                 let span = token.span.clone();
@@ -1177,6 +1182,155 @@ impl<'a> Compiler<'a> {
         }
 
         None
+    }
+
+    /// Begin compiling a new function, saving current state
+    /// Returns the saved state (chunk, upvalues, locals, etc.)
+    fn begin_function(
+        &mut self,
+        _name: Option<String>,
+        _arity: u8,
+    ) -> (
+        Chunk<'a>,
+        Vec<CompilerUpvalue>,
+        Vec<Local>,
+        u32,
+        FunctionType,
+    ) {
+        // Save source_id before we move compiling_chunk
+        let source_id = self.compiling_chunk.source_id;
+
+        // Save current compilation state
+        let old_chunk = std::mem::replace(&mut self.compiling_chunk, Chunk::new(source_id));
+        let old_upvalues = std::mem::take(&mut self.upvalues);
+        let old_locals = std::mem::take(&mut self.locals);
+        let old_scope_depth = self.scope_depth;
+        let old_function_type = self.function_type;
+
+        // Reset for new function
+        self.scope_depth = 0;
+        self.function_type = FunctionType::Function;
+
+        (
+            old_chunk,
+            old_upvalues,
+            old_locals,
+            old_scope_depth,
+            old_function_type,
+        )
+    }
+
+    /// End function compilation, restoring previous state
+    /// Returns the compiled function chunk and upvalues
+    fn end_function(
+        &mut self,
+        saved_state: (
+            Chunk<'a>,
+            Vec<CompilerUpvalue>,
+            Vec<Local>,
+            u32,
+            FunctionType,
+        ),
+    ) -> (Chunk<'a>, Vec<CompilerUpvalue>) {
+        let (old_chunk, old_upvalues, old_locals, old_scope_depth, old_function_type) = saved_state;
+
+        // Get the compiled function
+        let function_chunk = std::mem::replace(&mut self.compiling_chunk, old_chunk);
+        let function_upvalues = std::mem::replace(&mut self.upvalues, old_upvalues);
+
+        // Restore previous state
+        self.locals = old_locals;
+        self.scope_depth = old_scope_depth;
+        self.function_type = old_function_type;
+
+        (function_chunk, function_upvalues)
+    }
+
+    /// Parse a function expression: function(params) body
+    fn parse_function_expression(
+        &mut self,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        // Consume 'function' keyword
+        self.parser.advance()?;
+
+        // Expect '(' for parameter list
+        self.parser
+            .consume(Token::LeftParen, "Expected '(' after 'function'")?;
+
+        // Parse parameter list
+        let mut parameters = Vec::new();
+
+        // Check if parameter list is empty
+        let has_params = if let Some(token) = self.parser.current_token() {
+            token.token != Token::RightParen
+        } else {
+            false
+        };
+
+        if has_params {
+            loop {
+                // Expect parameter name (identifier)
+                if let Some(TokenInfo {
+                    token: Token::Identifier(param_name),
+                    ..
+                }) = self.parser.current_token()
+                {
+                    parameters.push(param_name.clone());
+                    self.parser.advance()?;
+                } else {
+                    return Err(
+                        self.make_error(self.current_span(), "Expected parameter name".to_string())
+                    );
+                }
+
+                // Check for comma (more parameters) or end of list
+                if let Some(token) = self.parser.current_token() {
+                    if token.token == Token::Comma {
+                        self.parser.advance()?; // consume comma
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Consume ')'
+        self.parser
+            .consume(Token::RightParen, "Expected ')' after parameters")?;
+
+        let arity = parameters.len() as u8;
+
+        // Save current compilation state and begin function
+        let saved_state = self.begin_function(None, arity);
+
+        // Enter function scope and declare parameters as locals
+        self.begin_scope();
+        for param_name in parameters {
+            // Parameters are implicitly on the stack (passed by caller)
+            // We just need to declare them as locals
+            self.declare_local(param_name)?;
+        }
+
+        // Parse function body expression
+        self.parse_expr(0, memory_manager)?;
+
+        // Emit implicit Return
+        let return_span = self.current_span();
+        self.emit_opcode(Opcode::Return, return_span);
+
+        // End function scope
+        self.end_scope();
+
+        // End function compilation and restore previous state
+        let (_chunk, _upvalues) = self.end_function(saved_state);
+
+        // TODO: In future tasks, we'll allocate the function in memory_manager
+        // and emit a Closure opcode here. For now, this is just the infrastructure.
+
+        Ok(())
     }
 
     fn parse_if_expression(
