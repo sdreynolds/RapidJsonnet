@@ -280,14 +280,20 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
-                                Value::Object(_) | Value::Array(_) => unreachable!(),
+                                Value::Object(_)
+                                | Value::Array(_)
+                                | Value::Function(_)
+                                | Value::Closure(_) => unreachable!(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
                                 Value::Number(n) => n.to_string(),
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
-                                Value::Object(_) | Value::Array(_) => unreachable!(),
+                                Value::Object(_)
+                                | Value::Array(_)
+                                | Value::Function(_)
+                                | Value::Closure(_) => unreachable!(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -431,6 +437,8 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                                 Value::Array(_) => "{array}".to_string(),
+                                Value::Function(_) => "{function}".to_string(),
+                                Value::Closure(_) => "{closure}".to_string(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
@@ -439,6 +447,8 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                                 Value::Array(_) => "{array}".to_string(),
+                                Value::Function(_) => "{function}".to_string(),
+                                Value::Closure(_) => "{closure}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -864,6 +874,8 @@ impl<'a> VirtualMachine<'a> {
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b, // compares only the keys and so can be quick
+            (Value::Function(a), Value::Function(b)) => a == b, // compare function indices
+            (Value::Closure(a), Value::Closure(b)) => a == b, // compare closure indices
 
             // Different types are never equal
             _ => false,
@@ -924,6 +936,16 @@ impl<'a> VirtualMachine<'a> {
 
                 Ok(serde_json::Value::Array(json_array))
             }
+            Value::Function(_) => Err(RuntimeError {
+                span: 0..0,
+                message: "Cannot serialize function to JSON".to_string(),
+                source_id: "serialization".to_string(),
+            }),
+            Value::Closure(_) => Err(RuntimeError {
+                span: 0..0,
+                message: "Cannot serialize closure to JSON".to_string(),
+                source_id: "serialization".to_string(),
+            }),
         }
     }
 
@@ -945,6 +967,8 @@ impl<'a> VirtualMachine<'a> {
             Value::String(s) => self.memory_manager.load_string(s) != "",
             Value::Object(x) => self.memory_manager.load_object(x).len() > 0,
             Value::Array(x) => self.memory_manager.load_array(x).len() > 0,
+            Value::Function(_) => true, // Functions are truthy
+            Value::Closure(_) => true,  // Closures are truthy
         }
     }
 
