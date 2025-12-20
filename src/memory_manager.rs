@@ -429,6 +429,30 @@ impl MemoryManager {
         }
     }
 
+    /// Helper method to mark an upvalue and its closed value if present
+    fn mark_upvalue(&mut self, upvalue_index: UpvalueIndex, values: &mut VecDeque<Value>) {
+        if let Some(managed_upvalue) = self.upvalues.get_mut(upvalue_index) {
+            managed_upvalue.marked.set(true);
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Marking Upvalue {:?}", upvalue_index)
+            }
+
+            // If the upvalue is closed, mark its captured value
+            if let Some(closed_value) = managed_upvalue.closed_value {
+                values.push_back(closed_value);
+            }
+        } else {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!(
+                    "[MemoryManager] WARNING: Failed to mark Upvalue {:?} - not found",
+                    upvalue_index
+                )
+            }
+        }
+    }
+
     /// Runs a mark and sweep pass starting from roots
     pub fn run_garbage_collect(&mut self, roots: Vec<Value>) {
         let mut values = VecDeque::from(roots);
@@ -497,6 +521,61 @@ impl MemoryManager {
                         }
                     }
                 }
+                Value::Function(function_index) => {
+                    if let Some(managed_function) = self.functions.get_mut(function_index) {
+                        managed_function.marked.set(true);
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] Marking Function {:?}", function_index)
+                        }
+
+                        // Mark the function name if present
+                        if let Some(name_index) = managed_function.name {
+                            values.push_back(Value::String(name_index));
+                        }
+
+                        // Mark all constants in the function's chunk
+                        for constant in &managed_function.chunk.constants {
+                            values.push_back(*constant);
+                        }
+                    } else {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[MemoryManager] WARNING: Failed to mark Function {:?} - not found",
+                                function_index
+                            )
+                        }
+                    }
+                }
+                Value::Closure(closure_index) => {
+                    if let Some(managed_closure) = self.closures.get_mut(closure_index) {
+                        managed_closure.marked.set(true);
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] Marking Closure {:?}", closure_index)
+                        }
+
+                        // Mark the function this closure wraps
+                        values.push_back(Value::Function(managed_closure.function));
+
+                        // Collect upvalue indices to avoid borrow checker issues
+                        let upvalue_indices: Vec<UpvalueIndex> = managed_closure.upvalues.clone();
+
+                        // Mark all upvalues in this closure
+                        for upvalue_index in upvalue_indices {
+                            self.mark_upvalue(upvalue_index, &mut values);
+                        }
+                    } else {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[MemoryManager] WARNING: Failed to mark Closure {:?} - not found",
+                                closure_index
+                            )
+                        }
+                    }
+                }
 
                 _ => continue,
             };
@@ -534,6 +613,36 @@ impl MemoryManager {
             }
         }
 
+        let mut functions_to_delete: Vec<FunctionIndex> = Vec::new();
+        for (func_idx, func) in self.functions.iter_mut() {
+            if func.marked.get() {
+                func.marked.set(false);
+            } else {
+                functions_to_delete.push(func_idx);
+                self.allocated_bytes -= func.size();
+            }
+        }
+
+        let mut closures_to_delete: Vec<ClosureIndex> = Vec::new();
+        for (closure_idx, closure) in self.closures.iter_mut() {
+            if closure.marked.get() {
+                closure.marked.set(false);
+            } else {
+                closures_to_delete.push(closure_idx);
+                self.allocated_bytes -= closure.size();
+            }
+        }
+
+        let mut upvalues_to_delete: Vec<UpvalueIndex> = Vec::new();
+        for (upvalue_idx, upvalue) in self.upvalues.iter_mut() {
+            if upvalue.marked.get() {
+                upvalue.marked.set(false);
+            } else {
+                upvalues_to_delete.push(upvalue_idx);
+                self.allocated_bytes -= upvalue.size();
+            }
+        }
+
         for string_idx in strings_to_delete {
             #[cfg(feature = "gc_debug")]
             {
@@ -556,6 +665,30 @@ impl MemoryManager {
                 eprintln!("[MemoryManager] Removing Array {:?}", arr_idx)
             }
             self.arrays.remove(arr_idx);
+        }
+
+        for func_idx in functions_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing Function {:?}", func_idx)
+            }
+            self.functions.remove(func_idx);
+        }
+
+        for closure_idx in closures_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing Closure {:?}", closure_idx)
+            }
+            self.closures.remove(closure_idx);
+        }
+
+        for upvalue_idx in upvalues_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing Upvalue {:?}", upvalue_idx)
+            }
+            self.upvalues.remove(upvalue_idx);
         }
 
         self.gc_threshold = self.allocated_bytes * 2;
