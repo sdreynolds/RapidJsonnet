@@ -173,6 +173,83 @@ impl VirtualMachine {
         self.current_frame_mut().ip += 1;
     }
 
+    /// Call a closure with the given number of arguments.
+    /// Stack layout: [..., closure, arg0, arg1, ..., argN]
+    /// The closure stays on the stack and becomes slot 0 of the new frame.
+    fn call_closure(
+        &mut self,
+        closure_index: ClosureIndex,
+        arg_count: usize,
+    ) -> Result<(), RuntimeError> {
+        let closure = self.memory_manager.load_closure(closure_index);
+        let function = self.memory_manager.load_function(closure.function);
+
+        // Validate arity
+        if arg_count != function.arity as usize {
+            return Err(RuntimeError {
+                span: self.get_current_span(),
+                message: format!(
+                    "Function expects {} arguments, got {}",
+                    function.arity, arg_count
+                ),
+                source_id: self.current_chunk().source_id.to_string(),
+            });
+        }
+
+        // Check stack depth
+        if self.frame_count >= MAX_FRAMES {
+            return Err(RuntimeError {
+                span: self.get_current_span(),
+                message: format!(
+                    "Stack overflow - exceeded maximum call depth of {}",
+                    MAX_FRAMES
+                ),
+                source_id: self.current_chunk().source_id.to_string(),
+            });
+        }
+
+        // Calculate stack_base: points to the closure on the stack
+        // Stack: [..., closure, arg0, arg1, ..., argN-1]
+        //              ^stack_base                      ^stack top
+        let stack_base = self.stack.len() - arg_count - 1;
+
+        // Create new call frame
+        let new_frame = CallFrame::new(closure_index, 0, stack_base);
+
+        // Push frame
+        if self.frame_count < self.frames.len() {
+            self.frames[self.frame_count] = new_frame;
+        } else {
+            self.frames.push(new_frame);
+        }
+        self.frame_count += 1;
+
+        Ok(())
+    }
+
+    /// Return from the current function with the given return value.
+    /// Returns true if this was the top-level script (frame_count == 0 after return).
+    fn return_from_function(&mut self, return_value: Value) -> bool {
+        // Get current frame before popping
+        let frame = self.current_frame();
+        let stack_base = frame.stack_base;
+
+        // Pop the frame
+        self.frame_count -= 1;
+
+        // Close any open upvalues for this frame
+        self.close_upvalues(stack_base);
+
+        // Clean up the stack (remove closure and args)
+        self.stack.truncate(stack_base);
+
+        // Push return value
+        self.stack.push(return_value);
+
+        // Return true if we've returned from the top-level script
+        self.frame_count == 0
+    }
+
     /// Close upvalues for stack slots at or above last_slot.
     /// This captures values from the stack into the upvalue's closed_value,
     /// effectively moving them from stack to heap.
@@ -998,9 +1075,80 @@ impl VirtualMachine {
                     // If falsy, IP already advanced past jump instruction
                 }
 
+                Opcode::Call => {
+                    // Read operands: positional_count and named_count
+                    let frame = self.current_frame();
+                    let chunk = self.current_chunk();
+
+                    if frame.ip + 2 >= chunk.count() {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing Call operands".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        });
+                    }
+
+                    let positional_count = chunk.code[frame.ip + 1] as usize;
+                    let named_count = chunk.code[frame.ip + 2] as usize;
+                    self.current_frame_mut().ip += 3; // opcode + 2 bytes
+
+                    // For now, only support positional arguments
+                    if named_count > 0 {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Named arguments not yet implemented".to_string(),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+
+                    let arg_count = positional_count;
+
+                    // Get callee from stack (it's at position: stack.len() - arg_count - 1)
+                    let callee_position = self.stack.len() - arg_count - 1;
+                    if callee_position >= self.stack.len() {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!(
+                                "Invalid stack access for callee at position {} (stack size: {})",
+                                callee_position,
+                                self.stack.len()
+                            ),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+
+                    let callee = self.stack[callee_position];
+
+                    match callee {
+                        Value::Closure(closure_index) => {
+                            self.call_closure(closure_index, arg_count)?;
+                        }
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!("Cannot call non-function value: {:?}", callee),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+                }
+
                 Opcode::Return => {
-                    // Return the top value and halt execution
-                    return self.pop();
+                    let return_value = self.pop()?;
+
+                    // Check if this is the top-level script return
+                    if self.frame_count == 1 {
+                        // Top-level return - just return the value
+                        return Ok(return_value);
+                    }
+
+                    // Return from function
+                    let is_script_complete = self.return_from_function(return_value);
+
+                    if is_script_complete {
+                        // We've returned from the top-level script
+                        return self.pop();
+                    }
                 }
 
                 Opcode::GetUpvalue => {
