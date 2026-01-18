@@ -1,6 +1,11 @@
 name: Build and Test
 run-name: ${{ github.actor }} is testing out GitHub Actions 🚀
-on: [push]
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, reopened]
 jobs:
   Bazel-Test:
     runs-on: ubuntu-latest
