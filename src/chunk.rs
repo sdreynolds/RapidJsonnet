@@ -548,6 +548,14 @@ impl<'a> Chunk<'a> {
         }
     }
 
+    /// Patch a u32 value in the code at the given position (little-endian)
+    pub fn patch_u32(&mut self, pos: usize, value: u32) {
+        if pos + 4 <= self.code.len() {
+            let bytes = value.to_le_bytes();
+            self.code[pos..pos + 4].copy_from_slice(&bytes);
+        }
+    }
+
     /// Read a 32-bit signed integer from the code at the given index (little-endian)
     pub fn read_i32(&self, index: usize) -> Option<i32> {
         if index + (I32_SIZE_BYTES - 1) < self.code.len() {

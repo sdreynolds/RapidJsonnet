@@ -212,13 +212,26 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::LoadVar => {
                     let stack_slot = self.read_u16_operand()? as usize;
 
+                    // Get the frame base for the current call
+                    // In global scope, frame_base is 0 (absolute addressing)
+                    // In function scope, frame_base is the position where function parameters start
+                    let frame_base = if let Some(frame) = self.call_frames.last() {
+                        frame.frame_base
+                    } else {
+                        0
+                    };
+
+                    let actual_slot = frame_base + stack_slot;
+
                     // Validate stack slot
-                    if stack_slot >= self.stack.len() {
+                    if actual_slot >= self.stack.len() {
                         return Err(RuntimeError {
                             span: self.get_current_span(),
                             message: format!(
-                                "Invalid stack slot {} (stack size: {})",
+                                "Invalid stack slot {} (relative offset: {}, frame_base: {}, stack size: {})",
                                 stack_slot,
+                                actual_slot,
+                                frame_base,
                                 self.stack.len()
                             ),
                             source_id: self.current_chunk().source_id.to_string(),
@@ -226,7 +239,7 @@ impl<'a> VirtualMachine<'a> {
                     }
 
                     // Copy value from slot to top of stack
-                    let value = self.stack[stack_slot].clone();
+                    let value = self.stack[actual_slot].clone();
                     self.push(value)?;
                 }
 
@@ -1116,15 +1129,15 @@ impl<'a> VirtualMachine<'a> {
 
                     let total_args = (positional_count + named_count) as usize;
 
-                    // Pop function from stack
-                    let func_value = self.pop()?;
-
-                    // Pop arguments (in reverse order)
+                    // Pop arguments first (in reverse order, since they're pushed in order)
                     let mut args = Vec::with_capacity(total_args);
                     for _ in 0..total_args {
                         args.push(self.pop()?);
                     }
                     args.reverse();
+
+                    // Pop function from stack (it's below the arguments)
+                    let func_value = self.pop()?;
 
                     match func_value {
                         Value::Function(func_idx) => {

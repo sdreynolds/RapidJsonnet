@@ -47,9 +47,8 @@ pub struct Compiler<'a> {
     parser: Parser<'a>,
     type_stack: Vec<ExpressionType>,
     constant_pool: HashMap<Value, u16>,
-    locals: Vec<Local>,        // Tracks all local variables currently in scope
-    scope_depth: u32,          // Current scope nesting depth (0 = module level)
-    function_scope_depth: u32, // Scope depth at which the current function was defined (0 if at module level)
+    locals: Vec<Local>, // Tracks all local variables currently in scope
+    scope_depth: u32,   // Current scope nesting depth (0 = module level)
 }
 
 impl<'a> Compiler<'a> {
@@ -64,7 +63,6 @@ impl<'a> Compiler<'a> {
             constant_pool: HashMap::new(),
             locals: Vec::new(),
             scope_depth: 0,
-            function_scope_depth: 0,
         }
     }
 
@@ -254,110 +252,6 @@ impl<'a> Compiler<'a> {
                     self.push_type(ExpressionType::Unknown);
                 }
             }
-            Token::Operator(op) if op == "$" => {
-                // Handle standard library function calls: $std.function(...)
-                let dollar_span = token.span.clone();
-                self.parser.advance()?; // consume '$'
-
-                // Expect 'std' identifier
-                let next_token =
-                    self.parser.current_token().cloned().ok_or_else(|| {
-                        self.unexpected_eof_error(dollar_span.end..dollar_span.end)
-                    })?;
-
-                match &next_token.token {
-                    Token::Identifier(name) if name == "std" => {
-                        self.parser.advance()?; // consume 'std'
-
-                        // Expect '.'
-                        self.parser
-                            .consume(Token::Dot, "Expected '.' after '$std'")?;
-
-                        // Expect function name
-                        let func_token = self.parser.current_token().cloned().ok_or_else(|| {
-                            self.unexpected_eof_error(dollar_span.end..dollar_span.end)
-                        })?;
-
-                        match &func_token.token {
-                            Token::Identifier(func_name) => {
-                                let func_name_str = func_name.clone();
-                                self.parser.advance()?; // consume function name
-
-                                // Map function name to function index
-                                let func_index = match func_name_str.as_str() {
-                                    "endsWith" => 0u16,
-                                    _ => {
-                                        return Err(self.make_error(
-                                            func_token.span,
-                                            format!("Unknown std function: {}", func_name_str),
-                                        ));
-                                    }
-                                };
-
-                                // Expect '(' for function call
-                                self.parser.consume(
-                                    Token::LeftParen,
-                                    "Expected '(' after std function name",
-                                )?;
-
-                                // Parse arguments
-                                let mut arg_count = 0u8;
-
-                                // Handle empty argument list
-                                if !matches!(
-                                    self.parser.current_token().map(|t| &t.token),
-                                    Some(Token::RightParen)
-                                ) {
-                                    loop {
-                                        // Parse argument expression
-                                        self.parse_expr(0, memory_manager)?;
-                                        arg_count += 1;
-
-                                        // Check for comma
-                                        if let Some(next_token) = self.parser.current_token() {
-                                            if matches!(next_token.token, Token::Comma) {
-                                                self.parser.advance()?; // consume ','
-                                            } else {
-                                                break;
-                                            }
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                // Expect ')'
-                                self.parser.consume(
-                                    Token::RightParen,
-                                    "Expected ')' after std function arguments",
-                                )?;
-
-                                // Emit StdCall opcode with function index and argument count
-                                // Format: opcode (1) + function_index (2) + arg_count (1) = 4 bytes
-                                self.compiling_chunk.write_opcode_u16_u8(
-                                    Opcode::StdCall,
-                                    func_index,
-                                    arg_count,
-                                    dollar_span,
-                                );
-
-                                // Std functions return unknown type
-                                self.push_type(ExpressionType::Unknown);
-                            }
-                            _ => {
-                                return Err(self.make_error(
-                                    func_token.span,
-                                    "Expected function name after '$std.'".to_string(),
-                                ));
-                            }
-                        }
-                    }
-                    _ => {
-                        return Err(self
-                            .make_error(next_token.span, "Expected 'std' after '$'".to_string()));
-                    }
-                }
-            }
             Token::LeftParen => {
                 self.parser.advance()?; // consume '('
                 self.parse_expr(0, memory_manager)?;
@@ -510,32 +404,10 @@ impl<'a> Compiler<'a> {
                 }
 
                 // Try to resolve as local variable
-                if let Some(local) = self.locals.iter().rev().find(|l| l.name == name_clone) {
-                    // Check if this variable should be captured
-                    // Only capture if: we're inside a nested function (function_scope_depth > 0)
-                    // AND the variable is from a shallower scope than the function definition
-                    let is_captured = (self.function_scope_depth > 0)
-                        && (local.depth < self.function_scope_depth);
-
-                    if is_captured {
-                        // Emit LoadCapture with variable name string index
-                        // Store the variable name in constants pool
-                        let var_name_str_idx = memory_manager.allocate_string(&name_clone).index;
-                        let const_value = Value::String(var_name_str_idx);
-                        let const_index = self.add_constant_pooled(const_value).unwrap_or(0);
-                        self.compiling_chunk.write_opcode_u16(
-                            Opcode::LoadCapture,
-                            const_index,
-                            span,
-                        );
-                    } else {
-                        // Emit LoadVar with absolute stack slot
-                        self.compiling_chunk.write_opcode_u16(
-                            Opcode::LoadVar,
-                            local.stack_slot as u16,
-                            span,
-                        );
-                    }
+                if let Some(stack_slot) = self.resolve_local(&name_clone) {
+                    // Emit LoadVar with absolute stack slot
+                    self.compiling_chunk
+                        .write_opcode_u16(Opcode::LoadVar, stack_slot as u16, span);
                     self.push_type(ExpressionType::Unknown);
                 } else {
                     // Variable not found
@@ -1033,11 +905,13 @@ impl<'a> Compiler<'a> {
                     .consume(Token::RightParen, "Expected ')' after function arguments")?;
 
                 // Emit Call opcode with positional and named argument counts
+                // Stack order: [... function, arg1, arg2, ..., argN]
+                // Call pops arguments first (in reverse), then the function
                 self.compiling_chunk.write_opcode_u8_u8(
                     Opcode::Call,
                     positional_count,
                     named_count,
-                    token.span,
+                    token.span.clone(),
                 );
 
                 // Function call can return any type
@@ -1341,6 +1215,46 @@ impl<'a> Compiler<'a> {
         self.scope_depth -= 1;
     }
 
+    /// Exit current scope, emitting Pop instructions for non-parameter locals
+    /// This variant is used in function bodies where we want to skip popping parameters
+    fn end_scope_skip_params(&mut self, param_count: usize) {
+        let span = self.current_span();
+
+        // Count how many locals we'll pop (excluding parameters)
+        let mut locals_to_pop: usize = 0;
+        for local in self.locals.iter().rev() {
+            if local.depth < self.scope_depth {
+                break;
+            }
+            locals_to_pop += 1;
+        }
+
+        // Pop non-parameter locals only
+        // Parameters are the first param_count locals added at this depth
+        let non_param_locals = locals_to_pop.saturating_sub(param_count);
+
+        for _ in 0..non_param_locals {
+            if let Some(local) = self.locals.pop() {
+                if local.depth == self.scope_depth {
+                    // Swap result with this local, then pop the local
+                    self.emit_opcode(Opcode::Swap, span.clone());
+                    self.emit_opcode(Opcode::Pop, span.clone());
+                } else {
+                    // Put it back if it's from outer scope
+                    self.locals.push(local);
+                    break;
+                }
+            }
+        }
+
+        // Pop the parameters (they don't get Swap/Pop treatment)
+        for _ in 0..param_count {
+            self.locals.pop();
+        }
+
+        self.scope_depth -= 1;
+    }
+
     /// Declare a new local variable at the current scope depth
     /// The value must already be on the stack
     fn declare_local(&mut self, name: String) -> Result<(), CompilerError> {
@@ -1377,24 +1291,6 @@ impl<'a> Compiler<'a> {
         for local in self.locals.iter().rev() {
             if local.name == name {
                 return Some(local.stack_slot);
-            }
-        }
-        None
-    }
-
-    /// Resolve a variable and determine if it should use LoadCapture (if from outer scope during function definition)
-    /// Returns (stack_slot, is_captured) if found
-    fn resolve_local_with_capture_info(
-        &self,
-        name: &str,
-        function_scope_depth: u32,
-    ) -> Option<(usize, bool)> {
-        // Search from innermost to outermost scope (reverse order)
-        for local in self.locals.iter().rev() {
-            if local.name == name {
-                // If the variable was declared at a shallower scope than the function, it's captured
-                let is_captured = local.depth < function_scope_depth;
-                return Some((local.stack_slot, is_captured));
             }
         }
         None
@@ -1461,28 +1357,29 @@ impl<'a> Compiler<'a> {
         self.parser
             .consume(Token::LeftParen, "Expected '(' after 'function'")?;
 
-        // For now, we don't support parameters - just skip to the closing paren
-        // This is a minimal implementation to unblock testing
+        // Parse parameter names
+        let mut param_names: Vec<String> = Vec::new();
         let mut param_count = 0u8;
 
         if !matches!(
             self.parser.current_token().map(|t| &t.token),
             Some(Token::RightParen)
         ) {
-            // Simple parameter parsing: just count commas and identifiers
+            // Parse parameter list, collecting names
             loop {
                 if let Some(token) = self.parser.current_token() {
                     match &token.token {
-                        Token::Identifier(_) => {
+                        Token::Identifier(name) => {
+                            let param_name = name.clone();
                             param_count += 1;
+                            param_names.push(param_name);
                             self.parser.advance()?;
 
                             // Check for default value (= expression)
                             if let Some(next_token) = self.parser.current_token() {
                                 if matches!(&next_token.token, Token::Operator(op) if op == "=") {
                                     self.parser.advance()?; // consume '='
-                                    // Skip the default expression for now (would need to parse it properly)
-                                    // This is just a minimal implementation
+                                    // Skip the default expression for now
                                     self.parser.advance()?;
                                 }
                             }
@@ -1510,96 +1407,65 @@ impl<'a> Compiler<'a> {
         self.parser
             .consume(Token::RightParen, "Expected ')' after function parameters")?;
 
-        // Save the current code position where this function will be created
-        // The function body will be compiled inline
-        let function_code_offset = self.compiling_chunk.count();
-
-        // Determine if we need to capture environment
-        // Only capture locals from outer scopes if this function is nested (not at module level)
-        // A function at module level (function_scope_depth == 0) doesn't need to capture anything
-        // because module-level locals will be accessed via LoadVar from the stack
-        let locals_info: Vec<(String, usize)> = if self.function_scope_depth > 0 {
-            // Only capture locals from outer scopes (depth < function_scope_depth)
-            self.locals
-                .iter()
-                .filter(|local| local.depth < self.function_scope_depth)
-                .map(|local| (local.name.clone(), local.stack_slot))
-                .collect()
-        } else {
-            // Module-level function - don't capture anything
-            Vec::new()
-        };
-
-        let locals_to_capture: Vec<(u16, u16)> = locals_info
-            .iter()
-            .map(|(name, stack_slot)| {
-                // Add variable name to constants pool as a string value
-                let var_name_str_idx = memory_manager.allocate_string(name).index;
-                let const_value = Value::String(var_name_str_idx);
-                let const_index = self.add_constant_pooled(const_value).unwrap_or(0); // Use 0 as fallback (not ideal, but prevents panic)
-                (const_index, *stack_slot as u16)
-            })
-            .collect();
-
-        if locals_to_capture.is_empty() {
-            // No locals to capture, use CreateFunction
-            self.compiling_chunk.write_opcode_u8_u32(
-                Opcode::CreateFunction,
-                param_count,
-                (function_code_offset + 6) as u32, // Skip CreateFunction opcode (1 + 1 + 4 = 6 bytes)
-                function_span.clone(),
-            );
-        } else {
-            // Capture locals, use CreateClosure
-            let capture_count = locals_to_capture.len() as u16;
-            // Size of CreateClosure header: 1 + 1 + 4 + 2 = 8 bytes
-            let closure_header_size = 8;
-            // Size of capture entries: capture_count * 4
-            let capture_entries_size = (capture_count as usize) * 4;
-            let code_offset =
-                (function_code_offset + closure_header_size + capture_entries_size) as u32;
-
-            self.compiling_chunk.write_closure_header(
-                param_count,
-                code_offset,
-                capture_count,
-                function_span.clone(),
-            );
-
-            // Write capture entries
-            for (var_name_idx, stack_slot) in locals_to_capture {
-                self.compiling_chunk.write_closure_capture(
-                    var_name_idx,
-                    stack_slot,
-                    function_span.clone(),
-                );
-            }
-        }
-
         // Expect '{' to start function body
         self.parser
             .consume(Token::LeftBrace, "Expected '{' before function body")?;
 
-        // Save the current function's scope depth and set it to the function being defined
-        let saved_function_scope_depth = self.function_scope_depth;
-        self.function_scope_depth = self.scope_depth;
+        // Save the current code position where this function will be created
+        let function_code_offset = self.compiling_chunk.count();
 
-        // Increment scope depth for function body
-        self.scope_depth += 1;
+        // Emit CreateFunction opcode with a placeholder offset (will be patched later)
+        self.compiling_chunk.write_opcode_u8_u32(
+            Opcode::CreateFunction,
+            param_count,
+            0, // Placeholder - will be patched with actual function body offset
+            function_span.clone(),
+        );
+
+        // Save the position of the u32 offset so we can patch it later
+        // Position layout: 1 (opcode) + 1 (param_count u8) = 2, then comes the u32 offset
+        let create_function_offset_pos = function_code_offset + 2;
+
+        // Emit a Jump to skip over the function body code
+        let jump_to_skip = self.emit_jump(Opcode::Jump, function_span.clone());
+
+        // The function body code starts here
+        let body_code_offset = self.compiling_chunk.count();
+
+        // Now patch the CreateFunction's offset to point to the body code
+        self.compiling_chunk.patch_u32(create_function_offset_pos, body_code_offset as u32);
+
+        // Create a new scope for the function body
+        self.begin_scope();
+
+        // Declare each parameter as a local variable
+        // Parameters have stack_slot values that match their position in the parameter list
+        for (param_idx, param_name) in param_names.iter().enumerate() {
+            self.locals.push(Local {
+                name: param_name.clone(),
+                depth: self.scope_depth,
+                stack_slot: param_idx, // Parameters use slots 0, 1, 2, ...
+            });
+        }
+
+        // Save the number of parameters so end_scope() knows not to pop them
+        let param_count_at_depth = param_names.len();
 
         // Parse the function body expression
         self.parse_expr(0, memory_manager)?;
 
-        // Restore scope depth and function scope depth
-        self.scope_depth -= 1;
-        self.function_scope_depth = saved_function_scope_depth;
+        // End the function scope (but skip popping parameters)
+        self.end_scope_skip_params(param_count_at_depth);
 
         // Expect '}'
         self.parser
             .consume(Token::RightBrace, "Expected '}' after function body")?;
 
         // Emit Return to exit the function
-        self.emit_opcode(Opcode::Return, function_span);
+        self.emit_opcode(Opcode::Return, function_span.clone());
+
+        // Patch the Jump to skip over the function body
+        self.patch_jump(jump_to_skip);
 
         Ok(())
     }
@@ -2081,7 +1947,7 @@ mod tests {
 
     #[test]
     fn test_function_creation_with_param() {
-        let mut scanner = Scanner::new("function(x) { 42 }", "test");
+        let mut scanner = Scanner::new("function(x) { x }", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
@@ -2132,7 +1998,7 @@ mod tests {
 
     #[test]
     fn test_function_call_with_args() {
-        let mut scanner = Scanner::new("local f = function(x, y) { 42 }; f(1, 2)", "test");
+        let mut scanner = Scanner::new("local f = function(x, y) { x + y }; f(1, 2)", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
@@ -2220,7 +2086,7 @@ mod tests {
 
     #[test]
     fn test_function_with_conditional() {
-        let mut scanner = Scanner::new("function() { if true then 1 else 0 }", "test");
+        let mut scanner = Scanner::new("function(x) { if x > 0 then 1 else 0 }", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
@@ -2232,7 +2098,7 @@ mod tests {
     #[test]
     fn test_function_call_chaining() {
         let mut scanner = Scanner::new(
-            "local f = function() { 10 }; local g = function() { f() }; g()",
+            "local f = function(x) { x + 1 }; local g = function(y) { f(y) }; g(5)",
             "test",
         );
         let compiler = Compiler::new(&mut scanner, "test");
@@ -2246,7 +2112,7 @@ mod tests {
     #[test]
     fn test_function_as_argument() {
         let mut scanner = Scanner::new(
-            "local f = function() { 100 }; local h = function() { 42 }; f()",
+            "local f = function(g) { g() }; local h = function() { 42 }; f(h)",
             "test",
         );
         let compiler = Compiler::new(&mut scanner, "test");
@@ -2271,7 +2137,7 @@ mod tests {
 
     #[test]
     fn test_function_single_param_explicit() {
-        let mut scanner = Scanner::new("function(a) { 10 }", "test");
+        let mut scanner = Scanner::new("function(a) { a }", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
@@ -2282,7 +2148,10 @@ mod tests {
 
     #[test]
     fn test_function_many_params() {
-        let mut scanner = Scanner::new("function(a, b, c, d, e, f, g, h) { 88 }", "test");
+        let mut scanner = Scanner::new(
+            "function(a, b, c, d, e, f, g, h) { a + b + c + d + e + f + g + h }",
+            "test",
+        );
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
@@ -2349,7 +2218,7 @@ mod tests {
 
     #[test]
     fn test_function_with_unary_operations() {
-        let mut scanner = Scanner::new("function() { -42 }", "test");
+        let mut scanner = Scanner::new("function(x) { -x }", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
@@ -2360,7 +2229,7 @@ mod tests {
 
     #[test]
     fn test_function_with_binary_operations() {
-        let mut scanner = Scanner::new("function() { 10 * 5 + 3 / 2 }", "test");
+        let mut scanner = Scanner::new("function(x, y) { x * y + x / y }", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
@@ -2371,7 +2240,7 @@ mod tests {
 
     #[test]
     fn test_function_with_logical_operators() {
-        let mut scanner = Scanner::new("function() { true && false || !true }", "test");
+        let mut scanner = Scanner::new("function(a, b) { a && b || !a }", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
