@@ -877,7 +877,7 @@ impl<'a> Compiler<'a> {
 
                 // Parse positional arguments
                 let mut positional_count = 0u8;
-                let mut named_count = 0u8;
+                let named_count = 0u8; // Named arguments not yet implemented
 
                 // Handle empty argument list
                 if !matches!(
