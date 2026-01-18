@@ -1,4 +1,4 @@
-use chunk::{Chunk, Opcode, StringIndex, Value, I32_SIZE_BYTES};
+use chunk::{Chunk, I32_SIZE_BYTES, Opcode, StringIndex, Value};
 use memory_manager::MemoryManager;
 use parser::Parser;
 use scanner::{ScanError, Scanner, Token, TokenInfo};
@@ -1285,8 +1285,8 @@ impl<'a> Compiler<'a> {
                             if let Some(next_token) = self.parser.current_token() {
                                 if matches!(&next_token.token, Token::Operator(op) if op == "=") {
                                     self.parser.advance()?; // consume '='
-                                                            // Skip the default expression for now (would need to parse it properly)
-                                                            // This is just a minimal implementation
+                                    // Skip the default expression for now (would need to parse it properly)
+                                    // This is just a minimal implementation
                                     self.parser.advance()?;
                                 }
                             }
@@ -1723,10 +1723,12 @@ mod tests {
         let result = compiler.compile(&mut memory_manager);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .message
-            .contains("Undefined variable 'y'"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("Undefined variable 'y'")
+        );
     }
 
     #[test]

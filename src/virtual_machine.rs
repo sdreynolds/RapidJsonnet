@@ -1,5 +1,5 @@
 use chunk::{
-    CallFrame, Chunk, ObjectIndex, Opcode, RuntimeError, Value, I32_SIZE_BYTES, OPCODE_SIZE_BYTES,
+    CallFrame, Chunk, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError, Value,
 };
 use memory_manager::MemoryManager;
 use std::collections::HashMap;
@@ -1703,10 +1703,12 @@ mod tests {
         let result = vm.interpret();
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .message
-            .contains("Invalid constant index"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("Invalid constant index")
+        );
     }
 
     #[test]
@@ -1720,10 +1722,12 @@ mod tests {
         let result = vm.interpret();
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .message
-            .contains("missing Return instruction"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("missing Return instruction")
+        );
     }
 
     #[test]
@@ -1835,7 +1839,7 @@ mod tests {
         chunk.write_opcode_i32(Opcode::Jump, 4, 5..10); // [3-7]: 5 bytes, jump +4 to skip next 4 bytes
         chunk.write_opcode_u16(Opcode::LoadConst, idx_2 as u16, 10..15); // [8-10]: 3 bytes (skipped)
         chunk.write_opcode(Opcode::Return, 15..20); // [11]: 1 byte (skipped)
-                                                    // Jump target is at position 8+4=12
+        // Jump target is at position 8+4=12
         chunk.write_opcode_u16(Opcode::LoadConst, idx_3 as u16, 20..25); // [12-14]: jumped to
         chunk.write_opcode(Opcode::Return, 25..30); // [15]
 
