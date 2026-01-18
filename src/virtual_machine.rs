@@ -314,6 +314,13 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) | Value::Array(_) => unreachable!(),
+                                Value::Function(_) | Value::Closure(_) => {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: "Cannot concatenate function with string".to_string(),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
@@ -321,6 +328,13 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Boolean(b) => b.to_string(),
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) | Value::Array(_) => unreachable!(),
+                                Value::Function(_) | Value::Closure(_) => {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: "Cannot concatenate function with string".to_string(),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -464,6 +478,7 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                                 Value::Array(_) => "{array}".to_string(),
+                                Value::Function(_) | Value::Closure(_) => "{function}".to_string(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
@@ -472,6 +487,7 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                                 Value::Array(_) => "{array}".to_string(),
+                                Value::Function(_) | Value::Closure(_) => "{function}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -970,7 +986,7 @@ impl<'a> VirtualMachine<'a> {
                             self.call_frames.push(frame);
 
                             // Push arguments onto stack as local variables
-                            for (i, arg) in args.iter().enumerate() {
+                            for arg in args.iter() {
                                 self.push(*arg)?;
                             }
 
@@ -1128,6 +1144,13 @@ impl<'a> VirtualMachine<'a> {
 
                 Ok(serde_json::Value::Array(json_array))
             }
+            Value::Function(_) | Value::Closure(_) => {
+                Err(RuntimeError {
+                    span: 0..0,
+                    message: "Cannot convert function to JSON".to_string(),
+                    source_id: "serialization".to_string(),
+                })
+            }
         }
     }
 
@@ -1149,6 +1172,7 @@ impl<'a> VirtualMachine<'a> {
             Value::String(s) => self.memory_manager.load_string(s) != "",
             Value::Object(x) => self.memory_manager.load_object(x).len() > 0,
             Value::Array(x) => self.memory_manager.load_array(x).len() > 0,
+            Value::Function(_) | Value::Closure(_) => true,
         }
     }
 
