@@ -14,6 +14,8 @@ pub const I32_SIZE_BYTES: usize = 4;
 pub type ObjectIndex = DefaultKey;
 pub type StringIndex = DefaultKey;
 pub type ArrayIndex = DefaultKey;
+pub type FunctionIndex = DefaultKey;
+pub type ClosureIndex = DefaultKey;
 
 /// Value type for the Jsonnet virtual machine
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -24,6 +26,8 @@ pub enum Value {
     String(StringIndex),
     Object(ObjectIndex),
     Array(ArrayIndex),
+    Function(FunctionIndex),
+    Closure(ClosureIndex),
 }
 
 // Manual implementation of Eq for Value
@@ -63,6 +67,14 @@ impl std::hash::Hash for Value {
                 5u8.hash(state);
                 key.hash(state);
             }
+            Value::Function(key) => {
+                6u8.hash(state);
+                key.hash(state);
+            }
+            Value::Closure(key) => {
+                7u8.hash(state);
+                key.hash(state);
+            }
         }
     }
 }
@@ -88,6 +100,8 @@ impl std::fmt::Display for Value {
             Value::String(index) => write!(f, "String[{:?}]", index),
             Value::Object(index) => write!(f, "Object[{:?}]", index),
             Value::Array(index) => write!(f, "Array[{:?}]", index),
+            Value::Function(index) => write!(f, "Function[{:?}]", index),
+            Value::Closure(index) => write!(f, "Closure[{:?}]", index),
         }
     }
 }
@@ -622,6 +636,17 @@ impl<'a> Default for Chunk<'a> {
     fn default() -> Self {
         Self::new("")
     }
+}
+
+/// A call frame representing a function invocation on the call stack
+#[derive(Debug, Clone)]
+pub struct CallFrame {
+    /// Index of the function being executed
+    pub function_idx: FunctionIndex,
+    /// Starting program counter (address of first instruction in function)
+    pub return_address: usize,
+    /// Stack pointer at the time the frame was created (for frame cleanup)
+    pub frame_base: usize,
 }
 
 #[cfg(test)]

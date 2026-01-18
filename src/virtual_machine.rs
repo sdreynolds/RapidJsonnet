@@ -1,4 +1,4 @@
-use chunk::{Chunk, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError, Value};
+use chunk::{CallFrame, Chunk, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError, Value};
 use memory_manager::MemoryManager;
 use std::ops::Range;
 
@@ -12,6 +12,8 @@ pub struct VirtualMachine<'a> {
     program_counter: usize,
     /// Execution stack
     stack: Vec<Value>,
+    /// Call frame stack for nested function calls
+    call_frames: Vec<CallFrame>,
     /// String pool for string interning and GC
     memory_manager: MemoryManager,
 }
@@ -24,6 +26,7 @@ impl<'a> VirtualMachine<'a> {
             current_chunk: 0,
             program_counter: 0,
             stack: Vec::with_capacity(1024),
+            call_frames: Vec::with_capacity(256),
             memory_manager,
         };
 
@@ -111,6 +114,36 @@ impl<'a> VirtualMachine<'a> {
             })?;
 
         self.program_counter += OPCODE_SIZE_BYTES + I32_SIZE_BYTES;
+        Ok(operand)
+    }
+
+    /// Read a u8 operand from the current position and advance PC
+    fn read_u8_operand(&mut self) -> Result<u8, RuntimeError> {
+        let chunk = self.current_chunk();
+        let operand = chunk
+            .read_u8(self.program_counter + OPCODE_SIZE_BYTES)
+            .ok_or_else(|| RuntimeError {
+                span: self.get_current_span(),
+                message: "Invalid bytecode - missing u8 operand".to_string(),
+                source_id: chunk.source_id.to_string(),
+            })?;
+
+        self.program_counter += OPCODE_SIZE_BYTES + 1;
+        Ok(operand)
+    }
+
+    /// Read a u32 operand from the current position and advance PC
+    fn read_u32_operand(&mut self) -> Result<u32, RuntimeError> {
+        let chunk = self.current_chunk();
+        let operand = chunk
+            .read_u32(self.program_counter + OPCODE_SIZE_BYTES)
+            .ok_or_else(|| RuntimeError {
+                span: self.get_current_span(),
+                message: "Invalid bytecode - missing u32 operand".to_string(),
+                source_id: chunk.source_id.to_string(),
+            })?;
+
+        self.program_counter += OPCODE_SIZE_BYTES + 4;
         Ok(operand)
     }
 
@@ -839,9 +872,180 @@ impl<'a> VirtualMachine<'a> {
                     // If falsy, PC already advanced past jump instruction
                 }
 
+                Opcode::CreateFunction => {
+                    let chunk = self.current_chunk();
+                    let param_count = chunk
+                        .read_u8(self.program_counter + OPCODE_SIZE_BYTES)
+                        .ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing param_count".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        })?;
+
+                    let code_offset = chunk
+                        .read_u32(self.program_counter + OPCODE_SIZE_BYTES + 1)
+                        .ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing code_offset".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        })? as usize;
+
+                    self.program_counter += OPCODE_SIZE_BYTES + 1 + 4;
+
+                    // For now, create a function with no parameters and no defaults
+                    // The compiler should populate parameter info properly
+                    let param_names = Vec::new();
+                    let param_defaults = vec![None; param_count as usize];
+
+                    let func_allocation = self.memory_manager.allocate_function(
+                        param_count,
+                        param_names,
+                        param_defaults,
+                        code_offset,
+                    );
+
+                    self.push(Value::Function(func_allocation.index))?;
+
+                    if func_allocation.should_garbage_collect {
+                        self.run_garbage_collection();
+                    }
+                }
+
+                Opcode::Call => {
+                    let chunk = self.current_chunk();
+                    let positional_count = chunk
+                        .read_u8(self.program_counter + OPCODE_SIZE_BYTES)
+                        .ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing positional_count".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        })?;
+
+                    let named_count = chunk
+                        .read_u8(self.program_counter + OPCODE_SIZE_BYTES + 1)
+                        .ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing named_count".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        })?;
+
+                    self.program_counter += OPCODE_SIZE_BYTES + 1 + 1;
+
+                    let total_args = (positional_count + named_count) as usize;
+
+                    // Pop function from stack
+                    let func_value = self.pop()?;
+
+                    // Pop arguments (in reverse order)
+                    let mut args = Vec::with_capacity(total_args);
+                    for _ in 0..total_args {
+                        args.push(self.pop()?);
+                    }
+                    args.reverse();
+
+                    match func_value {
+                        Value::Function(func_idx) => {
+                            let func = self.memory_manager.load_function(func_idx).clone();
+
+                            // Validate argument count
+                            let required_args = func.param_count as usize;
+                            if (positional_count as usize) > required_args {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Too many arguments: expected {}, got {}",
+                                        required_args,
+                                        positional_count
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+
+                            // Save current frame
+                            let frame = CallFrame {
+                                function_idx: func_idx,
+                                return_address: self.program_counter,
+                                frame_base: self.stack.len(),
+                            };
+                            self.call_frames.push(frame);
+
+                            // Push arguments onto stack as local variables
+                            for (i, arg) in args.iter().enumerate() {
+                                self.push(*arg)?;
+                            }
+
+                            // Jump to function code
+                            self.program_counter = func.code_offset;
+                        }
+                        Value::Closure(closure_idx) => {
+                            let closure = self.memory_manager.load_closure(closure_idx).clone();
+                            let func = self.memory_manager.load_function(closure.function).clone();
+
+                            // Validate argument count
+                            let required_args = func.param_count as usize;
+                            if (positional_count as usize) > required_args {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Too many arguments: expected {}, got {}",
+                                        required_args,
+                                        positional_count
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+
+                            // Save current frame
+                            let frame = CallFrame {
+                                function_idx: closure.function,
+                                return_address: self.program_counter,
+                                frame_base: self.stack.len(),
+                            };
+                            self.call_frames.push(frame);
+
+                            // First, push captured environment onto stack
+                            for (_, value) in &closure.captured_env {
+                                self.push(*value)?;
+                            }
+
+                            // Then push arguments onto stack as local variables
+                            for arg in args.iter() {
+                                self.push(*arg)?;
+                            }
+
+                            // Jump to function code
+                            self.program_counter = func.code_offset;
+                        }
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!("Cannot call non-function value: {:?}", func_value),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+                }
+
                 Opcode::Return => {
-                    // Return the top value and halt execution
-                    return self.pop();
+                    // Get the return value
+                    let return_value = self.pop()?;
+
+                    // Check if we're inside a function call
+                    if let Some(frame) = self.call_frames.pop() {
+                        // Pop local variables (return stack to frame base)
+                        while self.stack.len() > frame.frame_base {
+                            self.stack.pop();
+                        }
+
+                        // Push return value
+                        self.push(return_value)?;
+
+                        // Resume execution at return address
+                        self.program_counter = frame.return_address;
+                    } else {
+                        // We're at the top level, return from the entire program
+                        return Ok(return_value);
+                    }
                 }
 
                 // All other opcodes result in runtime error

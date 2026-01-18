@@ -1,4 +1,4 @@
-use chunk::{ArrayIndex, ObjectIndex, StringIndex, Value};
+use chunk::{ArrayIndex, ClosureIndex, FunctionIndex, ObjectIndex, StringIndex, Value};
 use slotmap::SlotMap;
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -140,6 +140,76 @@ impl ManagedArray {
     }
 }
 
+/// A Jsonnet function with bytecode and parameter information
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagedFunction {
+    /// Number of positional parameters
+    pub param_count: u8,
+    /// Names of parameters with their defaults (None if no default)
+    pub param_names: Vec<StringIndex>,
+    pub param_defaults: Vec<Option<Value>>,
+    /// Bytecode offset where the function body begins
+    pub code_offset: usize,
+    /// GC marking
+    marked: Cell<bool>,
+}
+
+impl ManagedFunction {
+    /// Calculate the size of this function for GC
+    fn size(&self) -> usize {
+        let base_size = std::mem::size_of::<Self>();
+        let names_capacity = self.param_names.capacity() * std::mem::size_of::<StringIndex>();
+        let defaults_capacity = self.param_defaults.capacity() * std::mem::size_of::<Option<Value>>();
+        base_size + names_capacity + defaults_capacity
+    }
+
+    /// Create a new function
+    pub fn new(
+        param_count: u8,
+        param_names: Vec<StringIndex>,
+        param_defaults: Vec<Option<Value>>,
+        code_offset: usize,
+    ) -> Self {
+        Self {
+            param_count,
+            param_names,
+            param_defaults,
+            code_offset,
+            marked: Cell::new(false),
+        }
+    }
+}
+
+/// A closure captures a function with its lexical environment
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagedClosure {
+    /// Reference to the function
+    pub function: FunctionIndex,
+    /// Captured environment: variable name -> value
+    pub captured_env: HashMap<StringIndex, Value>,
+    /// GC marking
+    marked: Cell<bool>,
+}
+
+impl ManagedClosure {
+    /// Calculate the size of this closure for GC
+    fn size(&self) -> usize {
+        let base_size = std::mem::size_of::<Self>();
+        let map_capacity = self.captured_env.capacity()
+            * (std::mem::size_of::<StringIndex>() + std::mem::size_of::<Value>());
+        base_size + map_capacity
+    }
+
+    /// Create a new closure
+    pub fn new(function: FunctionIndex, captured_env: HashMap<StringIndex, Value>) -> Self {
+        Self {
+            function,
+            captured_env,
+            marked: Cell::new(false),
+        }
+    }
+}
+
 /// A HashSet-based string interning system with garbage collection support
 pub struct MemoryManager {
     /// HashSet containing all interned strings
@@ -149,6 +219,10 @@ pub struct MemoryManager {
     objects: SlotMap<ObjectIndex, ManagedObject>,
     /// Collection of Arrays
     arrays: SlotMap<ArrayIndex, ManagedArray>,
+    /// Collection of Functions
+    functions: SlotMap<FunctionIndex, ManagedFunction>,
+    /// Collection of Closures
+    closures: SlotMap<ClosureIndex, ManagedClosure>,
     /// Total bytes allocated for all strings
     allocated_bytes: usize,
     /// GC threshold for triggering collection
@@ -163,6 +237,8 @@ impl MemoryManager {
             strings: SlotMap::new(),
             objects: SlotMap::new(),
             arrays: SlotMap::new(),
+            functions: SlotMap::new(),
+            closures: SlotMap::new(),
             allocated_bytes: 0,
             gc_threshold: 1024 * 1024, // 1MB initial threshold
         }
@@ -226,6 +302,36 @@ impl MemoryManager {
         let arr = ManagedArray::new(elements);
         self.allocated_bytes += arr.size();
         let index = self.arrays.insert(arr);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    pub fn allocate_function(
+        &mut self,
+        param_count: u8,
+        param_names: Vec<StringIndex>,
+        param_defaults: Vec<Option<Value>>,
+        code_offset: usize,
+    ) -> AllocationResult<FunctionIndex> {
+        let func = ManagedFunction::new(param_count, param_names, param_defaults, code_offset);
+        self.allocated_bytes += func.size();
+        let index = self.functions.insert(func);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    pub fn allocate_closure(
+        &mut self,
+        function: FunctionIndex,
+        captured_env: HashMap<StringIndex, Value>,
+    ) -> AllocationResult<ClosureIndex> {
+        let closure = ManagedClosure::new(function, captured_env);
+        self.allocated_bytes += closure.size();
+        let index = self.closures.insert(closure);
         AllocationResult {
             should_garbage_collect: self.should_collect(),
             index,
@@ -324,6 +430,56 @@ impl MemoryManager {
                         }
                     }
                 }
+                Value::Function(function_index) => {
+                    if let Some(managed_function) = self.functions.get_mut(function_index) {
+                        managed_function.marked.set(true);
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] Marking Function {:?}", function_index)
+                        }
+
+                        // Mark parameter names and defaults
+                        for param_name in &managed_function.param_names {
+                            values.push_back(Value::String(*param_name));
+                        }
+                        for default in &managed_function.param_defaults {
+                            if let Some(default_val) = default {
+                                values.push_back(*default_val);
+                            }
+                        }
+                    } else {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[MemoryManager] WARNING: Failed to mark Function {:?} - not found",
+                                function_index
+                            )
+                        }
+                    }
+                }
+                Value::Closure(closure_index) => {
+                    if let Some(managed_closure) = self.closures.get_mut(closure_index) {
+                        managed_closure.marked.set(true);
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] Marking Closure {:?}", closure_index)
+                        }
+
+                        // Mark the function and all captured environment values
+                        values.push_back(Value::Function(managed_closure.function));
+                        for (_, value) in &managed_closure.captured_env {
+                            values.push_back(*value);
+                        }
+                    } else {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[MemoryManager] WARNING: Failed to mark Closure {:?} - not found",
+                                closure_index
+                            )
+                        }
+                    }
+                }
 
                 _ => continue,
             };
@@ -361,6 +517,26 @@ impl MemoryManager {
             }
         }
 
+        let mut functions_to_delete: Vec<FunctionIndex> = Vec::new();
+        for (func_idx, func) in self.functions.iter_mut() {
+            if func.marked.get() {
+                func.marked.set(false);
+            } else {
+                functions_to_delete.push(func_idx);
+                self.allocated_bytes -= func.size();
+            }
+        }
+
+        let mut closures_to_delete: Vec<ClosureIndex> = Vec::new();
+        for (closure_idx, closure) in self.closures.iter_mut() {
+            if closure.marked.get() {
+                closure.marked.set(false);
+            } else {
+                closures_to_delete.push(closure_idx);
+                self.allocated_bytes -= closure.size();
+            }
+        }
+
         for string_idx in strings_to_delete {
             #[cfg(feature = "gc_debug")]
             {
@@ -385,6 +561,22 @@ impl MemoryManager {
             self.arrays.remove(arr_idx);
         }
 
+        for func_idx in functions_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing Function {:?}", func_idx)
+            }
+            self.functions.remove(func_idx);
+        }
+
+        for closure_idx in closures_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing Closure {:?}", closure_idx)
+            }
+            self.closures.remove(closure_idx);
+        }
+
         self.gc_threshold = self.allocated_bytes * 2;
     }
 
@@ -406,6 +598,30 @@ impl MemoryManager {
         self.arrays
             .get(key)
             .expect(format!("Array not found in SlotMap: {:?}", key).as_str())
+    }
+
+    pub fn load_function(&self, key: FunctionIndex) -> &ManagedFunction {
+        self.functions
+            .get(key)
+            .expect(format!("Function not found in SlotMap: {:?}", key).as_str())
+    }
+
+    pub fn load_function_mut(&mut self, key: FunctionIndex) -> &mut ManagedFunction {
+        self.functions
+            .get_mut(key)
+            .expect(format!("Function not found in SlotMap: {:?}", key).as_str())
+    }
+
+    pub fn load_closure(&self, key: ClosureIndex) -> &ManagedClosure {
+        self.closures
+            .get(key)
+            .expect(format!("Closure not found in SlotMap: {:?}", key).as_str())
+    }
+
+    pub fn load_closure_mut(&mut self, key: ClosureIndex) -> &mut ManagedClosure {
+        self.closures
+            .get_mut(key)
+            .expect(format!("Closure not found in SlotMap: {:?}", key).as_str())
     }
 
     /// Get current statistics
