@@ -1265,30 +1265,55 @@ impl<'a> Compiler<'a> {
         self.parser
             .consume(Token::LeftParen, "Expected '(' after 'function'")?;
 
-        // For now, we don't support parameters - just skip to the closing paren
-        // This is a minimal implementation to unblock testing
-        let mut param_count = 0u8;
+        // Parse parameters and track their names and defaults
+        let mut param_names = Vec::new();
+        let mut param_default_exprs = Vec::new(); // Track default expressions to compile later
 
         if !matches!(
             self.parser.current_token().map(|t| &t.token),
             Some(Token::RightParen)
         ) {
-            // Simple parameter parsing: just count commas and identifiers
             loop {
                 if let Some(token) = self.parser.current_token() {
                     match &token.token {
-                        Token::Identifier(_) => {
-                            param_count += 1;
+                        Token::Identifier(name) => {
+                            // Allocate the parameter name as a string
+                            let param_name_allocation = memory_manager.allocate_string(name);
+                            param_names.push(param_name_allocation.index);
                             self.parser.advance()?;
 
                             // Check for default value (= expression)
                             if let Some(next_token) = self.parser.current_token() {
                                 if matches!(&next_token.token, Token::Operator(op) if op == "=") {
                                     self.parser.advance()?; // consume '='
-                                                            // Skip the default expression for now (would need to parse it properly)
-                                                            // This is just a minimal implementation
-                                    self.parser.advance()?;
+
+                                    // For now, record that this parameter has a default
+                                    // TODO: Implement proper default bytecode compilation and storage
+                                    param_defaults.push(None);
+
+                                    // Skip the default expression for now
+                                    let mut depth = 0;
+                                    while let Some(tok) = self.parser.current_token() {
+                                        match &tok.token {
+                                            Token::LeftParen
+                                            | Token::LeftBrace
+                                            | Token::LeftBracket => depth += 1,
+                                            Token::RightParen if depth == 0 => break,
+                                            Token::RightBrace | Token::RightBracket
+                                                if depth > 0 =>
+                                            {
+                                                depth -= 1
+                                            }
+                                            Token::Comma if depth == 0 => break,
+                                            _ => {}
+                                        }
+                                        self.parser.advance()?;
+                                    }
+                                } else {
+                                    param_defaults.push(None);
                                 }
+                            } else {
+                                param_defaults.push(None);
                             }
 
                             // Check for comma
@@ -1313,6 +1338,12 @@ impl<'a> Compiler<'a> {
         // Expect ')'
         self.parser
             .consume(Token::RightParen, "Expected ')' after function parameters")?;
+
+        let param_count = param_names.len() as u8;
+
+        // TODO: Compile default expressions and collect their bytecode offsets
+        // For now, we'll initialize with None for all defaults (will implement in next step)
+        let param_defaults = vec![None; param_default_exprs.len()];
 
         // Save the current code position where this function will be created
         // The function body will be compiled inline
