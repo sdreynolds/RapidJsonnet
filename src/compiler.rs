@@ -1276,14 +1276,50 @@ impl<'a> Compiler<'a> {
         // The function body will be compiled inline
         let function_code_offset = self.compiling_chunk.count();
 
-        // Emit CreateFunction opcode with param count and offset to body
-        // Note: The body starts right after this opcode
-        self.compiling_chunk.write_opcode_u8_u32(
-            Opcode::CreateFunction,
-            param_count,
-            (function_code_offset + 6) as u32, // Skip CreateFunction opcode (1 + 1 + 4 = 6 bytes)
-            function_span.clone(),
-        );
+        // Determine if we need to capture environment
+        // Capture all locals currently in scope (they form the closure's lexical environment)
+        let locals_to_capture: Vec<(u16, u16)> = self
+            .locals
+            .iter()
+            .map(|local| {
+                // Get the string index for the variable name
+                let var_name_str_idx = memory_manager
+                    .allocate_string(&local.name)
+                    .index;
+                (var_name_str_idx, local.stack_slot as u16)
+            })
+            .collect();
+
+        if locals_to_capture.is_empty() {
+            // No locals to capture, use CreateFunction
+            self.compiling_chunk.write_opcode_u8_u32(
+                Opcode::CreateFunction,
+                param_count,
+                (function_code_offset + 6) as u32, // Skip CreateFunction opcode (1 + 1 + 4 = 6 bytes)
+                function_span.clone(),
+            );
+        } else {
+            // Capture locals, use CreateClosure
+            let capture_count = locals_to_capture.len() as u16;
+            // Size of CreateClosure header: 1 + 1 + 4 + 2 = 8 bytes
+            let closure_header_size = 8;
+            // Size of capture entries: capture_count * 4
+            let capture_entries_size = (capture_count as usize) * 4;
+            let code_offset = (function_code_offset + closure_header_size + capture_entries_size) as u32;
+
+            self.compiling_chunk.write_closure_header(
+                param_count,
+                code_offset,
+                capture_count,
+                function_span.clone(),
+            );
+
+            // Write capture entries
+            for (var_name_idx, stack_slot) in locals_to_capture {
+                self.compiling_chunk
+                    .write_closure_capture(var_name_idx, stack_slot, function_span.clone());
+            }
+        }
 
         // Expect '{' to start function body
         self.parser

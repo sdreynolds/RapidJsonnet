@@ -137,6 +137,7 @@ pub enum Opcode {
     Call = 31,           // operands: u8 positional_count, u8 named_count
     Return = 32,
     BindDefault = 33, // operand: u16 param_name
+    CreateClosure = 34, // operands: u8 param_count, u32 code_offset, u16 capture_count, then capture entries
 
     // Control Flow
     Jump = 40,        // operand: i32 offset
@@ -202,6 +203,7 @@ impl Opcode {
             31 => Some(Opcode::Call),
             32 => Some(Opcode::Return),
             33 => Some(Opcode::BindDefault),
+            34 => Some(Opcode::CreateClosure),
             40 => Some(Opcode::Jump),
             41 => Some(Opcode::JumpIfFalse),
             42 => Some(Opcode::JumpIfTrue),
@@ -429,6 +431,38 @@ impl<'a> Chunk<'a> {
         }
     }
 
+    /// Write CreateClosure header: opcode, param_count, code_offset, capture_count
+    pub fn write_closure_header(
+        &mut self,
+        param_count: u8,
+        code_offset: u32,
+        capture_count: u16,
+        span: Range<usize>,
+    ) {
+        self.write(Opcode::CreateClosure as u8, span.clone());
+        self.write(param_count, span.clone());
+        let offset_bytes = code_offset.to_le_bytes();
+        for byte in offset_bytes {
+            self.write(byte, span.clone());
+        }
+        let count_bytes = capture_count.to_le_bytes();
+        for byte in count_bytes {
+            self.write(byte, span.clone());
+        }
+    }
+
+    /// Write a capture entry: var_name_index (u16) and stack_slot (u16)
+    pub fn write_closure_capture(&mut self, var_name_index: u16, stack_slot: u16, span: Range<usize>) {
+        let name_bytes = var_name_index.to_le_bytes();
+        for byte in name_bytes {
+            self.write(byte, span.clone());
+        }
+        let slot_bytes = stack_slot.to_le_bytes();
+        for byte in slot_bytes {
+            self.write(byte, span.clone());
+        }
+    }
+
     /// Read a u8 from the code at the given index
     pub fn read_u8(&self, index: usize) -> Option<u8> {
         self.code.get(index).copied()
@@ -542,6 +576,16 @@ impl<'a> Chunk<'a> {
                     Opcode::CreateArray => 3,                                     // opcode + u16
                     Opcode::FieldDef => 4,       // opcode + u16 + u8
                     Opcode::CreateFunction => 6, // opcode + u8 + u32
+                    Opcode::CreateClosure => {
+                        // opcode (1) + param_count (1) + code_offset (4) + capture_count (2)
+                        let base_size = 8;
+                        if let Some(capture_count) = self.read_u16(ip + 7) {
+                            // Each capture entry: var_name_index (2) + stack_slot (2)
+                            base_size + (capture_count as usize * 4)
+                        } else {
+                            base_size
+                        }
+                    }
                     Opcode::Call => 3,           // opcode + u8 + u8
                     Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue => 5, // opcode + i32
                     Opcode::LocalScope => 2,     // opcode + u8
@@ -647,6 +691,8 @@ pub struct CallFrame {
     pub return_address: usize,
     /// Stack pointer at the time the frame was created (for frame cleanup)
     pub frame_base: usize,
+    /// If executing a closure, this stores the closure index for environment lookups
+    pub closure_idx: Option<ClosureIndex>,
 }
 
 #[cfg(test)]

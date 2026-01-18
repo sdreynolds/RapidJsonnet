@@ -931,6 +931,96 @@ impl<'a> VirtualMachine<'a> {
                     }
                 }
 
+                Opcode::CreateClosure => {
+                    let chunk = self.current_chunk();
+                    let param_count = chunk
+                        .read_u8(self.program_counter + OPCODE_SIZE_BYTES)
+                        .ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing param_count".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        })?;
+
+                    let code_offset = chunk
+                        .read_u32(self.program_counter + OPCODE_SIZE_BYTES + 1)
+                        .ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing code_offset".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        })? as usize;
+
+                    let capture_count = chunk
+                        .read_u16(self.program_counter + OPCODE_SIZE_BYTES + 1 + 4)
+                        .ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing capture_count".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        })?;
+
+                    // Create the function first
+                    let param_names = Vec::new();
+                    let param_defaults = vec![None; param_count as usize];
+
+                    let func_allocation = self.memory_manager.allocate_function(
+                        param_count,
+                        param_names,
+                        param_defaults,
+                        code_offset,
+                    );
+
+                    // Read capture entries and build the captured environment
+                    let mut captured_env = HashMap::new();
+                    let mut capture_offset = self.program_counter + OPCODE_SIZE_BYTES + 1 + 4 + 2;
+
+                    for _ in 0..capture_count {
+                        let var_name_idx = chunk
+                            .read_u16(capture_offset)
+                            .ok_or_else(|| RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Invalid bytecode - missing var_name_idx in capture".to_string(),
+                                source_id: chunk.source_id.to_string(),
+                            })?;
+
+                        let stack_slot = chunk
+                            .read_u16(capture_offset + 2)
+                            .ok_or_else(|| RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Invalid bytecode - missing stack_slot in capture".to_string(),
+                                source_id: chunk.source_id.to_string(),
+                            })? as usize;
+
+                        // Get the value from the stack
+                        if stack_slot >= self.stack.len() {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!(
+                                    "Invalid stack slot {} when capturing (stack size: {})",
+                                    stack_slot,
+                                    self.stack.len()
+                                ),
+                                source_id: chunk.source_id.to_string(),
+                            });
+                        }
+
+                        let captured_value = self.stack[stack_slot].clone();
+                        captured_env.insert(var_name_idx, captured_value);
+                        capture_offset += 4;
+                    }
+
+                    // Allocate the closure
+                    let closure_allocation = self.memory_manager.allocate_closure(
+                        func_allocation.index,
+                        captured_env,
+                    );
+
+                    self.program_counter += OPCODE_SIZE_BYTES + 1 + 4 + 2 + (capture_count as usize * 4);
+                    self.push(Value::Closure(closure_allocation.index))?;
+
+                    if func_allocation.should_garbage_collect || closure_allocation.should_garbage_collect {
+                        self.run_garbage_collection();
+                    }
+                }
+
                 Opcode::Call => {
                     let chunk = self.current_chunk();
                     let positional_count = chunk
@@ -985,6 +1075,7 @@ impl<'a> VirtualMachine<'a> {
                                 function_idx: func_idx,
                                 return_address: self.program_counter,
                                 frame_base: self.stack.len(),
+                                closure_idx: None,
                             };
                             self.call_frames.push(frame);
 
@@ -1013,20 +1104,16 @@ impl<'a> VirtualMachine<'a> {
                                 });
                             }
 
-                            // Save current frame
+                            // Save current frame with closure context
                             let frame = CallFrame {
                                 function_idx: closure.function,
                                 return_address: self.program_counter,
                                 frame_base: self.stack.len(),
+                                closure_idx: Some(closure_idx),
                             };
                             self.call_frames.push(frame);
 
-                            // First, push captured environment onto stack
-                            for (_, value) in &closure.captured_env {
-                                self.push(*value)?;
-                            }
-
-                            // Then push arguments onto stack as local variables
+                            // Push arguments onto stack as local variables
                             for arg in args.iter() {
                                 self.push(*arg)?;
                             }
