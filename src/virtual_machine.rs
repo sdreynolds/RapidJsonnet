@@ -1145,12 +1145,15 @@ impl<'a> VirtualMachine<'a> {
 
                             // Validate argument count
                             let required_args = func.param_count as usize;
-                            if (positional_count as usize) > required_args {
+                            let provided_args = positional_count as usize;
+
+                            // Check if we have too many arguments
+                            if provided_args > required_args {
                                 return Err(RuntimeError {
                                     span: self.get_current_span(),
                                     message: format!(
                                         "Too many arguments: expected {}, got {}",
-                                        required_args, positional_count
+                                        required_args, provided_args
                                     ),
                                     source_id: self.current_chunk().source_id.to_string(),
                                 });
@@ -1165,9 +1168,31 @@ impl<'a> VirtualMachine<'a> {
                             };
                             self.call_frames.push(frame);
 
-                            // Push arguments onto stack as local variables
+                            // Push provided arguments onto stack as local variables
                             for arg in args.iter() {
                                 self.push(*arg)?;
+                            }
+
+                            // Push default values for missing arguments
+                            // TODO: Implement proper default evaluation in caller's scope
+                            // For now, fill in missing arguments with null
+                            for i in provided_args..required_args {
+                                if i < func.param_defaults.len() && func.param_defaults[i].is_some()
+                                {
+                                    // This parameter has a default - for now push null
+                                    // In the full implementation, we would evaluate the default bytecode
+                                    self.push(Value::Null)?;
+                                } else {
+                                    // No default for this parameter and no argument provided
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Missing required argument for parameter {}",
+                                            i
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
                             }
 
                             // Jump to function code
@@ -1179,12 +1204,15 @@ impl<'a> VirtualMachine<'a> {
 
                             // Validate argument count
                             let required_args = func.param_count as usize;
-                            if (positional_count as usize) > required_args {
+                            let provided_args = positional_count as usize;
+
+                            // Check if we have too many arguments
+                            if provided_args > required_args {
                                 return Err(RuntimeError {
                                     span: self.get_current_span(),
                                     message: format!(
                                         "Too many arguments: expected {}, got {}",
-                                        required_args, positional_count
+                                        required_args, provided_args
                                     ),
                                     source_id: self.current_chunk().source_id.to_string(),
                                 });
@@ -1199,7 +1227,12 @@ impl<'a> VirtualMachine<'a> {
                             };
                             self.call_frames.push(frame);
 
-                            // Push arguments onto stack as local variables
+                            // First, push captured environment onto stack
+                            for (_, value) in &closure.captured_env {
+                                self.push(*value)?;
+                            }
+
+                            // Then push provided arguments onto stack as local variables
                             for arg in args.iter() {
                                 self.push(*arg)?;
                             }

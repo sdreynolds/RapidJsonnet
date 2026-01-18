@@ -313,7 +313,7 @@ impl MemoryManager {
         &mut self,
         param_count: u8,
         param_names: Vec<StringIndex>,
-        param_defaults: Vec<Option<Value>>,
+        param_defaults: Vec<Option<u32>>,
         code_offset: usize,
     ) -> AllocationResult<FunctionIndex> {
         let func = ManagedFunction::new(param_count, param_names, param_defaults, code_offset);
@@ -439,14 +439,10 @@ impl MemoryManager {
                             eprintln!("[MemoryManager] Marking Function {:?}", function_index)
                         }
 
-                        // Mark parameter names and defaults
+                        // Mark parameter names
+                        // (defaults are bytecode offsets, not managed values)
                         for param_name in &managed_function.param_names {
                             values.push_back(Value::String(*param_name));
-                        }
-                        for default in &managed_function.param_defaults {
-                            if let Some(default_val) = default {
-                                values.push_back(*default_val);
-                            }
                         }
                     } else {
                         #[cfg(feature = "gc_debug")]

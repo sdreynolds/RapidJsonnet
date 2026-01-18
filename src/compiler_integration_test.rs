@@ -65,4 +65,49 @@ mod integration_tests {
         assert_eq!(chunk.constants[2], 3.0);
         assert_eq!(chunk.constants[3], 4.0);
     }
+
+    #[test]
+    fn test_function_with_no_parameters() {
+        let mut scanner = crate::scanner::Scanner::new("function() { 42 }", "test.jsonnet");
+        let compiler = Compiler::new(&mut scanner, "test.jsonnet");
+        let chunk = compiler.compile().unwrap();
+
+        // Should have one constant: 42
+        assert_eq!(chunk.constants.len(), 1);
+        assert_eq!(chunk.constants[0], 42.0);
+    }
+
+    #[test]
+    fn test_function_with_parameters() {
+        let mut scanner = crate::scanner::Scanner::new("function(x, y) { x + y }", "test.jsonnet");
+        let compiler = Compiler::new(&mut scanner, "test.jsonnet");
+        let chunk = compiler.compile().unwrap();
+
+        // Should compile without error
+        assert!(chunk.bytecode.len() > 0);
+    }
+
+    #[test]
+    fn test_function_with_defaults() {
+        let mut scanner =
+            crate::scanner::Scanner::new("function(x, y = 10) { x + y }", "test.jsonnet");
+        let compiler = Compiler::new(&mut scanner, "test.jsonnet");
+        let chunk = compiler.compile().unwrap();
+
+        // Should compile without error - defaults are parsed and tracked
+        assert!(chunk.bytecode.len() > 0);
+        assert_eq!(chunk.constants.len(), 2); // 10 and the function itself (or just 10)
+    }
+
+    #[test]
+    fn test_function_with_all_defaults() {
+        let mut scanner =
+            crate::scanner::Scanner::new("function(x = 5, y = 10) { x + y }", "test.jsonnet");
+        let compiler = Compiler::new(&mut scanner, "test.jsonnet");
+        let chunk = compiler.compile().unwrap();
+
+        // Should compile without error
+        assert!(chunk.bytecode.len() > 0);
+        assert_eq!(chunk.constants.len(), 2); // 5 and 10
+    }
 }
