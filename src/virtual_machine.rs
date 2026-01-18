@@ -1,5 +1,5 @@
 use chunk::{
-    CallFrame, Chunk, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError, Value,
+    CallFrame, Chunk, ObjectIndex, Opcode, RuntimeError, Value, I32_SIZE_BYTES, OPCODE_SIZE_BYTES,
 };
 use memory_manager::MemoryManager;
 use std::collections::HashMap;
@@ -254,7 +254,8 @@ impl<'a> VirtualMachine<'a> {
                             } else {
                                 return Err(RuntimeError {
                                     span: self.get_current_span(),
-                                    message: "LoadCapture used outside of closure context".to_string(),
+                                    message: "LoadCapture used outside of closure context"
+                                        .to_string(),
                                     source_id: chunk.source_id.to_string(),
                                 });
                             }
@@ -1010,21 +1011,23 @@ impl<'a> VirtualMachine<'a> {
                     let mut capture_offset = self.program_counter + OPCODE_SIZE_BYTES + 1 + 4 + 2;
 
                     for _ in 0..capture_count {
-                        let const_index = chunk
-                            .read_u16(capture_offset)
-                            .ok_or_else(|| RuntimeError {
+                        let const_index =
+                            chunk.read_u16(capture_offset).ok_or_else(|| RuntimeError {
                                 span: self.get_current_span(),
-                                message: "Invalid bytecode - missing const_index in capture".to_string(),
+                                message: "Invalid bytecode - missing const_index in capture"
+                                    .to_string(),
                                 source_id: chunk.source_id.to_string(),
                             })? as usize;
 
-                        let stack_slot = chunk
-                            .read_u16(capture_offset + 2)
-                            .ok_or_else(|| RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Invalid bytecode - missing stack_slot in capture".to_string(),
-                                source_id: chunk.source_id.to_string(),
-                            })? as usize;
+                        let stack_slot =
+                            chunk
+                                .read_u16(capture_offset + 2)
+                                .ok_or_else(|| RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "Invalid bytecode - missing stack_slot in capture"
+                                        .to_string(),
+                                    source_id: chunk.source_id.to_string(),
+                                })? as usize;
 
                         capture_entries.push((const_index, stack_slot));
                         capture_offset += 4;
@@ -1034,15 +1037,19 @@ impl<'a> VirtualMachine<'a> {
                     let mut captured_env = HashMap::new();
                     for (const_index, stack_slot) in capture_entries {
                         // Get the variable name StringIndex from constants
-                        let var_name_str_idx = if let Some(Value::String(idx)) = chunk.constants.get(const_index) {
-                            *idx
-                        } else {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!("Invalid constant {} for capture variable name", const_index),
-                                source_id: chunk.source_id.to_string(),
-                            });
-                        };
+                        let var_name_str_idx =
+                            if let Some(Value::String(idx)) = chunk.constants.get(const_index) {
+                                *idx
+                            } else {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Invalid constant {} for capture variable name",
+                                        const_index
+                                    ),
+                                    source_id: chunk.source_id.to_string(),
+                                });
+                            };
 
                         // Get the value from the stack
                         if stack_slot >= self.stack.len() {
@@ -1072,15 +1079,17 @@ impl<'a> VirtualMachine<'a> {
                         code_offset,
                     );
 
-                    let closure_allocation = self.memory_manager.allocate_closure(
-                        func_allocation.index,
-                        captured_env,
-                    );
+                    let closure_allocation = self
+                        .memory_manager
+                        .allocate_closure(func_allocation.index, captured_env);
 
-                    self.program_counter += OPCODE_SIZE_BYTES + 1 + 4 + 2 + (capture_count as usize * 4);
+                    self.program_counter +=
+                        OPCODE_SIZE_BYTES + 1 + 4 + 2 + (capture_count as usize * 4);
                     self.push(Value::Closure(closure_allocation.index))?;
 
-                    if func_allocation.should_garbage_collect || closure_allocation.should_garbage_collect {
+                    if func_allocation.should_garbage_collect
+                        || closure_allocation.should_garbage_collect
+                    {
                         self.run_garbage_collection();
                     }
                 }
@@ -1694,12 +1703,10 @@ mod tests {
         let result = vm.interpret();
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .message
-                .contains("Invalid constant index")
-        );
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("Invalid constant index"));
     }
 
     #[test]
@@ -1713,12 +1720,10 @@ mod tests {
         let result = vm.interpret();
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .message
-                .contains("missing Return instruction")
-        );
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("missing Return instruction"));
     }
 
     #[test]
@@ -1830,7 +1835,7 @@ mod tests {
         chunk.write_opcode_i32(Opcode::Jump, 4, 5..10); // [3-7]: 5 bytes, jump +4 to skip next 4 bytes
         chunk.write_opcode_u16(Opcode::LoadConst, idx_2 as u16, 10..15); // [8-10]: 3 bytes (skipped)
         chunk.write_opcode(Opcode::Return, 15..20); // [11]: 1 byte (skipped)
-        // Jump target is at position 8+4=12
+                                                    // Jump target is at position 8+4=12
         chunk.write_opcode_u16(Opcode::LoadConst, idx_3 as u16, 20..25); // [12-14]: jumped to
         chunk.write_opcode(Opcode::Return, 25..30); // [15]
 

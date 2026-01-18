@@ -1,4 +1,4 @@
-use chunk::{Chunk, I32_SIZE_BYTES, Opcode, StringIndex, Value};
+use chunk::{Chunk, Opcode, StringIndex, Value, I32_SIZE_BYTES};
 use memory_manager::MemoryManager;
 use parser::Parser;
 use scanner::{ScanError, Scanner, Token, TokenInfo};
@@ -47,8 +47,8 @@ pub struct Compiler<'a> {
     parser: Parser<'a>,
     type_stack: Vec<ExpressionType>,
     constant_pool: HashMap<Value, u16>,
-    locals: Vec<Local>, // Tracks all local variables currently in scope
-    scope_depth: u32,   // Current scope nesting depth (0 = module level)
+    locals: Vec<Local>,        // Tracks all local variables currently in scope
+    scope_depth: u32,          // Current scope nesting depth (0 = module level)
     function_scope_depth: u32, // Scope depth at which the current function was defined (0 if at module level)
 }
 
@@ -318,23 +318,27 @@ impl<'a> Compiler<'a> {
                     // Check if this variable should be captured
                     // Only capture if: we're inside a nested function (function_scope_depth > 0)
                     // AND the variable is from a shallower scope than the function definition
-                    let is_captured = (self.function_scope_depth > 0) && (local.depth < self.function_scope_depth);
+                    let is_captured = (self.function_scope_depth > 0)
+                        && (local.depth < self.function_scope_depth);
 
                     if is_captured {
                         // Emit LoadCapture with variable name string index
                         // Store the variable name in constants pool
-                        let var_name_str_idx = memory_manager
-                            .allocate_string(&name_clone)
-                            .index;
+                        let var_name_str_idx = memory_manager.allocate_string(&name_clone).index;
                         let const_value = Value::String(var_name_str_idx);
-                        let const_index = self.add_constant_pooled(const_value)
-                            .unwrap_or(0);
-                        self.compiling_chunk
-                            .write_opcode_u16(Opcode::LoadCapture, const_index, span);
+                        let const_index = self.add_constant_pooled(const_value).unwrap_or(0);
+                        self.compiling_chunk.write_opcode_u16(
+                            Opcode::LoadCapture,
+                            const_index,
+                            span,
+                        );
                     } else {
                         // Emit LoadVar with absolute stack slot
-                        self.compiling_chunk
-                            .write_opcode_u16(Opcode::LoadVar, local.stack_slot as u16, span);
+                        self.compiling_chunk.write_opcode_u16(
+                            Opcode::LoadVar,
+                            local.stack_slot as u16,
+                            span,
+                        );
                     }
                     self.push_type(ExpressionType::Unknown);
                 } else {
@@ -1184,7 +1188,11 @@ impl<'a> Compiler<'a> {
 
     /// Resolve a variable and determine if it should use LoadCapture (if from outer scope during function definition)
     /// Returns (stack_slot, is_captured) if found
-    fn resolve_local_with_capture_info(&self, name: &str, function_scope_depth: u32) -> Option<(usize, bool)> {
+    fn resolve_local_with_capture_info(
+        &self,
+        name: &str,
+        function_scope_depth: u32,
+    ) -> Option<(usize, bool)> {
         // Search from innermost to outermost scope (reverse order)
         for local in self.locals.iter().rev() {
             if local.name == name {
@@ -1277,8 +1285,8 @@ impl<'a> Compiler<'a> {
                             if let Some(next_token) = self.parser.current_token() {
                                 if matches!(&next_token.token, Token::Operator(op) if op == "=") {
                                     self.parser.advance()?; // consume '='
-                                    // Skip the default expression for now (would need to parse it properly)
-                                    // This is just a minimal implementation
+                                                            // Skip the default expression for now (would need to parse it properly)
+                                                            // This is just a minimal implementation
                                     self.parser.advance()?;
                                 }
                             }
@@ -1316,8 +1324,7 @@ impl<'a> Compiler<'a> {
         // because module-level locals will be accessed via LoadVar from the stack
         let locals_info: Vec<(String, usize)> = if self.function_scope_depth > 0 {
             // Only capture locals from outer scopes (depth < function_scope_depth)
-            self
-                .locals
+            self.locals
                 .iter()
                 .filter(|local| local.depth < self.function_scope_depth)
                 .map(|local| (local.name.clone(), local.stack_slot))
@@ -1333,8 +1340,7 @@ impl<'a> Compiler<'a> {
                 // Add variable name to constants pool as a string value
                 let var_name_str_idx = memory_manager.allocate_string(name).index;
                 let const_value = Value::String(var_name_str_idx);
-                let const_index = self.add_constant_pooled(const_value)
-                    .unwrap_or(0); // Use 0 as fallback (not ideal, but prevents panic)
+                let const_index = self.add_constant_pooled(const_value).unwrap_or(0); // Use 0 as fallback (not ideal, but prevents panic)
                 (const_index, *stack_slot as u16)
             })
             .collect();
@@ -1354,7 +1360,8 @@ impl<'a> Compiler<'a> {
             let closure_header_size = 8;
             // Size of capture entries: capture_count * 4
             let capture_entries_size = (capture_count as usize) * 4;
-            let code_offset = (function_code_offset + closure_header_size + capture_entries_size) as u32;
+            let code_offset =
+                (function_code_offset + closure_header_size + capture_entries_size) as u32;
 
             self.compiling_chunk.write_closure_header(
                 param_count,
@@ -1365,8 +1372,11 @@ impl<'a> Compiler<'a> {
 
             // Write capture entries
             for (var_name_idx, stack_slot) in locals_to_capture {
-                self.compiling_chunk
-                    .write_closure_capture(var_name_idx, stack_slot, function_span.clone());
+                self.compiling_chunk.write_closure_capture(
+                    var_name_idx,
+                    stack_slot,
+                    function_span.clone(),
+                );
             }
         }
 
@@ -1713,12 +1723,10 @@ mod tests {
         let result = compiler.compile(&mut memory_manager);
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .message
-                .contains("Undefined variable 'y'")
-        );
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("Undefined variable 'y'"));
     }
 
     #[test]

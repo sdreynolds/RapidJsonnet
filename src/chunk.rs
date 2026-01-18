@@ -117,7 +117,7 @@ pub enum Opcode {
     LoadConst = 3, // operand: u16 index
     LoadSelf = 4,
     LoadSuper = 5,
-    LoadVar = 6, // operand: u16 stack_slot (or with local scope, by name)
+    LoadVar = 6,     // operand: u16 stack_slot (or with local scope, by name)
     LoadCapture = 7, // operand: u16 var_name_index (looks up in closure's captured_env)
 
     // Object Operations
@@ -137,7 +137,7 @@ pub enum Opcode {
     CreateFunction = 30, // operands: u8 param_count, u32 code_offset
     Call = 31,           // operands: u8 positional_count, u8 named_count
     Return = 32,
-    BindDefault = 33, // operand: u16 param_name
+    BindDefault = 33,   // operand: u16 param_name
     CreateClosure = 34, // operands: u8 param_count, u32 code_offset, u16 capture_count, then capture entries
 
     // Control Flow
@@ -454,7 +454,12 @@ impl<'a> Chunk<'a> {
     }
 
     /// Write a capture entry: var_name_index (u16) and stack_slot (u16)
-    pub fn write_closure_capture(&mut self, var_name_index: u16, stack_slot: u16, span: Range<usize>) {
+    pub fn write_closure_capture(
+        &mut self,
+        var_name_index: u16,
+        stack_slot: u16,
+        span: Range<usize>,
+    ) {
         let name_bytes = var_name_index.to_le_bytes();
         for byte in name_bytes {
             self.write(byte, span.clone());
@@ -572,10 +577,10 @@ impl<'a> Chunk<'a> {
 
                 // Calculate instruction size and end position
                 let instruction_size = match opcode {
-                    Opcode::LoadConst => 3,                                       // opcode + u16
-                    Opcode::LoadVar => 3,                                         // opcode + u16
-                    Opcode::CreateObject => 3,                                    // opcode + u16
-                    Opcode::CreateArray => 3,                                     // opcode + u16
+                    Opcode::LoadConst => 3,      // opcode + u16
+                    Opcode::LoadVar => 3,        // opcode + u16
+                    Opcode::CreateObject => 3,   // opcode + u16
+                    Opcode::CreateArray => 3,    // opcode + u16
                     Opcode::FieldDef => 4,       // opcode + u16 + u8
                     Opcode::CreateFunction => 6, // opcode + u8 + u32
                     Opcode::CreateClosure => {
@@ -588,11 +593,11 @@ impl<'a> Chunk<'a> {
                             base_size
                         }
                     }
-                    Opcode::Call => 3,           // opcode + u8 + u8
+                    Opcode::Call => 3, // opcode + u8 + u8
                     Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue => 5, // opcode + i32
-                    Opcode::LocalScope => 2,     // opcode + u8
-                    Opcode::StdCall => 4,        // opcode + u16 + u8
-                    Opcode::BindDefault => 3,    // opcode + u16
+                    Opcode::LocalScope => 2, // opcode + u8
+                    Opcode::StdCall => 4, // opcode + u16 + u8
+                    Opcode::BindDefault => 3, // opcode + u16
                     // All other opcodes have no operands
                     _ => 1,
                 };
