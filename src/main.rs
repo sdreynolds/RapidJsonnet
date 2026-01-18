@@ -7,7 +7,6 @@ use std::fs;
 use std::io::{self, Write};
 use virtual_machine::execute;
 
-
 #[derive(Debug)]
 enum MainError {
     CompilerError,

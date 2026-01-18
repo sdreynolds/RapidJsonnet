@@ -1,4 +1,6 @@
-use chunk::{CallFrame, Chunk, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError, Value};
+use chunk::{
+    CallFrame, Chunk, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError, Value,
+};
 use memory_manager::MemoryManager;
 use std::ops::Range;
 
@@ -317,7 +319,8 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Function(_) | Value::Closure(_) => {
                                     return Err(RuntimeError {
                                         span: self.get_current_span(),
-                                        message: "Cannot concatenate function with string".to_string(),
+                                        message: "Cannot concatenate function with string"
+                                            .to_string(),
                                         source_id: self.current_chunk().source_id.to_string(),
                                     });
                                 }
@@ -331,7 +334,8 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Function(_) | Value::Closure(_) => {
                                     return Err(RuntimeError {
                                         span: self.get_current_span(),
-                                        message: "Cannot concatenate function with string".to_string(),
+                                        message: "Cannot concatenate function with string"
+                                            .to_string(),
                                         source_id: self.current_chunk().source_id.to_string(),
                                     });
                                 }
@@ -970,8 +974,7 @@ impl<'a> VirtualMachine<'a> {
                                     span: self.get_current_span(),
                                     message: format!(
                                         "Too many arguments: expected {}, got {}",
-                                        required_args,
-                                        positional_count
+                                        required_args, positional_count
                                     ),
                                     source_id: self.current_chunk().source_id.to_string(),
                                 });
@@ -1004,8 +1007,7 @@ impl<'a> VirtualMachine<'a> {
                                     span: self.get_current_span(),
                                     message: format!(
                                         "Too many arguments: expected {}, got {}",
-                                        required_args,
-                                        positional_count
+                                        required_args, positional_count
                                     ),
                                     source_id: self.current_chunk().source_id.to_string(),
                                 });
@@ -1035,7 +1037,10 @@ impl<'a> VirtualMachine<'a> {
                         _ => {
                             return Err(RuntimeError {
                                 span: self.get_current_span(),
-                                message: format!("Cannot call non-function value: {:?}", func_value),
+                                message: format!(
+                                    "Cannot call non-function value: {:?}",
+                                    func_value
+                                ),
                                 source_id: self.current_chunk().source_id.to_string(),
                             });
                         }
@@ -1144,13 +1149,11 @@ impl<'a> VirtualMachine<'a> {
 
                 Ok(serde_json::Value::Array(json_array))
             }
-            Value::Function(_) | Value::Closure(_) => {
-                Err(RuntimeError {
-                    span: 0..0,
-                    message: "Cannot convert function to JSON".to_string(),
-                    source_id: "serialization".to_string(),
-                })
-            }
+            Value::Function(_) | Value::Closure(_) => Err(RuntimeError {
+                span: 0..0,
+                message: "Cannot convert function to JSON".to_string(),
+                source_id: "serialization".to_string(),
+            }),
         }
     }
 

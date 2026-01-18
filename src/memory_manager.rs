@@ -159,7 +159,8 @@ impl ManagedFunction {
     fn size(&self) -> usize {
         let base_size = std::mem::size_of::<Self>();
         let names_capacity = self.param_names.capacity() * std::mem::size_of::<StringIndex>();
-        let defaults_capacity = self.param_defaults.capacity() * std::mem::size_of::<Option<Value>>();
+        let defaults_capacity =
+            self.param_defaults.capacity() * std::mem::size_of::<Option<Value>>();
         base_size + names_capacity + defaults_capacity
     }
 

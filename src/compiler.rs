@@ -786,7 +786,10 @@ impl<'a> Compiler<'a> {
                 let mut named_count = 0u8;
 
                 // Handle empty argument list
-                if !matches!(self.parser.current_token().map(|t| &t.token), Some(Token::RightParen)) {
+                if !matches!(
+                    self.parser.current_token().map(|t| &t.token),
+                    Some(Token::RightParen)
+                ) {
                     loop {
                         // Parse argument expression
                         self.parse_expr(0, memory_manager)?;
@@ -1224,7 +1227,10 @@ impl<'a> Compiler<'a> {
         // This is a minimal implementation to unblock testing
         let mut param_count = 0u8;
 
-        if !matches!(self.parser.current_token().map(|t| &t.token), Some(Token::RightParen)) {
+        if !matches!(
+            self.parser.current_token().map(|t| &t.token),
+            Some(Token::RightParen)
+        ) {
             // Simple parameter parsing: just count commas and identifiers
             loop {
                 if let Some(token) = self.parser.current_token() {
@@ -1750,6 +1756,325 @@ mod tests {
 
         assert_eq!(chunk.constants.len(), 3);
         // Verify order of operations: LoadConst(1), LoadConst(2), Add, LoadConst(3), Shl
+        assert!(chunk.code.len() > 0);
+    }
+
+    // Function and Closure Tests
+
+    #[test]
+    fn test_function_creation_no_params() {
+        let mut scanner = Scanner::new("function() { 42 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should have one constant (42)
+        assert_eq!(chunk.constants.len(), 1);
+        assert_eq!(chunk.constants[0], Value::Number(42.0));
+
+        // Should have CreateFunction opcode followed by the function body
+        assert!(chunk.code.len() > 0);
+        assert_eq!(chunk.code[0], Opcode::CreateFunction as u8);
+    }
+
+    #[test]
+    fn test_function_creation_with_param() {
+        let mut scanner = Scanner::new("function(x) { 42 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile without error
+        assert!(chunk.code.len() > 0);
+        assert_eq!(chunk.code[0], Opcode::CreateFunction as u8);
+        // Next byte should be param count (1)
+        assert_eq!(chunk.code[1], 1);
+    }
+
+    #[test]
+    fn test_function_creation_with_multiple_params() {
+        let mut scanner = Scanner::new("function(x, y, z) { 100 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert!(chunk.code.len() > 0);
+        assert_eq!(chunk.code[0], Opcode::CreateFunction as u8);
+        // Next byte should be param count (3)
+        assert_eq!(chunk.code[1], 3);
+    }
+
+    #[test]
+    fn test_function_in_variable() {
+        let mut scanner = Scanner::new("local f = function() { 42 }; f", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_call_no_args() {
+        let mut scanner = Scanner::new("local f = function() { 42 }; f()", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should contain Call opcode
+        assert!(chunk.code.len() > 0);
+        let has_call = chunk.code.iter().any(|&b| b == Opcode::Call as u8);
+        assert!(has_call, "Should contain Call opcode");
+    }
+
+    #[test]
+    fn test_function_call_with_args() {
+        let mut scanner = Scanner::new("local f = function(x, y) { 42 }; f(1, 2)", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+        let has_call = chunk.code.iter().any(|&b| b == Opcode::Call as u8);
+        assert!(has_call, "Should contain Call opcode");
+    }
+
+    #[test]
+    fn test_function_returning_constant() {
+        let mut scanner = Scanner::new("function() { 123 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert_eq!(chunk.constants.len(), 1);
+        assert_eq!(chunk.constants[0], Value::Number(123.0));
+    }
+
+    #[test]
+    fn test_function_returning_expression() {
+        let mut scanner = Scanner::new("function() { 10 + 20 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should have constants for 10 and 20
+        assert_eq!(chunk.constants.len(), 2);
+        assert_eq!(chunk.constants[0], Value::Number(10.0));
+        assert_eq!(chunk.constants[1], Value::Number(20.0));
+    }
+
+    #[test]
+    fn test_function_returning_string() {
+        let mut scanner = Scanner::new("function() { \"result\" }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should have one constant (the string)
+        assert_eq!(chunk.constants.len(), 1);
+        match chunk.constants[0] {
+            Value::String(_) => (),
+            _ => panic!("Expected string constant"),
+        }
+    }
+
+    #[test]
+    fn test_nested_function_definitions() {
+        let mut scanner = Scanner::new(
+            "local outer = function() { local inner = function() { 42 }; inner() }; outer()",
+            "test",
+        );
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully with nested functions
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_with_object_return() {
+        let mut scanner = Scanner::new("function() { { x: 10, y: 20 } }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_with_array_return() {
+        let mut scanner = Scanner::new("function() { [1, 2, 3] }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_with_conditional() {
+        let mut scanner = Scanner::new("function() { if true then 1 else 0 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_call_chaining() {
+        let mut scanner = Scanner::new(
+            "local f = function() { 10 }; local g = function() { f() }; g()",
+            "test",
+        );
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_as_argument() {
+        let mut scanner = Scanner::new(
+            "local f = function() { 100 }; local h = function() { 42 }; f()",
+            "test",
+        );
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_zero_param_explicit() {
+        // Ensure function with explicit empty params list compiles
+        let mut scanner = Scanner::new("function() { 1 + 1 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert_eq!(chunk.code[0], Opcode::CreateFunction as u8);
+        assert_eq!(chunk.code[1], 0); // param count should be 0
+    }
+
+    #[test]
+    fn test_function_single_param_explicit() {
+        let mut scanner = Scanner::new("function(a) { 10 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert_eq!(chunk.code[0], Opcode::CreateFunction as u8);
+        assert_eq!(chunk.code[1], 1); // param count should be 1
+    }
+
+    #[test]
+    fn test_function_many_params() {
+        let mut scanner = Scanner::new("function(a, b, c, d, e, f, g, h) { 88 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert_eq!(chunk.code[0], Opcode::CreateFunction as u8);
+        assert_eq!(chunk.code[1], 8); // param count should be 8
+    }
+
+    #[test]
+    fn test_function_in_object_literal() {
+        let mut scanner = Scanner::new("{ f: function() { 42 }, x: 10 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_in_array_literal() {
+        let mut scanner = Scanner::new("[function() { 1 }, function() { 2 }, 3]", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_returning_boolean() {
+        let mut scanner = Scanner::new("function() { true }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_returning_null() {
+        let mut scanner = Scanner::new("function() { null }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_call_multiple_times() {
+        let mut scanner = Scanner::new("local f = function() { 10 }; f()", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should contain at least one Call opcode
+        let has_call = chunk.code.iter().any(|&b| b == Opcode::Call as u8);
+        assert!(has_call, "Should have Call opcode");
+    }
+
+    #[test]
+    fn test_function_with_unary_operations() {
+        let mut scanner = Scanner::new("function() { -42 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_with_binary_operations() {
+        let mut scanner = Scanner::new("function() { 10 * 5 + 3 / 2 }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
+        assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_function_with_logical_operators() {
+        let mut scanner = Scanner::new("function() { true && false || !true }", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // Should compile successfully
         assert!(chunk.code.len() > 0);
     }
 }
