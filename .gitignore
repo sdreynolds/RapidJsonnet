@@ -4,3 +4,4 @@
 /bazel-testlogs
 /rust-project.json
 /.beads
+/.runtime/
