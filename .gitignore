@@ -3,3 +3,4 @@
 /bazel-out
 /bazel-testlogs
 /rust-project.json
+.beads/
