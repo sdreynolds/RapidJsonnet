@@ -713,6 +713,7 @@ impl<'a> Compiler<'a> {
         match token {
             Token::Dot => Some(PRECEDENCE_POSTFIX),
             Token::LeftBracket => Some(PRECEDENCE_POSTFIX),
+            Token::LeftParen => Some(PRECEDENCE_POSTFIX),
             _ => None,
         }
     }
@@ -775,6 +776,48 @@ impl<'a> Compiler<'a> {
                 self.emit_opcode(Opcode::ArrayIndex, token.span);
 
                 // Property access can return any type
+                self.push_type(ExpressionType::Unknown);
+            }
+            Token::LeftParen => {
+                self.parser.advance()?; // consume '('
+
+                // Parse positional arguments
+                let mut positional_count = 0u8;
+                let mut named_count = 0u8;
+
+                // Handle empty argument list
+                if !matches!(self.parser.current_token().map(|t| &t.token), Some(Token::RightParen)) {
+                    loop {
+                        // Parse argument expression
+                        self.parse_expr(0, memory_manager)?;
+                        positional_count += 1;
+
+                        // Check for comma
+                        if let Some(next_token) = self.parser.current_token() {
+                            if matches!(next_token.token, Token::Comma) {
+                                self.parser.advance()?; // consume ','
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                // Expect closing paren
+                self.parser
+                    .consume(Token::RightParen, "Expected ')' after function arguments")?;
+
+                // Emit Call opcode with positional and named argument counts
+                self.compiling_chunk.write_opcode_u8_u8(
+                    Opcode::Call,
+                    positional_count,
+                    named_count,
+                    token.span,
+                );
+
+                // Function call can return any type
                 self.push_type(ExpressionType::Unknown);
             }
             _ => {
