@@ -807,7 +807,7 @@ impl<'a> Compiler<'a> {
 
                 // Parse positional arguments
                 let mut positional_count = 0u8;
-                let mut named_count = 0u8;
+                let named_count = 0u8; // Named arguments not yet implemented
 
                 // Handle empty argument list
                 if !matches!(
@@ -1265,9 +1265,9 @@ impl<'a> Compiler<'a> {
         self.parser
             .consume(Token::LeftParen, "Expected '(' after 'function'")?;
 
-        // Parse parameters and track their names and defaults
+        // Parse parameters and track their names
         let mut param_names = Vec::new();
-        let mut param_default_exprs = Vec::new(); // Track default expressions to compile later
+        let mut param_defaults: Vec<Option<u32>> = Vec::new();
 
         if !matches!(
             self.parser.current_token().map(|t| &t.token),
@@ -1340,10 +1340,6 @@ impl<'a> Compiler<'a> {
             .consume(Token::RightParen, "Expected ')' after function parameters")?;
 
         let param_count = param_names.len() as u8;
-
-        // TODO: Compile default expressions and collect their bytecode offsets
-        // For now, we'll initialize with None for all defaults (will implement in next step)
-        let param_defaults = vec![None; param_default_exprs.len()];
 
         // Save the current code position where this function will be created
         // The function body will be compiled inline
