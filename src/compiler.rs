@@ -49,6 +49,7 @@ pub struct Compiler<'a> {
     constant_pool: HashMap<Value, u16>,
     locals: Vec<Local>, // Tracks all local variables currently in scope
     scope_depth: u32,   // Current scope nesting depth (0 = module level)
+    function_scope_depth: u32, // Scope depth at which the current function was defined (0 if at module level)
 }
 
 impl<'a> Compiler<'a> {
@@ -63,6 +64,7 @@ impl<'a> Compiler<'a> {
             constant_pool: HashMap::new(),
             locals: Vec::new(),
             scope_depth: 0,
+            function_scope_depth: 0,
         }
     }
 
@@ -312,10 +314,28 @@ impl<'a> Compiler<'a> {
                 self.parser.advance()?; // consume identifier
 
                 // Try to resolve as local variable
-                if let Some(stack_slot) = self.resolve_local(&name_clone) {
-                    // Emit LoadVar with absolute stack slot
-                    self.compiling_chunk
-                        .write_opcode_u16(Opcode::LoadVar, stack_slot as u16, span);
+                if let Some(local) = self.locals.iter().rev().find(|l| l.name == name_clone) {
+                    // Check if this variable should be captured
+                    // Only capture if: we're inside a nested function (function_scope_depth > 0)
+                    // AND the variable is from a shallower scope than the function definition
+                    let is_captured = (self.function_scope_depth > 0) && (local.depth < self.function_scope_depth);
+
+                    if is_captured {
+                        // Emit LoadCapture with variable name string index
+                        // Store the variable name in constants pool
+                        let var_name_str_idx = memory_manager
+                            .allocate_string(&name_clone)
+                            .index;
+                        let const_value = Value::String(var_name_str_idx);
+                        let const_index = self.add_constant_pooled(const_value)
+                            .unwrap_or(0);
+                        self.compiling_chunk
+                            .write_opcode_u16(Opcode::LoadCapture, const_index, span);
+                    } else {
+                        // Emit LoadVar with absolute stack slot
+                        self.compiling_chunk
+                            .write_opcode_u16(Opcode::LoadVar, local.stack_slot as u16, span);
+                    }
                     self.push_type(ExpressionType::Unknown);
                 } else {
                     // Variable not found
@@ -1162,6 +1182,20 @@ impl<'a> Compiler<'a> {
         None
     }
 
+    /// Resolve a variable and determine if it should use LoadCapture (if from outer scope during function definition)
+    /// Returns (stack_slot, is_captured) if found
+    fn resolve_local_with_capture_info(&self, name: &str, function_scope_depth: u32) -> Option<(usize, bool)> {
+        // Search from innermost to outermost scope (reverse order)
+        for local in self.locals.iter().rev() {
+            if local.name == name {
+                // If the variable was declared at a shallower scope than the function, it's captured
+                let is_captured = local.depth < function_scope_depth;
+                return Some((local.stack_slot, is_captured));
+            }
+        }
+        None
+    }
+
     fn parse_if_expression(
         &mut self,
         memory_manager: &mut MemoryManager,
@@ -1277,16 +1311,31 @@ impl<'a> Compiler<'a> {
         let function_code_offset = self.compiling_chunk.count();
 
         // Determine if we need to capture environment
-        // Capture all locals currently in scope (they form the closure's lexical environment)
-        let locals_to_capture: Vec<(u16, u16)> = self
-            .locals
+        // Only capture locals from outer scopes if this function is nested (not at module level)
+        // A function at module level (function_scope_depth == 0) doesn't need to capture anything
+        // because module-level locals will be accessed via LoadVar from the stack
+        let locals_info: Vec<(String, usize)> = if self.function_scope_depth > 0 {
+            // Only capture locals from outer scopes (depth < function_scope_depth)
+            self
+                .locals
+                .iter()
+                .filter(|local| local.depth < self.function_scope_depth)
+                .map(|local| (local.name.clone(), local.stack_slot))
+                .collect()
+        } else {
+            // Module-level function - don't capture anything
+            Vec::new()
+        };
+
+        let locals_to_capture: Vec<(u16, u16)> = locals_info
             .iter()
-            .map(|local| {
-                // Get the string index for the variable name
-                let var_name_str_idx = memory_manager
-                    .allocate_string(&local.name)
-                    .index;
-                (var_name_str_idx, local.stack_slot as u16)
+            .map(|(name, stack_slot)| {
+                // Add variable name to constants pool as a string value
+                let var_name_str_idx = memory_manager.allocate_string(name).index;
+                let const_value = Value::String(var_name_str_idx);
+                let const_index = self.add_constant_pooled(const_value)
+                    .unwrap_or(0); // Use 0 as fallback (not ideal, but prevents panic)
+                (const_index, *stack_slot as u16)
             })
             .collect();
 
@@ -1325,8 +1374,19 @@ impl<'a> Compiler<'a> {
         self.parser
             .consume(Token::LeftBrace, "Expected '{' before function body")?;
 
+        // Save the current function's scope depth and set it to the function being defined
+        let saved_function_scope_depth = self.function_scope_depth;
+        self.function_scope_depth = self.scope_depth;
+
+        // Increment scope depth for function body
+        self.scope_depth += 1;
+
         // Parse the function body expression
         self.parse_expr(0, memory_manager)?;
+
+        // Restore scope depth and function scope depth
+        self.scope_depth -= 1;
+        self.function_scope_depth = saved_function_scope_depth;
 
         // Expect '}'
         self.parser

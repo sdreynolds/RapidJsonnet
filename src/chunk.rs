@@ -117,7 +117,8 @@ pub enum Opcode {
     LoadConst = 3, // operand: u16 index
     LoadSelf = 4,
     LoadSuper = 5,
-    LoadVar = 6, // operand: u16 name_index
+    LoadVar = 6, // operand: u16 stack_slot (or with local scope, by name)
+    LoadCapture = 7, // operand: u16 var_name_index (looks up in closure's captured_env)
 
     // Object Operations
     CreateObject = 10, // operand: u16 field_count
@@ -190,6 +191,7 @@ impl Opcode {
             4 => Some(Opcode::LoadSelf),
             5 => Some(Opcode::LoadSuper),
             6 => Some(Opcode::LoadVar),
+            7 => Some(Opcode::LoadCapture),
             10 => Some(Opcode::CreateObject),
             11 => Some(Opcode::CreateObjectComp),
             12 => Some(Opcode::FieldDef),

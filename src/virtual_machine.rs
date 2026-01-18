@@ -2,6 +2,7 @@ use chunk::{
     CallFrame, Chunk, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, RuntimeError, Value,
 };
 use memory_manager::MemoryManager;
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// Virtual machine for executing Jsonnet bytecode
@@ -227,6 +228,53 @@ impl<'a> VirtualMachine<'a> {
                     // Copy value from slot to top of stack
                     let value = self.stack[stack_slot].clone();
                     self.push(value)?;
+                }
+
+                Opcode::LoadCapture => {
+                    let const_index = self.read_u16_operand()? as usize;
+                    let chunk = self.current_chunk();
+
+                    // Get the StringIndex from the constants pool
+                    if let Some(Value::String(var_name_idx)) = chunk.constants.get(const_index) {
+                        // Look up variable in current closure's captured environment
+                        if let Some(frame) = self.call_frames.last() {
+                            if let Some(closure_idx) = frame.closure_idx {
+                                let closure = self.memory_manager.load_closure(closure_idx);
+                                if let Some(value) = closure.captured_env.get(var_name_idx) {
+                                    self.push(*value)?;
+                                } else {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Variable not found in closure environment"
+                                        ),
+                                        source_id: chunk.source_id.to_string(),
+                                    });
+                                }
+                            } else {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "LoadCapture used outside of closure context".to_string(),
+                                    source_id: chunk.source_id.to_string(),
+                                });
+                            }
+                        } else {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "LoadCapture used with no call frame".to_string(),
+                                source_id: chunk.source_id.to_string(),
+                            });
+                        }
+                    } else {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!(
+                                "Invalid constant index {} for LoadCapture",
+                                const_index
+                            ),
+                            source_id: chunk.source_id.to_string(),
+                        });
+                    }
                 }
 
                 // Binary arithmetic operations
@@ -957,29 +1005,18 @@ impl<'a> VirtualMachine<'a> {
                             source_id: chunk.source_id.to_string(),
                         })?;
 
-                    // Create the function first
-                    let param_names = Vec::new();
-                    let param_defaults = vec![None; param_count as usize];
-
-                    let func_allocation = self.memory_manager.allocate_function(
-                        param_count,
-                        param_names,
-                        param_defaults,
-                        code_offset,
-                    );
-
-                    // Read capture entries and build the captured environment
-                    let mut captured_env = HashMap::new();
+                    // Extract all capture entries from bytecode first
+                    let mut capture_entries = Vec::new();
                     let mut capture_offset = self.program_counter + OPCODE_SIZE_BYTES + 1 + 4 + 2;
 
                     for _ in 0..capture_count {
-                        let var_name_idx = chunk
+                        let const_index = chunk
                             .read_u16(capture_offset)
                             .ok_or_else(|| RuntimeError {
                                 span: self.get_current_span(),
-                                message: "Invalid bytecode - missing var_name_idx in capture".to_string(),
+                                message: "Invalid bytecode - missing const_index in capture".to_string(),
                                 source_id: chunk.source_id.to_string(),
-                            })?;
+                            })? as usize;
 
                         let stack_slot = chunk
                             .read_u16(capture_offset + 2)
@@ -988,6 +1025,24 @@ impl<'a> VirtualMachine<'a> {
                                 message: "Invalid bytecode - missing stack_slot in capture".to_string(),
                                 source_id: chunk.source_id.to_string(),
                             })? as usize;
+
+                        capture_entries.push((const_index, stack_slot));
+                        capture_offset += 4;
+                    }
+
+                    // Now process the captured environment - release chunk borrow
+                    let mut captured_env = HashMap::new();
+                    for (const_index, stack_slot) in capture_entries {
+                        // Get the variable name StringIndex from constants
+                        let var_name_str_idx = if let Some(Value::String(idx)) = chunk.constants.get(const_index) {
+                            *idx
+                        } else {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!("Invalid constant {} for capture variable name", const_index),
+                                source_id: chunk.source_id.to_string(),
+                            });
+                        };
 
                         // Get the value from the stack
                         if stack_slot >= self.stack.len() {
@@ -1003,11 +1058,20 @@ impl<'a> VirtualMachine<'a> {
                         }
 
                         let captured_value = self.stack[stack_slot].clone();
-                        captured_env.insert(var_name_idx, captured_value);
-                        capture_offset += 4;
+                        captured_env.insert(var_name_str_idx, captured_value);
                     }
 
-                    // Allocate the closure
+                    // Now allocate function and closure
+                    let param_names = Vec::new();
+                    let param_defaults = vec![None; param_count as usize];
+
+                    let func_allocation = self.memory_manager.allocate_function(
+                        param_count,
+                        param_names,
+                        param_defaults,
+                        code_offset,
+                    );
+
                     let closure_allocation = self.memory_manager.allocate_closure(
                         func_allocation.index,
                         captured_env,
