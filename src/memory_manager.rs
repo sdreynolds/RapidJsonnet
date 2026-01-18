@@ -147,7 +147,8 @@ pub struct ManagedFunction {
     pub param_count: u8,
     /// Names of parameters with their defaults (None if no default)
     pub param_names: Vec<StringIndex>,
-    pub param_defaults: Vec<Option<Value>>,
+    /// Bytecode offsets for default expressions (None if no default)
+    pub param_defaults: Vec<Option<u32>>,
     /// Bytecode offset where the function body begins
     pub code_offset: usize,
     /// GC marking
@@ -159,8 +160,7 @@ impl ManagedFunction {
     fn size(&self) -> usize {
         let base_size = std::mem::size_of::<Self>();
         let names_capacity = self.param_names.capacity() * std::mem::size_of::<StringIndex>();
-        let defaults_capacity =
-            self.param_defaults.capacity() * std::mem::size_of::<Option<Value>>();
+        let defaults_capacity = self.param_defaults.capacity() * std::mem::size_of::<Option<u32>>();
         base_size + names_capacity + defaults_capacity
     }
 
@@ -168,7 +168,7 @@ impl ManagedFunction {
     pub fn new(
         param_count: u8,
         param_names: Vec<StringIndex>,
-        param_defaults: Vec<Option<Value>>,
+        param_defaults: Vec<Option<u32>>,
         code_offset: usize,
     ) -> Self {
         Self {
