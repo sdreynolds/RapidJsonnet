@@ -302,6 +302,10 @@ impl<'a> Compiler<'a> {
                 // Type depends on body expression
                 self.push_type(ExpressionType::Unknown);
             }
+            Token::Function => {
+                self.parse_function_expression(memory_manager)?;
+                self.push_type(ExpressionType::Unknown);
+            }
             Token::Identifier(name) => {
                 let name_clone = name.clone();
                 let span = token.span.clone();
@@ -1156,6 +1160,95 @@ impl<'a> Compiler<'a> {
 
         // Patch the unconditional jump to jump here (after entire if expression)
         self.patch_jump(jump_to_end);
+
+        Ok(())
+    }
+
+    fn parse_function_expression(
+        &mut self,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        let function_span = self.current_span();
+
+        // Consume 'function' token
+        self.parser.advance()?;
+
+        // Expect '('
+        self.parser
+            .consume(Token::LeftParen, "Expected '(' after 'function'")?;
+
+        // For now, we don't support parameters - just skip to the closing paren
+        // This is a minimal implementation to unblock testing
+        let mut param_count = 0u8;
+
+        if !matches!(self.parser.current_token().map(|t| &t.token), Some(Token::RightParen)) {
+            // Simple parameter parsing: just count commas and identifiers
+            loop {
+                if let Some(token) = self.parser.current_token() {
+                    match &token.token {
+                        Token::Identifier(_) => {
+                            param_count += 1;
+                            self.parser.advance()?;
+
+                            // Check for default value (= expression)
+                            if let Some(next_token) = self.parser.current_token() {
+                                if matches!(&next_token.token, Token::Operator(op) if op == "=") {
+                                    self.parser.advance()?; // consume '='
+                                    // Skip the default expression for now (would need to parse it properly)
+                                    // This is just a minimal implementation
+                                    self.parser.advance()?;
+                                }
+                            }
+
+                            // Check for comma
+                            if let Some(next_token) = self.parser.current_token() {
+                                if matches!(next_token.token, Token::Comma) {
+                                    self.parser.advance()?;
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Expect ')'
+        self.parser
+            .consume(Token::RightParen, "Expected ')' after function parameters")?;
+
+        // Save the current code position where this function will be created
+        // The function body will be compiled inline
+        let function_code_offset = self.compiling_chunk.count();
+
+        // Emit CreateFunction opcode with param count and offset to body
+        // Note: The body starts right after this opcode
+        self.compiling_chunk.write_opcode_u8_u32(
+            Opcode::CreateFunction,
+            param_count,
+            (function_code_offset + 6) as u32, // Skip CreateFunction opcode (1 + 1 + 4 = 6 bytes)
+            function_span.clone(),
+        );
+
+        // Expect '{' to start function body
+        self.parser
+            .consume(Token::LeftBrace, "Expected '{' before function body")?;
+
+        // Parse the function body expression
+        self.parse_expr(0, memory_manager)?;
+
+        // Expect '}'
+        self.parser
+            .consume(Token::RightBrace, "Expected '}' after function body")?;
+
+        // Emit Return to exit the function
+        self.emit_opcode(Opcode::Return, function_span);
 
         Ok(())
     }
