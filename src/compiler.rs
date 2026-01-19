@@ -285,7 +285,9 @@ impl<'a> Compiler<'a> {
 
                                 // Map function name to function index
                                 let func_index = match func_name_str.as_str() {
+                                    "substr" => 1u16,
                                     "endsWith" => 0u16,
+                                    "startsWith" => 2u16,
                                     _ => {
                                         return Err(self.make_error(
                                             func_token.span,
@@ -417,39 +419,124 @@ impl<'a> Compiler<'a> {
                 let span = token.span.clone();
                 self.parser.advance()?; // consume identifier
 
-                // Try to resolve as local variable
-                if let Some(local) = self.locals.iter().rev().find(|l| l.name == name_clone) {
-                    // Check if this variable should be captured
-                    // Only capture if: we're inside a nested function (function_scope_depth > 0)
-                    // AND the variable is from a shallower scope than the function definition
-                    let is_captured = (self.function_scope_depth > 0)
-                        && (local.depth < self.function_scope_depth);
+                // Check if this is the std library identifier followed by a dot
+                if name_clone == "std" && matches!(self.parser.current_token().map(|t| &t.token), Some(Token::Dot)) {
+                    self.parser.advance()?; // consume '.'
 
-                    if is_captured {
-                        // Emit LoadCapture with variable name string index
-                        // Store the variable name in constants pool
-                        let var_name_str_idx = memory_manager.allocate_string(&name_clone).index;
-                        let const_value = Value::String(var_name_str_idx);
-                        let const_index = self.add_constant_pooled(const_value).unwrap_or(0);
-                        self.compiling_chunk.write_opcode_u16(
-                            Opcode::LoadCapture,
-                            const_index,
-                            span,
-                        );
+                    // Expect function name
+                    let func_token = self.parser.current_token().cloned().ok_or_else(|| {
+                        self.unexpected_eof_error(span.end..span.end)
+                    })?;
+
+                    match &func_token.token {
+                        Token::Identifier(func_name) => {
+                            let func_name_str = func_name.clone();
+                            self.parser.advance()?; // consume function name
+
+                            // Map function name to function index
+                            let func_index = match func_name_str.as_str() {
+                                "substr" => 0u16,
+                                "endsWith" => 1u16,
+                                "startsWith" => 2u16,
+                                _ => {
+                                    return Err(self.make_error(
+                                        func_token.span,
+                                        format!("Unknown std function: {}", func_name_str),
+                                    ));
+                                }
+                            };
+
+                            // Expect '(' for function call
+                            self.parser.consume(
+                                Token::LeftParen,
+                                "Expected '(' after std function name",
+                            )?;
+
+                            // Parse arguments
+                            let mut arg_count = 0u8;
+
+                            // Handle empty argument list
+                            if !matches!(
+                                self.parser.current_token().map(|t| &t.token),
+                                Some(Token::RightParen)
+                            ) {
+                                loop {
+                                    // Parse argument expression
+                                    self.parse_expr(0, memory_manager)?;
+                                    arg_count += 1;
+
+                                    // Check for comma
+                                    if let Some(next_token) = self.parser.current_token() {
+                                        if matches!(next_token.token, Token::Comma) {
+                                            self.parser.advance()?; // consume ','
+                                        } else {
+                                            break;
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Expect ')'
+                            self.parser.consume(
+                                Token::RightParen,
+                                "Expected ')' after std function arguments",
+                            )?;
+
+                            // Emit StdCall opcode with function index and argument count
+                            self.compiling_chunk.write_opcode_u16_u8(
+                                Opcode::StdCall,
+                                func_index,
+                                arg_count,
+                                span,
+                            );
+
+                            // Std functions return unknown type
+                            self.push_type(ExpressionType::Unknown);
+                        }
+                        _ => {
+                            return Err(self.make_error(
+                                func_token.span,
+                                "Expected function name after 'std.'".to_string(),
+                            ));
+                        }
+                    }
+                } else {
+                    // Try to resolve as local variable
+                    if let Some(local) = self.locals.iter().rev().find(|l| l.name == name_clone) {
+                        // Check if this variable should be captured
+                        // Only capture if: we're inside a nested function (function_scope_depth > 0)
+                        // AND the variable is from a shallower scope than the function definition
+                        let is_captured = (self.function_scope_depth > 0)
+                            && (local.depth < self.function_scope_depth);
+
+                        if is_captured {
+                            // Emit LoadCapture with variable name string index
+                            // Store the variable name in constants pool
+                            let var_name_str_idx = memory_manager.allocate_string(&name_clone).index;
+                            let const_value = Value::String(var_name_str_idx);
+                            let const_index = self.add_constant_pooled(const_value).unwrap_or(0);
+                            self.compiling_chunk.write_opcode_u16(
+                                Opcode::LoadCapture,
+                                const_index,
+                                span,
+                            );
+                        } else {
+                            // Emit LoadVar with absolute stack slot
+                            self.compiling_chunk.write_opcode_u16(
+                                Opcode::LoadVar,
+                                local.stack_slot as u16,
+                                span,
+                            );
+                        }
+                        self.push_type(ExpressionType::Unknown);
                     } else {
-                        // Emit LoadVar with absolute stack slot
-                        self.compiling_chunk.write_opcode_u16(
-                            Opcode::LoadVar,
-                            local.stack_slot as u16,
-                            span,
+                        // Variable not found
+                        return Err(
+                            self.make_error(span, format!("Undefined variable '{}'", name_clone))
                         );
                     }
-                    self.push_type(ExpressionType::Unknown);
-                } else {
-                    // Variable not found
-                    return Err(
-                        self.make_error(span, format!("Undefined variable '{}'", name_clone))
-                    );
                 }
             }
             _ => {

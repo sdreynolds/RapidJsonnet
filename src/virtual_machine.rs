@@ -1255,21 +1255,6 @@ impl<'a> VirtualMachine<'a> {
 
                     self.program_counter += OPCODE_SIZE_BYTES + 2 + 1;
 
-                    // Get the native function from the registry
-                    let native_func = {
-                        let chunk = self.current_chunk();
-                        chunk
-                            .get_native_function(function_index as usize)
-                            .ok_or_else(|| RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!(
-                                    "Unknown native function index: {}",
-                                    function_index
-                                ),
-                                source_id: chunk.source_id.to_string(),
-                            })?
-                    };
-
                     // Pop arguments from stack (in reverse order)
                     let mut args = Vec::with_capacity(arg_count as usize);
                     for _ in 0..arg_count {
@@ -1277,8 +1262,19 @@ impl<'a> VirtualMachine<'a> {
                     }
                     args.reverse();
 
-                    // Call the native function
-                    let result = native_func(&args)?;
+                    // Call the appropriate native function
+                    let result = match function_index {
+                        0 => self.native_substr(&args)?,
+                        1 => self.native_endswith(&args)?,
+                        2 => self.native_startswith(&args)?,
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!("Unknown native function index: {}", function_index),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    };
 
                     // Push return value onto stack
                     self.push(result)?;
@@ -1467,6 +1463,131 @@ impl<'a> VirtualMachine<'a> {
         } else {
             Ok(n as i64)
         }
+    }
+
+    /// Native function: std.substr(str, from, len)
+    /// Returns substring starting at 'from' for 'len' codepoints
+    fn native_substr(&mut self, args: &[Value]) -> Result<Value, RuntimeError> {
+        if args.len() != 3 {
+            return Err(RuntimeError {
+                span: self.get_current_span(),
+                message: format!("substr expects 3 arguments, got {}", args.len()),
+                source_id: self.current_chunk().source_id.to_string(),
+            });
+        }
+
+        // Extract arguments
+        let str_val = &args[0];
+        let from_val = &args[1];
+        let len_val = &args[2];
+
+        // Convert str to string
+        let str_text = match str_val {
+            Value::String(idx) => self.memory_manager.load_string(*idx).to_owned(),
+            _ => {
+                return Err(RuntimeError {
+                    span: self.get_current_span(),
+                    message: "substr: first argument must be a string".to_string(),
+                    source_id: self.current_chunk().source_id.to_string(),
+                });
+            }
+        };
+
+        // Convert from and len to integers
+        let from = self.to_integer(*from_val)? as usize;
+        let len = self.to_integer(*len_val)? as usize;
+
+        // Extract substring by codepoints
+        let chars: Vec<char> = str_text.chars().collect();
+        let start = from.min(chars.len());
+        let end = (start + len).min(chars.len());
+
+        let result_str: String = chars[start..end].iter().collect();
+        let result_idx = self.memory_manager.allocate_string(&result_str);
+
+        Ok(Value::String(result_idx.index))
+    }
+
+    /// Native function: std.endsWith(str, suffix)
+    /// Returns boolean indicating if str ends with suffix
+    fn native_endswith(&mut self, args: &[Value]) -> Result<Value, RuntimeError> {
+        if args.len() != 2 {
+            return Err(RuntimeError {
+                span: self.get_current_span(),
+                message: format!("endsWith expects 2 arguments, got {}", args.len()),
+                source_id: self.current_chunk().source_id.to_string(),
+            });
+        }
+
+        // Extract arguments
+        let str_val = &args[0];
+        let suffix_val = &args[1];
+
+        // Convert to strings
+        let str_text = match str_val {
+            Value::String(idx) => self.memory_manager.load_string(*idx).to_owned(),
+            _ => {
+                return Err(RuntimeError {
+                    span: self.get_current_span(),
+                    message: "endsWith: first argument must be a string".to_string(),
+                    source_id: self.current_chunk().source_id.to_string(),
+                });
+            }
+        };
+
+        let suffix_text = match suffix_val {
+            Value::String(idx) => self.memory_manager.load_string(*idx).to_owned(),
+            _ => {
+                return Err(RuntimeError {
+                    span: self.get_current_span(),
+                    message: "endsWith: second argument must be a string".to_string(),
+                    source_id: self.current_chunk().source_id.to_string(),
+                });
+            }
+        };
+
+        Ok(Value::Boolean(str_text.ends_with(&suffix_text)))
+    }
+
+    /// Native function: std.startsWith(str, prefix)
+    /// Returns boolean indicating if str starts with prefix
+    fn native_startswith(&mut self, args: &[Value]) -> Result<Value, RuntimeError> {
+        if args.len() != 2 {
+            return Err(RuntimeError {
+                span: self.get_current_span(),
+                message: format!("startsWith expects 2 arguments, got {}", args.len()),
+                source_id: self.current_chunk().source_id.to_string(),
+            });
+        }
+
+        // Extract arguments
+        let str_val = &args[0];
+        let prefix_val = &args[1];
+
+        // Convert to strings
+        let str_text = match str_val {
+            Value::String(idx) => self.memory_manager.load_string(*idx).to_owned(),
+            _ => {
+                return Err(RuntimeError {
+                    span: self.get_current_span(),
+                    message: "startsWith: first argument must be a string".to_string(),
+                    source_id: self.current_chunk().source_id.to_string(),
+                });
+            }
+        };
+
+        let prefix_text = match prefix_val {
+            Value::String(idx) => self.memory_manager.load_string(*idx).to_owned(),
+            _ => {
+                return Err(RuntimeError {
+                    span: self.get_current_span(),
+                    message: "startsWith: second argument must be a string".to_string(),
+                    source_id: self.current_chunk().source_id.to_string(),
+                });
+            }
+        };
+
+        Ok(Value::Boolean(str_text.starts_with(&prefix_text)))
     }
 }
 
