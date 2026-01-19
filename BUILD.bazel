@@ -151,3 +151,25 @@ sh_test(
     # CRITICAL: Add timeout to catch infinite loops in end2end tests (hq-uxnq)
     timeout = "short",
 )
+
+# Positive tests - tests that should pass (hq-qojx)
+sh_test(
+    name = "jsonnet_validation_test_positive",
+    srcs = ["test_runner_positive.sh"],
+    data = glob(["end2end/*.jsonnet"]) + [
+        ":main",
+    ],
+    local = True,
+    timeout = "short",
+)
+
+# Negative tests - tests that should fail (hq-qojx)
+sh_test(
+    name = "jsonnet_validation_test_negative",
+    srcs = ["test_runner_negative.sh"],
+    data = glob(["end2end/*.jsonnet"]) + [
+        ":main",
+    ],
+    local = True,
+    timeout = "short",
+)
