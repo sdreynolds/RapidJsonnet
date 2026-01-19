@@ -1695,7 +1695,9 @@ impl<'a> Compiler<'a> {
                                     let mut bracket_depth = 0;
                                     while let Some(tok) = self.parser.current_token() {
                                         match &tok.token {
-                                            Token::LeftParen | Token::LeftBracket | Token::LeftBrace => {
+                                            Token::LeftParen
+                                            | Token::LeftBracket
+                                            | Token::LeftBrace => {
                                                 if matches!(tok.token, Token::LeftParen) {
                                                     paren_depth += 1;
                                                 } else {
@@ -1703,18 +1705,26 @@ impl<'a> Compiler<'a> {
                                                 }
                                                 self.parser.advance()?;
                                             }
-                                            Token::RightParen | Token::RightBracket | Token::RightBrace => {
-                                                if matches!(tok.token, Token::RightParen) && paren_depth > 0 {
+                                            Token::RightParen
+                                            | Token::RightBracket
+                                            | Token::RightBrace => {
+                                                if matches!(tok.token, Token::RightParen)
+                                                    && paren_depth > 0
+                                                {
                                                     paren_depth -= 1;
                                                     self.parser.advance()?;
-                                                } else if matches!(tok.token, Token::RightBracket) && bracket_depth > 0 {
+                                                } else if matches!(tok.token, Token::RightBracket)
+                                                    && bracket_depth > 0
+                                                {
                                                     bracket_depth -= 1;
                                                     self.parser.advance()?;
                                                 } else {
                                                     break;
                                                 }
                                             }
-                                            Token::Comma if paren_depth == 0 && bracket_depth == 0 => {
+                                            Token::Comma
+                                                if paren_depth == 0 && bracket_depth == 0 =>
+                                            {
                                                 break;
                                             }
                                             _ => {

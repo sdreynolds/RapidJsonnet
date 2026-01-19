@@ -1161,7 +1161,9 @@ impl<'a> VirtualMachine<'a> {
                             let provided_args = positional_count as usize;
 
                             // Count how many parameters are actually required (have no default)
-                            let required_args = func.param_defaults.iter()
+                            let required_args = func
+                                .param_defaults
+                                .iter()
                                 .position(|d| d.is_some())
                                 .unwrap_or(total_params);
 
@@ -1237,7 +1239,9 @@ impl<'a> VirtualMachine<'a> {
                             let provided_args = positional_count as usize;
 
                             // Count how many parameters are actually required (have no default)
-                            let required_args = func.param_defaults.iter()
+                            let required_args = func
+                                .param_defaults
+                                .iter()
                                 .position(|d| d.is_some())
                                 .unwrap_or(total_params);
 
