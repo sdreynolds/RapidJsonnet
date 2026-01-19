@@ -17,6 +17,9 @@ pub type ArrayIndex = DefaultKey;
 pub type FunctionIndex = DefaultKey;
 pub type ClosureIndex = DefaultKey;
 
+/// Native function type: takes a slice of arguments and returns a Result
+pub type NativeFunction = fn(&[Value]) -> Result<Value, RuntimeError>;
+
 /// Value type for the Jsonnet virtual machine
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
@@ -272,7 +275,7 @@ impl SpanRunLength {
 
 /// A chunk represents a collection of bytecode instructions and associated metadata
 /// for the virtual machine to execute
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Chunk<'a> {
     /// Source identifier used with ariadne library
     pub source_id: &'a str,
@@ -282,6 +285,23 @@ pub struct Chunk<'a> {
     pub spans: Vec<SpanRunLength>,
     /// Vector of constant values referenced by the bytecode
     pub constants: Vec<Value>,
+    /// Registry of native functions indexed by function index
+    pub native_functions: Vec<NativeFunction>,
+}
+
+impl<'a> std::fmt::Debug for Chunk<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Chunk")
+            .field("source_id", &self.source_id)
+            .field("code", &self.code)
+            .field("spans", &self.spans)
+            .field("constants", &self.constants)
+            .field(
+                "native_functions",
+                &format!("<{} native functions>", self.native_functions.len()),
+            )
+            .finish()
+    }
 }
 
 impl<'a> Chunk<'a> {
@@ -292,6 +312,7 @@ impl<'a> Chunk<'a> {
             code: Vec::new(),
             spans: Vec::new(),
             constants: Vec::new(),
+            native_functions: Vec::new(),
         }
     }
 
@@ -318,6 +339,17 @@ impl<'a> Chunk<'a> {
     pub fn add_constant(&mut self, value: Value) -> usize {
         self.constants.push(value);
         self.constants.len() - 1
+    }
+
+    /// Registers a native function and returns its index
+    pub fn register_native_function(&mut self, func: NativeFunction) -> usize {
+        self.native_functions.push(func);
+        self.native_functions.len() - 1
+    }
+
+    /// Gets a native function by index
+    pub fn get_native_function(&self, index: usize) -> Option<NativeFunction> {
+        self.native_functions.get(index).copied()
     }
 
     /// Gets the span for a given instruction index
