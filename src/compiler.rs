@@ -1265,19 +1265,20 @@ impl<'a> Compiler<'a> {
         self.parser
             .consume(Token::LeftParen, "Expected '(' after 'function'")?;
 
-        // For now, we don't support parameters - just skip to the closing paren
-        // This is a minimal implementation to unblock testing
+        // Parse function parameters and extract their names
+        let mut param_names = Vec::new();
         let mut param_count = 0u8;
 
         if !matches!(
             self.parser.current_token().map(|t| &t.token),
             Some(Token::RightParen)
         ) {
-            // Simple parameter parsing: just count commas and identifiers
+            // Parse parameters: extract names and count them
             loop {
                 if let Some(token) = self.parser.current_token() {
                     match &token.token {
-                        Token::Identifier(_) => {
+                        Token::Identifier(name) => {
+                            param_names.push(name.clone());
                             param_count += 1;
                             self.parser.advance()?;
 
@@ -1318,6 +1319,12 @@ impl<'a> Compiler<'a> {
         // The function body will be compiled inline
         let function_code_offset = self.compiling_chunk.count();
 
+        // Allocate string indices for parameter names
+        let param_name_indices: Vec<u16> = param_names
+            .iter()
+            .map(|name| memory_manager.allocate_string(name).index)
+            .collect();
+
         // Determine if we need to capture environment
         // Only capture locals from outer scopes if this function is nested (not at module level)
         // A function at module level (function_scope_depth == 0) doesn't need to capture anything
@@ -1347,12 +1354,23 @@ impl<'a> Compiler<'a> {
 
         if locals_to_capture.is_empty() {
             // No locals to capture, use CreateFunction
+            // Size of CreateFunction header: 1 + 1 + 4 = 6 bytes
+            let header_size = 6;
+            // Size of parameter names: param_count * 2 (each u16)
+            let param_names_size = (param_count as usize) * 2;
+            let code_offset = (function_code_offset + header_size + param_names_size) as u32;
+
             self.compiling_chunk.write_opcode_u8_u32(
                 Opcode::CreateFunction,
                 param_count,
-                (function_code_offset + 6) as u32, // Skip CreateFunction opcode (1 + 1 + 4 = 6 bytes)
+                code_offset,
                 function_span.clone(),
             );
+
+            // Write parameter name indices
+            for param_idx in param_name_indices {
+                self.compiling_chunk.write_u16(param_idx, function_span.clone());
+            }
         } else {
             // Capture locals, use CreateClosure
             let capture_count = locals_to_capture.len() as u16;
@@ -1360,8 +1378,9 @@ impl<'a> Compiler<'a> {
             let closure_header_size = 8;
             // Size of capture entries: capture_count * 4
             let capture_entries_size = (capture_count as usize) * 4;
-            let code_offset =
-                (function_code_offset + closure_header_size + capture_entries_size) as u32;
+            // Size of parameter names: param_count * 2
+            let param_names_size = (param_count as usize) * 2;
+            let code_offset = (function_code_offset + closure_header_size + capture_entries_size + param_names_size) as u32;
 
             self.compiling_chunk.write_closure_header(
                 param_count,
@@ -1377,6 +1396,11 @@ impl<'a> Compiler<'a> {
                     stack_slot,
                     function_span.clone(),
                 );
+            }
+
+            // Write parameter name indices
+            for param_idx in param_name_indices {
+                self.compiling_chunk.write_u16(param_idx, function_span.clone());
             }
         }
 

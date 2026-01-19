@@ -959,11 +959,25 @@ impl<'a> VirtualMachine<'a> {
                             source_id: chunk.source_id.to_string(),
                         })? as usize;
 
-                    self.program_counter += OPCODE_SIZE_BYTES + 1 + 4;
+                    // Read parameter names from bytecode
+                    let mut param_names = Vec::new();
+                    let mut param_offset = self.program_counter + OPCODE_SIZE_BYTES + 1 + 4;
 
-                    // For now, create a function with no parameters and no defaults
-                    // The compiler should populate parameter info properly
-                    let param_names = Vec::new();
+                    for _ in 0..param_count {
+                        let param_name_idx = chunk
+                            .read_u16(param_offset)
+                            .ok_or_else(|| RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Invalid bytecode - missing parameter name index".to_string(),
+                                source_id: chunk.source_id.to_string(),
+                            })?;
+                        param_names.push(param_name_idx);
+                        param_offset += 2;
+                    }
+
+                    self.program_counter = param_offset;
+
+                    // Create function with parameter names and empty defaults for now
                     let param_defaults = vec![None; param_count as usize];
 
                     let func_allocation = self.memory_manager.allocate_function(
@@ -1033,6 +1047,22 @@ impl<'a> VirtualMachine<'a> {
                         capture_offset += 4;
                     }
 
+                    // Read parameter names from bytecode
+                    let mut param_names = Vec::new();
+                    let mut param_offset = capture_offset;
+
+                    for _ in 0..param_count {
+                        let param_name_idx = chunk
+                            .read_u16(param_offset)
+                            .ok_or_else(|| RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Invalid bytecode - missing parameter name index".to_string(),
+                                source_id: chunk.source_id.to_string(),
+                            })?;
+                        param_names.push(param_name_idx);
+                        param_offset += 2;
+                    }
+
                     // Now process the captured environment - release chunk borrow
                     let mut captured_env = HashMap::new();
                     for (const_index, stack_slot) in capture_entries {
@@ -1069,7 +1099,6 @@ impl<'a> VirtualMachine<'a> {
                     }
 
                     // Now allocate function and closure
-                    let param_names = Vec::new();
                     let param_defaults = vec![None; param_count as usize];
 
                     let func_allocation = self.memory_manager.allocate_function(
@@ -1083,8 +1112,7 @@ impl<'a> VirtualMachine<'a> {
                         .memory_manager
                         .allocate_closure(func_allocation.index, captured_env);
 
-                    self.program_counter +=
-                        OPCODE_SIZE_BYTES + 1 + 4 + 2 + (capture_count as usize * 4);
+                    self.program_counter = param_offset;
                     self.push(Value::Closure(closure_allocation.index))?;
 
                     if func_allocation.should_garbage_collect

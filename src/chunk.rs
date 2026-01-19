@@ -470,6 +470,14 @@ impl<'a> Chunk<'a> {
         }
     }
 
+    /// Write a u16 value (little-endian) with span tracking
+    pub fn write_u16(&mut self, value: u16, span: Range<usize>) {
+        let bytes = value.to_le_bytes();
+        for byte in bytes {
+            self.write(byte, span.clone());
+        }
+    }
+
     /// Read a u8 from the code at the given index
     pub fn read_u8(&self, index: usize) -> Option<u8> {
         self.code.get(index).copied()
