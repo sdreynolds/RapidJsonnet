@@ -333,6 +333,7 @@ impl<'a> Compiler<'a> {
                                     let func_index = match func_name_str.as_str() {
                                         "endsWith" => 0u16,
                                         "startsWith" => 1u16,
+                                        "substr" => 2u16,
                                         _ => {
                                             return Err(self.make_error(
                                                 func_token.span,

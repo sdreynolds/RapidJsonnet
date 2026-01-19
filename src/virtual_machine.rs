@@ -1279,6 +1279,7 @@ impl<'a> VirtualMachine<'a> {
                     let result = match function_index {
                         0 => self.std_endswith(&args)?,
                         1 => self.std_startswith(&args)?,
+                        2 => self.std_substr(&args)?,
                         _ => {
                             return Err(RuntimeError {
                                 span: self.get_current_span(),
@@ -1399,6 +1400,89 @@ impl<'a> VirtualMachine<'a> {
         // Check if string starts with prefix
         let result = string_value.starts_with(prefix_value);
         Ok(Value::Boolean(result))
+    }
+
+    /// Implement std.substr(string, from, len) native function
+    /// Extracts a substring starting at position 'from' for 'len' codepoints
+    /// Returns the substring (or as much as available if request exceeds bounds)
+    fn std_substr(&mut self, args: &[Value]) -> Result<Value, RuntimeError> {
+        if args.len() != 3 {
+            return Err(RuntimeError {
+                span: 0..0,
+                message: format!("std.substr expects 3 arguments, got {}", args.len()),
+                source_id: "native_function".to_string(),
+            });
+        }
+
+        // Extract string value
+        let string_value = match &args[0] {
+            Value::String(key) => self.memory_manager.load_string(*key),
+            _ => {
+                return Err(RuntimeError {
+                    span: 0..0,
+                    message: "std.substr: first argument must be a string".to_string(),
+                    source_id: "native_function".to_string(),
+                });
+            }
+        };
+
+        // Extract from offset (convert from number to integer)
+        let from = match &args[1] {
+            Value::Number(n) => {
+                let i = *n as i64;
+                if i < 0 {
+                    return Err(RuntimeError {
+                        span: 0..0,
+                        message: "std.substr: from offset cannot be negative".to_string(),
+                        source_id: "native_function".to_string(),
+                    });
+                }
+                i as usize
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span: 0..0,
+                    message: "std.substr: second argument must be a number".to_string(),
+                    source_id: "native_function".to_string(),
+                });
+            }
+        };
+
+        // Extract length (convert from number to integer)
+        let len = match &args[2] {
+            Value::Number(n) => {
+                let i = *n as i64;
+                if i < 0 {
+                    return Err(RuntimeError {
+                        span: 0..0,
+                        message: "std.substr: length cannot be negative".to_string(),
+                        source_id: "native_function".to_string(),
+                    });
+                }
+                i as usize
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span: 0..0,
+                    message: "std.substr: third argument must be a number".to_string(),
+                    source_id: "native_function".to_string(),
+                });
+            }
+        };
+
+        // Extract substring using codepoint counting
+        // This handles Unicode correctly by working with codepoints, not bytes
+        let chars: Vec<char> = string_value.chars().collect();
+
+        // Calculate the actual substring range
+        let start = from.min(chars.len());
+        let end = (from + len).min(chars.len());
+
+        // Extract substring and allocate it
+        let substring: String = chars[start..end].iter().collect();
+        let allocated = self.memory_manager.allocate_string(&substring);
+
+        Ok(Value::String(allocated.index))
     }
 
     /// Convert a VM Value to serde_json::Value for JSON output
