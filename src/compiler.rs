@@ -1362,6 +1362,7 @@ impl<'a> Compiler<'a> {
         // Parse parameter names
         let mut param_names: Vec<String> = Vec::new();
         let mut param_count = 0u8;
+        let mut num_defaults = 0u8;
 
         if !matches!(
             self.parser.current_token().map(|t| &t.token),
@@ -1378,11 +1379,44 @@ impl<'a> Compiler<'a> {
                             self.parser.advance()?;
 
                             // Check for default value (= expression)
+                            // For now, we just mark that there's a default but don't evaluate it
                             if let Some(next_token) = self.parser.current_token() {
                                 if matches!(&next_token.token, Token::Operator(op) if op == "=") {
                                     self.parser.advance()?; // consume '='
-                                    // Skip the default expression for now
-                                    self.parser.advance()?;
+                                    num_defaults += 1;
+                                    // TODO: Properly parse and compile default expressions
+                                    // For now, skip to the next comma or closing paren
+                                    let mut paren_depth = 0;
+                                    let mut bracket_depth = 0;
+                                    while let Some(tok) = self.parser.current_token() {
+                                        match &tok.token {
+                                            Token::LeftParen | Token::LeftBracket | Token::LeftBrace => {
+                                                if matches!(tok.token, Token::LeftParen) {
+                                                    paren_depth += 1;
+                                                } else {
+                                                    bracket_depth += 1;
+                                                }
+                                                self.parser.advance()?;
+                                            }
+                                            Token::RightParen | Token::RightBracket | Token::RightBrace => {
+                                                if matches!(tok.token, Token::RightParen) && paren_depth > 0 {
+                                                    paren_depth -= 1;
+                                                    self.parser.advance()?;
+                                                } else if matches!(tok.token, Token::RightBracket) && bracket_depth > 0 {
+                                                    bracket_depth -= 1;
+                                                    self.parser.advance()?;
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            Token::Comma if paren_depth == 0 && bracket_depth == 0 => {
+                                                break;
+                                            }
+                                            _ => {
+                                                self.parser.advance()?;
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -1417,16 +1451,16 @@ impl<'a> Compiler<'a> {
         let function_code_offset = self.compiling_chunk.count();
 
         // Emit CreateFunction opcode with a placeholder offset (will be patched later)
-        self.compiling_chunk.write_opcode_u8_u32(
-            Opcode::CreateFunction,
+        self.compiling_chunk.write_function_header(
             param_count,
+            num_defaults,
             0, // Placeholder - will be patched with actual function body offset
             function_span.clone(),
         );
 
         // Save the position of the u32 offset so we can patch it later
-        // Position layout: 1 (opcode) + 1 (param_count u8) = 2, then comes the u32 offset
-        let create_function_offset_pos = function_code_offset + 2;
+        // Position layout: 1 (opcode) + 1 (param_count u8) + 1 (num_defaults u8) = 3, then comes the u32 offset
+        let create_function_offset_pos = function_code_offset + 3;
 
         // Emit a Jump to skip over the function body code
         let jump_to_skip = self.emit_jump(Opcode::Jump, function_span.clone());

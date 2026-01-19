@@ -964,20 +964,33 @@ impl<'a> VirtualMachine<'a> {
                             source_id: chunk.source_id.to_string(),
                         })?;
 
+                    let num_defaults = chunk
+                        .read_u8(self.program_counter + OPCODE_SIZE_BYTES + 1)
+                        .ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing num_defaults".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        })?;
+
                     let code_offset = chunk
-                        .read_u32(self.program_counter + OPCODE_SIZE_BYTES + 1)
+                        .read_u32(self.program_counter + OPCODE_SIZE_BYTES + 2)
                         .ok_or_else(|| RuntimeError {
                             span: self.get_current_span(),
                             message: "Invalid bytecode - missing code_offset".to_string(),
                             source_id: chunk.source_id.to_string(),
                         })? as usize;
 
-                    self.program_counter += OPCODE_SIZE_BYTES + 1 + 4;
+                    self.program_counter += OPCODE_SIZE_BYTES + 2 + 4;
 
-                    // For now, create a function with no parameters and no defaults
-                    // The compiler should populate parameter info properly
+                    // Create param_defaults array
+                    // The last num_defaults parameters have defaults (encoded as Some(0) for now)
+                    // The first (param_count - num_defaults) parameters are required (None)
+                    let mut param_defaults = vec![None; param_count as usize];
+                    for i in (param_count - num_defaults)..param_count {
+                        param_defaults[i as usize] = Some(0); // Placeholder offset
+                    }
+
                     let param_names = Vec::new();
-                    let param_defaults = vec![None; param_count as usize];
 
                     let func_allocation = self.memory_manager.allocate_function(
                         param_count,
@@ -1144,15 +1157,32 @@ impl<'a> VirtualMachine<'a> {
                             let func = self.memory_manager.load_function(func_idx).clone();
 
                             // Validate argument count
-                            let required_args = func.param_count as usize;
+                            let total_params = func.param_count as usize;
                             let provided_args = positional_count as usize;
 
+                            // Count how many parameters are actually required (have no default)
+                            let required_args = func.param_defaults.iter()
+                                .position(|d| d.is_some())
+                                .unwrap_or(total_params);
+
                             // Check if we have too many arguments
-                            if provided_args > required_args {
+                            if provided_args > total_params {
                                 return Err(RuntimeError {
                                     span: self.get_current_span(),
                                     message: format!(
                                         "Too many arguments: expected {}, got {}",
+                                        total_params, provided_args
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+
+                            // Check if we have too few required arguments
+                            if provided_args < required_args {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Too few arguments: expected at least {}, got {}",
                                         required_args, provided_args
                                     ),
                                     source_id: self.current_chunk().source_id.to_string(),
@@ -1176,14 +1206,14 @@ impl<'a> VirtualMachine<'a> {
                             // Push default values for missing arguments
                             // TODO: Implement proper default evaluation in caller's scope
                             // For now, fill in missing arguments with null
-                            for i in provided_args..required_args {
+                            for i in provided_args..total_params {
                                 if i < func.param_defaults.len() && func.param_defaults[i].is_some()
                                 {
                                     // This parameter has a default - for now push null
                                     // In the full implementation, we would evaluate the default bytecode
                                     self.push(Value::Null)?;
                                 } else {
-                                    // No default for this parameter and no argument provided
+                                    // Should not reach here - already validated above
                                     return Err(RuntimeError {
                                         span: self.get_current_span(),
                                         message: format!(
@@ -1203,15 +1233,32 @@ impl<'a> VirtualMachine<'a> {
                             let func = self.memory_manager.load_function(closure.function).clone();
 
                             // Validate argument count
-                            let required_args = func.param_count as usize;
+                            let total_params = func.param_count as usize;
                             let provided_args = positional_count as usize;
 
+                            // Count how many parameters are actually required (have no default)
+                            let required_args = func.param_defaults.iter()
+                                .position(|d| d.is_some())
+                                .unwrap_or(total_params);
+
                             // Check if we have too many arguments
-                            if provided_args > required_args {
+                            if provided_args > total_params {
                                 return Err(RuntimeError {
                                     span: self.get_current_span(),
                                     message: format!(
                                         "Too many arguments: expected {}, got {}",
+                                        total_params, provided_args
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+
+                            // Check if we have too few required arguments
+                            if provided_args < required_args {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Too few arguments: expected at least {}, got {}",
                                         required_args, provided_args
                                     ),
                                     source_id: self.current_chunk().source_id.to_string(),
@@ -1235,6 +1282,28 @@ impl<'a> VirtualMachine<'a> {
                             // Then push provided arguments onto stack as local variables
                             for arg in args.iter() {
                                 self.push(*arg)?;
+                            }
+
+                            // Push default values for missing arguments
+                            // TODO: Implement proper default evaluation in caller's scope
+                            // For now, fill in missing arguments with null
+                            for i in provided_args..total_params {
+                                if i < func.param_defaults.len() && func.param_defaults[i].is_some()
+                                {
+                                    // This parameter has a default - for now push null
+                                    // In the full implementation, we would evaluate the default bytecode
+                                    self.push(Value::Null)?;
+                                } else {
+                                    // Should not reach here - already validated above
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Missing required argument for parameter {}",
+                                            i
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
                             }
 
                             // Jump to function code

@@ -465,6 +465,23 @@ impl<'a> Chunk<'a> {
         }
     }
 
+    /// Write CreateFunction header: opcode, param_count, num_defaults, code_offset
+    pub fn write_function_header(
+        &mut self,
+        param_count: u8,
+        num_defaults: u8,
+        code_offset: u32,
+        span: Range<usize>,
+    ) {
+        self.write(Opcode::CreateFunction as u8, span.clone());
+        self.write(param_count, span.clone());
+        self.write(num_defaults, span.clone());
+        let offset_bytes = code_offset.to_le_bytes();
+        for byte in offset_bytes {
+            self.write(byte, span.clone());
+        }
+    }
+
     /// Write CreateClosure header: opcode, param_count, code_offset, capture_count
     pub fn write_closure_header(
         &mut self,
