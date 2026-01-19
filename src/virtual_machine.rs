@@ -1230,44 +1230,57 @@ impl<'a> VirtualMachine<'a> {
                 }
 
                 Opcode::StdCall => {
-                    let chunk = self.current_chunk();
-                    let func_index = chunk
-                        .read_u16(self.program_counter + OPCODE_SIZE_BYTES)
-                        .ok_or_else(|| RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Invalid bytecode - missing function_index".to_string(),
-                            source_id: chunk.source_id.to_string(),
-                        })?;
+                    // Read operands first
+                    let function_index = {
+                        let chunk = self.current_chunk();
+                        chunk
+                            .read_u16(self.program_counter + OPCODE_SIZE_BYTES)
+                            .ok_or_else(|| RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Invalid bytecode - missing function_index".to_string(),
+                                source_id: chunk.source_id.to_string(),
+                            })?
+                    };
 
-                    let arg_count = chunk
-                        .read_u8(self.program_counter + OPCODE_SIZE_BYTES + 2)
-                        .ok_or_else(|| RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Invalid bytecode - missing arg_count".to_string(),
-                            source_id: chunk.source_id.to_string(),
-                        })?;
+                    let arg_count = {
+                        let chunk = self.current_chunk();
+                        chunk
+                            .read_u8(self.program_counter + OPCODE_SIZE_BYTES + 2)
+                            .ok_or_else(|| RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Invalid bytecode - missing arg_count".to_string(),
+                                source_id: chunk.source_id.to_string(),
+                            })?
+                    };
 
                     self.program_counter += OPCODE_SIZE_BYTES + 2 + 1;
 
-                    // Pop arguments from stack (they're in reverse order)
+                    // Get the native function from the registry
+                    let native_func = {
+                        let chunk = self.current_chunk();
+                        chunk
+                            .get_native_function(function_index as usize)
+                            .ok_or_else(|| RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!(
+                                    "Unknown native function index: {}",
+                                    function_index
+                                ),
+                                source_id: chunk.source_id.to_string(),
+                            })?
+                    };
+
+                    // Pop arguments from stack (in reverse order)
                     let mut args = Vec::with_capacity(arg_count as usize);
                     for _ in 0..arg_count {
                         args.push(self.pop()?);
                     }
                     args.reverse();
 
-                    // Call the appropriate native function
-                    let result = match func_index {
-                        0 => self.std_endswith(&args)?,
-                        _ => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!("Unknown std function index: {}", func_index),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
-                        }
-                    };
+                    // Call the native function
+                    let result = native_func(&args)?;
 
+                    // Push return value onto stack
                     self.push(result)?;
                 }
 
