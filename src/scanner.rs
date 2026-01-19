@@ -245,11 +245,15 @@ impl<'a> Scanner<'a> {
     }
 
     fn peek(&self) -> char {
-        self.input.chars().nth(self.position).unwrap_or('\0')
+        // Use char_indices to correctly map byte positions to characters
+        // This is critical for handling multi-byte UTF-8 characters like emoji
+        self.input[self.position..].chars().next().unwrap_or('\0')
     }
 
     fn peek_ahead(&self, offset: usize) -> Option<char> {
-        self.input.chars().nth(self.position + offset)
+        // Get the character at current position + offset characters
+        // We need to advance character-by-character, not byte-by-byte
+        self.input[self.position..].chars().nth(offset)
     }
 
     fn advance(&mut self) -> char {
