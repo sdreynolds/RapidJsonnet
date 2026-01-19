@@ -184,3 +184,14 @@ sh_test(
     local = True,
     timeout = "short",
 )
+
+# Concurrent test runner - runs positive and negative tests in parallel (hq-gipl)
+sh_test(
+    name = "jsonnet_validation_test_concurrent",
+    srcs = ["test_runner_concurrent.sh"],
+    data = glob(["end2end/*.jsonnet"]) + [
+        ":main",
+    ],
+    local = True,
+    timeout = "short",
+)
