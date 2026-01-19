@@ -417,6 +417,98 @@ impl<'a> Compiler<'a> {
                 let span = token.span.clone();
                 self.parser.advance()?; // consume identifier
 
+                // Special handling for std namespace
+                if name_clone == "std" {
+                    // Check if next token is a dot (for std.function syntax)
+                    if let Some(next_token_info) = self.parser.current_token().cloned() {
+                        if matches!(next_token_info.token, Token::Dot) {
+                            self.parser.advance()?; // consume '.'
+
+                            // Expect function name
+                            let func_token = self.parser.current_token().cloned().ok_or_else(|| {
+                                let span = next_token_info.span.end..next_token_info.span.end;
+                                self.unexpected_eof_error(span)
+                            })?;
+
+                            match &func_token.token {
+                                Token::Identifier(func_name) => {
+                                    let func_name_str = func_name.clone();
+                                    self.parser.advance()?; // consume function name
+
+                                    // Map function name to function index
+                                    let func_index = match func_name_str.as_str() {
+                                        "endsWith" => 0u16,
+                                        "startsWith" => 1u16,
+                                        _ => {
+                                            return Err(self.make_error(
+                                                func_token.span,
+                                                format!("Unknown std function: {}", func_name_str),
+                                            ));
+                                        }
+                                    };
+
+                                    // Expect '(' for function call
+                                    self.parser.consume(
+                                        Token::LeftParen,
+                                        "Expected '(' after std function name",
+                                    )?;
+
+                                    // Parse arguments
+                                    let mut arg_count = 0u8;
+
+                                    // Handle empty argument list
+                                    if !matches!(
+                                        self.parser.current_token().map(|t| &t.token),
+                                        Some(Token::RightParen)
+                                    ) {
+                                        loop {
+                                            // Parse argument expression
+                                            self.parse_expr(0, memory_manager)?;
+                                            arg_count += 1;
+
+                                            // Check for comma
+                                            if let Some(next_token) = self.parser.current_token() {
+                                                if matches!(next_token.token, Token::Comma) {
+                                                    self.parser.advance()?; // consume ','
+                                                } else {
+                                                    break;
+                                                }
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    // Expect ')'
+                                    self.parser.consume(
+                                        Token::RightParen,
+                                        "Expected ')' after std function arguments",
+                                    )?;
+
+                                    // Emit StdCall opcode with function index and argument count
+                                    // Format: opcode (1) + function_index (2) + arg_count (1) = 4 bytes
+                                    self.compiling_chunk.write_opcode_u16_u8(
+                                        Opcode::StdCall,
+                                        func_index,
+                                        arg_count,
+                                        func_token.span,
+                                    );
+
+                                    // Std functions return unknown type
+                                    self.push_type(ExpressionType::Unknown);
+                                }
+                                _ => {
+                                    return Err(self.make_error(
+                                        func_token.span,
+                                        "Expected function name after 'std.'".to_string(),
+                                    ));
+                                }
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+
                 // Try to resolve as local variable
                 if let Some(local) = self.locals.iter().rev().find(|l| l.name == name_clone) {
                     // Check if this variable should be captured

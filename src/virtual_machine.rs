@@ -1255,21 +1255,6 @@ impl<'a> VirtualMachine<'a> {
 
                     self.program_counter += OPCODE_SIZE_BYTES + 2 + 1;
 
-                    // Get the native function from the registry
-                    let native_func = {
-                        let chunk = self.current_chunk();
-                        chunk
-                            .get_native_function(function_index as usize)
-                            .ok_or_else(|| RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!(
-                                    "Unknown native function index: {}",
-                                    function_index
-                                ),
-                                source_id: chunk.source_id.to_string(),
-                            })?
-                    };
-
                     // Pop arguments from stack (in reverse order)
                     let mut args = Vec::with_capacity(arg_count as usize);
                     for _ in 0..arg_count {
@@ -1277,8 +1262,21 @@ impl<'a> VirtualMachine<'a> {
                     }
                     args.reverse();
 
-                    // Call the native function
-                    let result = native_func(&args)?;
+                    // Dispatch to the appropriate native function based on index
+                    let result = match function_index {
+                        0 => self.std_endswith(&args)?,
+                        1 => self.std_startswith(&args)?,
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!(
+                                    "Unknown native function index: {}",
+                                    function_index
+                                ),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    };
 
                     // Push return value onto stack
                     self.push(result)?;
@@ -1347,6 +1345,46 @@ impl<'a> VirtualMachine<'a> {
 
         // Check if string ends with suffix
         let result = string_value.ends_with(suffix_value);
+        Ok(Value::Boolean(result))
+    }
+
+    /// Implement std.startsWith(string, prefix) native function
+    /// Returns true if string starts with the given prefix (case-sensitive)
+    fn std_startswith(&self, args: &[Value]) -> Result<Value, RuntimeError> {
+        if args.len() != 2 {
+            return Err(RuntimeError {
+                span: 0..0,
+                message: format!("std.startsWith expects 2 arguments, got {}", args.len()),
+                source_id: "native_function".to_string(),
+            });
+        }
+
+        // Extract string value
+        let string_value = match &args[0] {
+            Value::String(key) => self.memory_manager.load_string(*key),
+            _ => {
+                return Err(RuntimeError {
+                    span: 0..0,
+                    message: "std.startsWith: first argument must be a string".to_string(),
+                    source_id: "native_function".to_string(),
+                });
+            }
+        };
+
+        // Extract prefix value
+        let prefix_value = match &args[1] {
+            Value::String(key) => self.memory_manager.load_string(*key),
+            _ => {
+                return Err(RuntimeError {
+                    span: 0..0,
+                    message: "std.startsWith: second argument must be a string".to_string(),
+                    source_id: "native_function".to_string(),
+                });
+            }
+        };
+
+        // Check if string starts with prefix
+        let result = string_value.starts_with(prefix_value);
         Ok(Value::Boolean(result))
     }
 
