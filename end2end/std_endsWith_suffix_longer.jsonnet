@@ -1,0 +1,1 @@
+std.endsWith("hi", "hello")
