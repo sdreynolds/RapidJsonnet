@@ -148,4 +148,6 @@ sh_test(
 
     # We set this to true to ensure the test is executed.
     local = True,
+    # CRITICAL: Add timeout to catch infinite loops in end2end tests (hq-uxnq)
+    timeout = "short",
 )
