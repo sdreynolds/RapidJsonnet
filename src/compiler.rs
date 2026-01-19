@@ -1738,7 +1738,8 @@ impl<'a> Compiler<'a> {
         let body_code_offset = self.compiling_chunk.count();
 
         // Now patch the CreateFunction's offset to point to the body code
-        self.compiling_chunk.patch_u32(create_function_offset_pos, body_code_offset as u32);
+        self.compiling_chunk
+            .patch_u32(create_function_offset_pos, body_code_offset as u32);
 
         // Create a new scope for the function body
         self.begin_scope();
