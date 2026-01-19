@@ -173,3 +173,14 @@ sh_test(
     local = True,
     timeout = "short",
 )
+
+# Output validation test - validates results against expected outputs (hq-ebal)
+sh_test(
+    name = "jsonnet_validation_test_with_output",
+    srcs = ["test_with_validation.sh"],
+    data = glob(["end2end/*.jsonnet"]) + glob(["end2end/*.expected"]) + [
+        ":main",
+    ],
+    local = True,
+    timeout = "short",
+)
