@@ -319,10 +319,11 @@ impl<'a> Compiler<'a> {
                             self.parser.advance()?; // consume '.'
 
                             // Expect function name
-                            let func_token = self.parser.current_token().cloned().ok_or_else(|| {
-                                let span = next_token_info.span.end..next_token_info.span.end;
-                                self.unexpected_eof_error(span)
-                            })?;
+                            let func_token =
+                                self.parser.current_token().cloned().ok_or_else(|| {
+                                    let span = next_token_info.span.end..next_token_info.span.end;
+                                    self.unexpected_eof_error(span)
+                                })?;
 
                             match &func_token.token {
                                 Token::Identifier(func_name) => {
