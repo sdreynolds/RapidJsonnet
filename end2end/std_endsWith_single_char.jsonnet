@@ -1,0 +1,1 @@
+std.endsWith("abc", "c")
