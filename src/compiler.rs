@@ -254,6 +254,110 @@ impl<'a> Compiler<'a> {
                     self.push_type(ExpressionType::Unknown);
                 }
             }
+            Token::Operator(op) if op == "$" => {
+                // Handle standard library function calls: $std.function(...)
+                let dollar_span = token.span.clone();
+                self.parser.advance()?; // consume '$'
+
+                // Expect 'std' identifier
+                let next_token =
+                    self.parser.current_token().cloned().ok_or_else(|| {
+                        self.unexpected_eof_error(dollar_span.end..dollar_span.end)
+                    })?;
+
+                match &next_token.token {
+                    Token::Identifier(name) if name == "std" => {
+                        self.parser.advance()?; // consume 'std'
+
+                        // Expect '.'
+                        self.parser
+                            .consume(Token::Dot, "Expected '.' after '$std'")?;
+
+                        // Expect function name
+                        let func_token = self.parser.current_token().cloned().ok_or_else(|| {
+                            self.unexpected_eof_error(dollar_span.end..dollar_span.end)
+                        })?;
+
+                        match &func_token.token {
+                            Token::Identifier(func_name) => {
+                                let func_name_str = func_name.clone();
+                                self.parser.advance()?; // consume function name
+
+                                // Map function name to function index
+                                let func_index = match func_name_str.as_str() {
+                                    "endsWith" => 0u16,
+                                    _ => {
+                                        return Err(self.make_error(
+                                            func_token.span,
+                                            format!("Unknown std function: {}", func_name_str),
+                                        ));
+                                    }
+                                };
+
+                                // Expect '(' for function call
+                                self.parser.consume(
+                                    Token::LeftParen,
+                                    "Expected '(' after std function name",
+                                )?;
+
+                                // Parse arguments
+                                let mut arg_count = 0u8;
+
+                                // Handle empty argument list
+                                if !matches!(
+                                    self.parser.current_token().map(|t| &t.token),
+                                    Some(Token::RightParen)
+                                ) {
+                                    loop {
+                                        // Parse argument expression
+                                        self.parse_expr(0, memory_manager)?;
+                                        arg_count += 1;
+
+                                        // Check for comma
+                                        if let Some(next_token) = self.parser.current_token() {
+                                            if matches!(next_token.token, Token::Comma) {
+                                                self.parser.advance()?; // consume ','
+                                            } else {
+                                                break;
+                                            }
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // Expect ')'
+                                self.parser.consume(
+                                    Token::RightParen,
+                                    "Expected ')' after std function arguments",
+                                )?;
+
+                                // Emit StdCall opcode with function index and argument count
+                                // Format: opcode (1) + function_index (2) + arg_count (1) = 4 bytes
+                                self.compiling_chunk.write_opcode_u16_u8(
+                                    Opcode::StdCall,
+                                    func_index,
+                                    arg_count,
+                                    dollar_span,
+                                );
+
+                                // Std functions return unknown type
+                                self.push_type(ExpressionType::Unknown);
+                            }
+                            _ => {
+                                return Err(self.make_error(
+                                    func_token.span,
+                                    "Expected function name after '$std.'".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(self
+                            .make_error(next_token.span, "Expected 'std' after '$'".to_string()));
+                    }
+                }
+            }
             Token::LeftParen => {
                 self.parser.advance()?; // consume '('
                 self.parse_expr(0, memory_manager)?;
