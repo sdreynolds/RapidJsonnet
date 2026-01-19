@@ -1229,6 +1229,48 @@ impl<'a> VirtualMachine<'a> {
                     }
                 }
 
+                Opcode::StdCall => {
+                    let chunk = self.current_chunk();
+                    let func_index = chunk
+                        .read_u16(self.program_counter + OPCODE_SIZE_BYTES)
+                        .ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing function_index".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        })?;
+
+                    let arg_count = chunk
+                        .read_u8(self.program_counter + OPCODE_SIZE_BYTES + 2)
+                        .ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing arg_count".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        })?;
+
+                    self.program_counter += OPCODE_SIZE_BYTES + 2 + 1;
+
+                    // Pop arguments from stack (they're in reverse order)
+                    let mut args = Vec::with_capacity(arg_count as usize);
+                    for _ in 0..arg_count {
+                        args.push(self.pop()?);
+                    }
+                    args.reverse();
+
+                    // Call the appropriate native function
+                    let result = match func_index {
+                        0 => self.std_endswith(&args)?,
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!("Unknown std function index: {}", func_index),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    };
+
+                    self.push(result)?;
+                }
+
                 // All other opcodes result in runtime error
                 _ => {
                     return Err(RuntimeError {
@@ -1253,6 +1295,46 @@ impl<'a> VirtualMachine<'a> {
             // Different types are never equal
             _ => false,
         }
+    }
+
+    /// Implement std.endsWith(string, suffix) native function
+    /// Returns true if string ends with the given suffix (case-sensitive)
+    fn std_endswith(&self, args: &[Value]) -> Result<Value, RuntimeError> {
+        if args.len() != 2 {
+            return Err(RuntimeError {
+                span: 0..0,
+                message: format!("std.endsWith expects 2 arguments, got {}", args.len()),
+                source_id: "native_function".to_string(),
+            });
+        }
+
+        // Extract string value
+        let string_value = match &args[0] {
+            Value::String(key) => self.memory_manager.load_string(*key),
+            _ => {
+                return Err(RuntimeError {
+                    span: 0..0,
+                    message: "std.endsWith: first argument must be a string".to_string(),
+                    source_id: "native_function".to_string(),
+                });
+            }
+        };
+
+        // Extract suffix value
+        let suffix_value = match &args[1] {
+            Value::String(key) => self.memory_manager.load_string(*key),
+            _ => {
+                return Err(RuntimeError {
+                    span: 0..0,
+                    message: "std.endsWith: second argument must be a string".to_string(),
+                    source_id: "native_function".to_string(),
+                });
+            }
+        };
+
+        // Check if string ends with suffix
+        let result = string_value.ends_with(suffix_value);
+        Ok(Value::Boolean(result))
     }
 
     /// Convert a VM Value to serde_json::Value for JSON output
