@@ -998,9 +998,43 @@ impl<'a> Compiler<'a> {
             }
         }
 
+        // Check if this is a comprehension using lookahead
+        let mut is_comprehension = false;
+        let mut depth = 0;
+        let mut lookahead_idx = 0;
+        loop {
+            let token = self.parser.peek_ahead(lookahead_idx)?;
+            match token {
+                Some(t) => {
+                    match &t.token {
+                        Token::For if depth == 0 => {
+                            is_comprehension = true;
+                            break;
+                        }
+                        Token::LeftParen | Token::LeftBracket | Token::LeftBrace => depth += 1,
+                        Token::RightParen | Token::RightBracket | Token::RightBrace => {
+                            if depth == 0 {
+                                // End of object without finding 'for' - not a comprehension
+                                break;
+                            }
+                            depth -= 1;
+                        }
+                        Token::Eof => break,
+                        _ => {}
+                    }
+                    lookahead_idx += 1;
+                }
+                None => break,
+            }
+        }
+
+        if is_comprehension {
+            return self.parse_object_comprehension(start_token, lookahead_idx, memory_manager);
+        }
+
         // Parse field pairs: key: value
         loop {
-            // Parse the key (can be a string literal or identifier)
+            // Parse the key (can be a string literal, identifier, or dynamic key)
             if let Some(key_token) = self.parser.current_token() {
                 match &key_token.token {
                     Token::String(key_value) => {
@@ -1019,10 +1053,18 @@ impl<'a> Compiler<'a> {
 
                         self.parser.advance()?; // consume the key
                     }
+                    Token::LeftBracket => {
+                        self.parser.advance()?; // consume '['
+                        self.parse_expr(0, memory_manager)?; // evaluate dynamic key expression
+                        self.parser.consume(
+                            Token::RightBracket,
+                            "Expected ']' after dynamic object key",
+                        )?;
+                    }
                     _ => {
                         return Err(self.make_error(
                             key_token.span.clone(),
-                            "Object key must be a string literal or identifier".to_string(),
+                            "Object key must be a string literal, identifier, or dynamic key '[expr]'".to_string(),
                         ));
                     }
                 }
@@ -1216,7 +1258,7 @@ impl<'a> Compiler<'a> {
     /// at the current bracket nesting level.
     fn skip_comprehension_condition(&mut self) -> Result<usize, CompilerError> {
         let mut skip_count = 0;
-        let mut bracket_depth = 0;
+        let mut depth = 0;
 
         loop {
             let next_token = match self.parser.peek_ahead(skip_count) {
@@ -1230,17 +1272,17 @@ impl<'a> Compiler<'a> {
             };
 
             match next_token.token {
-                Token::LeftBracket => {
-                    bracket_depth += 1;
+                Token::LeftBracket | Token::LeftBrace | Token::LeftParen => {
+                    depth += 1;
                 }
-                Token::RightBracket => {
-                    if bracket_depth == 0 {
+                Token::RightBracket | Token::RightBrace | Token::RightParen => {
+                    if depth == 0 {
                         break;
                     }
-                    bracket_depth -= 1;
+                    depth -= 1;
                 }
                 Token::For | Token::If => {
-                    if bracket_depth == 0 {
+                    if depth == 0 {
                         break;
                     }
                 }
@@ -1256,6 +1298,323 @@ impl<'a> Compiler<'a> {
     /// Parse array comprehension: [expr for var in source_array]
     /// Stack layout during loop: [source, result, counter, length]
     /// for_offset is the token offset where 'for' keyword is located (already found by caller)
+    fn parse_object_comprehension(
+        &mut self,
+        start_token: &TokenInfo,
+        for_offset: usize,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        let span = start_token.span.clone();
+
+        // Buffer tokens until the final '}' of the comprehension
+        let mut depth = 0;
+        let mut lookahead_idx = 0;
+        loop {
+            let token = self.parser.peek_ahead(lookahead_idx)?;
+            match token {
+                Some(t) => {
+                    match &t.token {
+                        Token::LeftBrace => depth += 1,
+                        Token::RightBrace => {
+                            if depth == 0 {
+                                break;
+                            }
+                            depth -= 1;
+                        }
+                        Token::Eof => break,
+                        _ => {}
+                    }
+                    lookahead_idx += 1;
+                }
+                None => break,
+            }
+        }
+
+        let field_start_checkpoint = self.parser.save_checkpoint();
+
+        // Skip past the field to the first 'for'
+        for _ in 0..for_offset {
+            self.parser.advance()?;
+        }
+        let mut clauses = Vec::new();
+
+        // Parse clauses until '}'
+        loop {
+            let current = match self.parser.current_token() {
+                Some(t) => t.clone(),
+                None => return Err(self.unexpected_eof_error(span.clone())),
+            };
+
+            match current.token {
+                Token::For => {
+                    self.parser.advance()?; // consume 'for'
+                    let var_name = if let Some(token) = self.parser.current_token() {
+                        if let Token::Identifier(name) = &token.token {
+                            name.clone()
+                        } else {
+                            return Err(self.make_error(
+                                token.span.clone(),
+                                "Expected identifier after 'for'".to_string(),
+                            ));
+                        }
+                    } else {
+                        return Err(self.unexpected_eof_error(span.clone()));
+                    };
+                    self.parser.advance()?; // consume variable name
+                    self.parser
+                        .consume(Token::In, "Expected 'in' after variable")?;
+
+                    let skip = self.skip_comprehension_condition()?;
+                    let source_checkpoint = self.parser.save_checkpoint();
+
+                    for _ in 0..skip {
+                        self.parser.advance()?;
+                    }
+
+                    clauses.push(ComprehensionClause::For {
+                        var_name,
+                        source_checkpoint,
+                        span: current.span.clone(),
+                    });
+                }
+                Token::If => {
+                    self.parser.advance()?; // consume 'if'
+                    let skip = self.skip_comprehension_condition()?;
+                    let condition_checkpoint = self.parser.save_checkpoint();
+
+                    for _ in 0..skip {
+                        self.parser.advance()?;
+                    }
+                    clauses.push(ComprehensionClause::If {
+                        condition_checkpoint,
+                        span: current.span.clone(),
+                    });
+                }
+                Token::RightBrace => {
+                    break;
+                }
+                _ => {
+                    return Err(self.make_error(
+                        current.span.clone(),
+                        "Expected 'for', 'if', or '}'".to_string(),
+                    ));
+                }
+            }
+        }
+
+        self.parser.consume(
+            Token::RightBrace,
+            "Expected '}' to close object comprehension",
+        )?;
+
+        let source_end_checkpoint = self.parser.save_checkpoint();
+
+        self.begin_scope();
+
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::CreateObject, 0, span.clone());
+        self.declare_local("__comp_result".to_string())?;
+        let result_slot = self.locals.len() - 1;
+
+        self.emit_object_comprehension_clauses(
+            &clauses,
+            0,
+            field_start_checkpoint,
+            result_slot,
+            memory_manager,
+            &span,
+        )?;
+
+        self.emit_opcode(Opcode::Pop, span.clone());
+
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadVar, result_slot as u16, span.clone());
+
+        self.end_scope();
+        self.parser.restore_checkpoint(source_end_checkpoint);
+
+        Ok(())
+    }
+
+    fn emit_object_comprehension_clauses(
+        &mut self,
+        clauses: &[ComprehensionClause],
+        clause_idx: usize,
+        field_start_checkpoint: ParserCheckpoint,
+        result_slot: usize,
+        memory_manager: &mut MemoryManager,
+        span: &Range<usize>,
+    ) -> Result<(), CompilerError> {
+        if clause_idx >= clauses.len() {
+            self.compiling_chunk.write_opcode_u16(
+                Opcode::LoadVar,
+                result_slot as u16,
+                span.clone(),
+            );
+
+            self.parser.restore_checkpoint(field_start_checkpoint);
+
+            let key_token = match self.parser.current_token() {
+                Some(t) => t.clone(),
+                None => return Err(self.unexpected_eof_error(span.clone())),
+            };
+
+            match &key_token.token {
+                Token::String(key_value) => {
+                    let allocation_result = memory_manager.allocate_string(key_value);
+                    let _key_index = self.emit_string_constant(allocation_result.index)?;
+                    self.push_type(ExpressionType::String);
+                    self.parser.advance()?;
+                }
+                Token::Identifier(key_name) => {
+                    let allocation_result = memory_manager.allocate_string(key_name);
+                    let _key_index = self.emit_string_constant(allocation_result.index)?;
+                    self.push_type(ExpressionType::String);
+                    self.parser.advance()?;
+                }
+                Token::LeftBracket => {
+                    self.parser.advance()?;
+                    self.parse_expr(0, memory_manager)?;
+                    self.parser
+                        .consume(Token::RightBracket, "Expected ']' after dynamic key")?;
+                }
+                _ => {
+                    return Err(self.make_error(
+                        key_token.span.clone(),
+                        "Object key must be a string literal, identifier, or dynamic key '[expr]'"
+                            .to_string(),
+                    ));
+                }
+            }
+
+            self.parser
+                .consume(Token::Operator(":".to_string()), "Expected ':' after key")?;
+            self.parse_expr(0, memory_manager)?;
+
+            self.emit_opcode(Opcode::ObjectInsert, span.clone());
+            self.emit_store_var(result_slot, span.clone());
+            self.emit_opcode(Opcode::LoadNull, span.clone());
+
+            return Ok(());
+        }
+
+        match &clauses[clause_idx] {
+            ComprehensionClause::For {
+                var_name,
+                source_checkpoint,
+                span: clause_span,
+            } => {
+                self.parser.restore_checkpoint(source_checkpoint.clone());
+                self.parse_expr(0, memory_manager)?;
+
+                self.begin_scope();
+
+                self.declare_local("__comp_source".to_string())?;
+                let source_slot = self.locals.len() - 1;
+
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    source_slot as u16,
+                    clause_span.clone(),
+                );
+                self.emit_opcode(Opcode::ArrayLength, clause_span.clone());
+                self.declare_local("__comp_length".to_string())?;
+                let length_slot = self.locals.len() - 1;
+
+                self.emit_constant(0.0)?;
+                self.declare_local("__comp_counter".to_string())?;
+                let counter_slot = self.locals.len() - 1;
+
+                let loop_start = self.compiling_chunk.count();
+
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    counter_slot as u16,
+                    clause_span.clone(),
+                );
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    length_slot as u16,
+                    clause_span.clone(),
+                );
+                self.emit_opcode(Opcode::Lt, clause_span.clone());
+
+                let jump_to_end = self.emit_jump(Opcode::JumpIfFalse, clause_span.clone());
+
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    source_slot as u16,
+                    clause_span.clone(),
+                );
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    counter_slot as u16,
+                    clause_span.clone(),
+                );
+                self.emit_opcode(Opcode::ArrayIndex, clause_span.clone());
+
+                self.begin_scope();
+                self.declare_local(var_name.clone())?;
+
+                self.emit_object_comprehension_clauses(
+                    clauses,
+                    clause_idx + 1,
+                    field_start_checkpoint.clone(),
+                    result_slot,
+                    memory_manager,
+                    span,
+                )?;
+
+                self.end_scope();
+                self.emit_opcode(Opcode::Pop, clause_span.clone());
+
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    counter_slot as u16,
+                    clause_span.clone(),
+                );
+                self.emit_constant(1.0)?;
+                self.emit_opcode(Opcode::Add, clause_span.clone());
+                self.emit_store_var(counter_slot, clause_span.clone());
+
+                // Jump back to loop start
+                let jump_back_offset = self.compiling_chunk.count();
+                self.emit_opcode(Opcode::Jump, clause_span.clone());
+                let back_offset = loop_start as i32 - (jump_back_offset as i32 + 1 + 4);
+                self.emit_i32(back_offset);
+                self.patch_jump(jump_to_end);
+
+                self.emit_opcode(Opcode::LoadNull, clause_span.clone());
+                self.end_scope();
+            }
+            ComprehensionClause::If {
+                condition_checkpoint,
+                span: clause_span,
+            } => {
+                self.parser.restore_checkpoint(condition_checkpoint.clone());
+                self.parse_expr(0, memory_manager)?;
+
+                let jump_if_false = self.emit_jump(Opcode::JumpIfFalse, clause_span.clone());
+
+                self.emit_object_comprehension_clauses(
+                    clauses,
+                    clause_idx + 1,
+                    field_start_checkpoint.clone(),
+                    result_slot,
+                    memory_manager,
+                    span,
+                )?;
+
+                let jump_to_end = self.emit_jump(Opcode::Jump, clause_span.clone());
+                self.patch_jump(jump_if_false);
+                self.emit_opcode(Opcode::LoadNull, clause_span.clone());
+                self.patch_jump(jump_to_end);
+            }
+        }
+
+        Ok(())
+    }
+
     fn parse_array_comprehension(
         &mut self,
         start_token: &TokenInfo,
@@ -1353,9 +1712,6 @@ impl<'a> Compiler<'a> {
 
         // Save checkpoint position for after the comprehension
         let source_end_checkpoint = self.parser.save_checkpoint();
-
-        // Commit the buffer so nested parsing doesn't get confused
-        self.parser.commit();
 
         // Enter a scope for the comprehension state (result array and source loops)
         self.begin_scope();

@@ -422,6 +422,8 @@ impl VirtualMachine {
                     let b = self.pop()?;
                     let a = self.pop()?;
 
+                    eprintln!("[VM] Add: a={:?}, b={:?}", a, b);
+
                     // Check for different addition types
                     match (&a, &b) {
                         // Object merging (according to Jsonnet spec)
@@ -841,15 +843,24 @@ impl VirtualMachine {
                         let value = self.pop()?;
                         let key = self.pop()?;
 
-                        // Ensure key is a string
-                        if let Value::String(key_str) = key {
-                            properties.insert(key_str, value);
-                        } else {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!("Object key must be a string, got {:?}", key),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                        // Ensure key is a string or null
+                        match key {
+                            Value::String(key_str) => {
+                                properties.insert(key_str, value);
+                            }
+                            Value::Null => {
+                                // Null keys are omitted as per Jsonnet spec
+                            }
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Object key must be a string or null, got {:?}",
+                                        key
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
                         }
                     }
 
@@ -867,6 +878,71 @@ impl VirtualMachine {
                         }
                         self.run_garbage_collection();
                     }
+                }
+
+                Opcode::ObjectInsert => {
+                    let stack_len_before = self.stack.len();
+                    let value = self.pop()?;
+                    let key = self.pop()?;
+                    let object_val = self.pop()?;
+
+                    eprintln!(
+                        "[VM] ObjectInsert: stack_len_before={}, value={:?}, key={:?}, object={:?}",
+                        stack_len_before, value, key, object_val
+                    );
+
+                    match object_val {
+                        Value::Object(obj_key) => {
+                            let obj = self.memory_manager.load_object(obj_key);
+                            let mut properties = obj.properties.clone();
+
+                            match key {
+                                Value::String(key_str) => {
+                                    properties.insert(key_str, value);
+                                }
+                                Value::Null => {
+                                    // Null keys are omitted
+                                }
+                                _ => {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Object key must be a string or null, got {:?}",
+                                            key
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            }
+
+                            let object_allocation = self
+                                .memory_manager
+                                .allocate_object_with_properties(properties);
+                            self.push(Value::Object(object_allocation.index))?;
+
+                            if object_allocation.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (ObjectInsert)",
+                                        self.current_frame().ip
+                                    );
+                                }
+                                self.run_garbage_collection();
+                            }
+                        }
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!(
+                                    "Expected object for ObjectInsert, got {:?}",
+                                    object_val
+                                ),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+                    self.advance_pc();
                 }
 
                 Opcode::CreateArray => {
@@ -1948,20 +2024,6 @@ mod tests {
                 .message
                 .contains("missing Return instruction")
         );
-    }
-
-    #[test]
-    fn test_unimplemented_opcode() {
-        let mut chunk = create_test_chunk();
-        chunk.write_opcode(Opcode::CreateObjectComp, 0..5); // Unimplemented opcode
-        chunk.write_opcode(Opcode::Return, 5..10);
-
-        let memory_manager = MemoryManager::new();
-        let mut vm = VirtualMachine::new(chunk, memory_manager);
-        let result = vm.interpret();
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("Unimplemented opcode"));
     }
 
     #[test]

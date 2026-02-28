@@ -121,7 +121,7 @@ pub enum Opcode {
 
     // Object Operations
     CreateObject = 10, // operand: u16 field_count
-    CreateObjectComp = 11,
+    ObjectInsert = 11,
     FieldDef = 12, // operands: u16 name_index, u8 hidden_type
     Assert = 13,
     ObjectIndex = 14,
@@ -202,7 +202,7 @@ impl Opcode {
             5 => Some(Opcode::LoadSuper),
             6 => Some(Opcode::LoadVar),
             10 => Some(Opcode::CreateObject),
-            11 => Some(Opcode::CreateObjectComp),
+            11 => Some(Opcode::ObjectInsert),
             12 => Some(Opcode::FieldDef),
             13 => Some(Opcode::Assert),
             14 => Some(Opcode::ObjectIndex),
