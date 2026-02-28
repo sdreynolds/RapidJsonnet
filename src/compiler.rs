@@ -1,12 +1,26 @@
 use chunk::{Chunk, I32_SIZE_BYTES, Opcode, StringIndex, Value};
 use memory_manager::MemoryManager;
-use parser::Parser;
+use parser::{Parser, ParserCheckpoint};
 use scanner::{ScanError, Scanner, Token, TokenInfo};
 use std::collections::HashMap;
 use std::fs;
 use std::ops::Range;
 
 pub type CompilerError = ScanError;
+
+// Comprehension clause tracking for parsing and code generation
+#[derive(Debug, Clone)]
+enum ComprehensionClause {
+    For {
+        var_name: String,
+        source_checkpoint: ParserCheckpoint,
+        span: Range<usize>,
+    },
+    If {
+        condition_checkpoint: ParserCheckpoint,
+        span: Range<usize>,
+    },
+}
 
 // Expression type tracking for compile-time optimizations
 #[derive(Debug, Clone, PartialEq)]
@@ -484,6 +498,12 @@ impl<'a> Compiler<'a> {
                 self.pop_type(); // left operand
                 self.push_type(ExpressionType::Number); // division always produces number
             }
+            Token::Operator(op) if op == "%" => {
+                self.emit_opcode(Opcode::Mod, token.span);
+                self.pop_type(); // right operand
+                self.pop_type(); // left operand
+                self.push_type(ExpressionType::Number); // modulo always produces number
+            }
             Token::Operator(op) if op == "<" => {
                 self.emit_opcode(Opcode::Lt, token.span);
                 self.pop_type(); // right operand
@@ -785,7 +805,7 @@ impl<'a> Compiler<'a> {
     fn get_binding_power(&self, token: &Token) -> Option<(u8, u8)> {
         match token {
             // Multiplicative (left associative)
-            Token::Operator(op) if op == "*" || op == "/" => {
+            Token::Operator(op) if op == "*" || op == "/" || op == "%" => {
                 Some((PRECEDENCE_MULTIPLICATIVE, PRECEDENCE_MULTIPLICATIVE + 1))
             }
 
@@ -1191,6 +1211,48 @@ impl<'a> Compiler<'a> {
             .write_opcode_u16(Opcode::StoreVar, slot as u16, span);
     }
 
+    /// Scans forward to find the length of a comprehension condition.
+    /// It stops when it encounters a closing `]`, or another clause (`for` or `if`)
+    /// at the current bracket nesting level.
+    fn skip_comprehension_condition(&mut self) -> Result<usize, CompilerError> {
+        let mut skip_count = 0;
+        let mut bracket_depth = 0;
+
+        loop {
+            let next_token = match self.parser.peek_ahead(skip_count) {
+                Ok(Some(token)) => token.clone(),
+                Ok(None) => {
+                    return Err(self.unexpected_eof_error(self.current_span()));
+                }
+                Err(err) => {
+                    return Err(self.make_error(err.span, err.message));
+                }
+            };
+
+            match next_token.token {
+                Token::LeftBracket => {
+                    bracket_depth += 1;
+                }
+                Token::RightBracket => {
+                    if bracket_depth == 0 {
+                        break;
+                    }
+                    bracket_depth -= 1;
+                }
+                Token::For | Token::If => {
+                    if bracket_depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+
+            skip_count += 1;
+        }
+
+        Ok(skip_count)
+    }
+
     /// Parse array comprehension: [expr for var in source_array]
     /// Stack layout during loop: [source, result, counter, length]
     /// for_offset is the token offset where 'for' keyword is located (already found by caller)
@@ -1202,73 +1264,88 @@ impl<'a> Compiler<'a> {
     ) -> Result<(), CompilerError> {
         let span = start_token.span.clone();
 
-        // We need to parse: expr for var in source_array
-        // for_offset tells us where 'for' is located (already determined by caller)
+        // Fill buffer with tokens until the first 'for' so body_checkpoint has them
+        for i in 0..=for_offset {
+            self.parser.peek_ahead(i)?;
+        }
         // Save checkpoint for the body expression (we'll come back to it)
         let body_checkpoint = self.parser.save_checkpoint();
 
-        // Skip past the body to 'for'
+        // Skip past the body to the first 'for'
         for _ in 0..for_offset {
             self.parser.advance()?;
         }
 
-        // Current token should be 'for'
-        self.parser.consume(Token::For, "Expected 'for'")?;
+        let mut clauses = Vec::new();
 
-        // Get loop variable name
-        let var_name = if let Some(token) = self.parser.current_token() {
-            if let Token::Identifier(name) = &token.token {
-                name.clone()
-            } else {
-                return Err(self.make_error(
-                    token.span.clone(),
-                    "Expected identifier after 'for'".to_string(),
-                ));
+        // Parse clauses until ']'
+        loop {
+            let current = match self.parser.current_token() {
+                Some(t) => t.clone(),
+                None => return Err(self.unexpected_eof_error(span.clone())),
+            };
+
+            match current.token {
+                Token::For => {
+                    self.parser.advance()?; // consume 'for'
+                    let var_name = if let Some(token) = self.parser.current_token() {
+                        if let Token::Identifier(name) = &token.token {
+                            name.clone()
+                        } else {
+                            return Err(self.make_error(
+                                token.span.clone(),
+                                "Expected identifier after 'for'".to_string(),
+                            ));
+                        }
+                    } else {
+                        return Err(self.unexpected_eof_error(span.clone()));
+                    };
+                    self.parser.advance()?; // consume variable name
+                    self.parser
+                        .consume(Token::In, "Expected 'in' after variable")?;
+
+                    // Fill buffer with source expression tokens
+                    let skip = self.skip_comprehension_condition()?;
+                    let source_checkpoint = self.parser.save_checkpoint();
+
+                    for _ in 0..skip {
+                        self.parser.advance()?;
+                    }
+
+                    clauses.push(ComprehensionClause::For {
+                        var_name,
+                        source_checkpoint,
+                        span: current.span.clone(),
+                    });
+                }
+                Token::If => {
+                    self.parser.advance()?; // consume 'if'
+
+                    // Fill buffer with condition expression tokens
+                    let skip = self.skip_comprehension_condition()?;
+                    let condition_checkpoint = self.parser.save_checkpoint();
+
+                    for _ in 0..skip {
+                        self.parser.advance()?;
+                    }
+                    clauses.push(ComprehensionClause::If {
+                        condition_checkpoint,
+                        span: current.span.clone(),
+                    });
+                }
+                Token::RightBracket => {
+                    break;
+                }
+                _ => {
+                    return Err(self.make_error(
+                        current.span.clone(),
+                        "Expected 'for', 'if', or ']'".to_string(),
+                    ));
+                }
             }
-        } else {
-            return Err(self.unexpected_eof_error(span));
-        };
-        self.parser.advance()?; // consume variable name
+        }
 
-        // Expect 'in'
-        self.parser
-            .consume(Token::In, "Expected 'in' after variable")?;
-
-        // Now we've consumed through 'in', commit the buffer
-        // so nested parsing doesn't get confused by stale lookahead tokens
-        self.parser.commit();
-
-        // Enter a scope for the comprehension state
-        self.begin_scope();
-
-        // Parse source array expression and declare as hidden local
-        self.parse_expr(0, memory_manager)?;
-        self.declare_local("__comp_source".to_string())?;
-        let source_slot = self.locals.len() - 1;
-        // Stack: [source]
-
-        // Dup source and get length, declare as hidden local
-        self.compiling_chunk
-            .write_opcode_u16(Opcode::LoadVar, source_slot as u16, span.clone());
-        self.emit_opcode(Opcode::ArrayLength, span.clone());
-        self.declare_local("__comp_length".to_string())?;
-        let length_slot = self.locals.len() - 1;
-        // Stack: [source, length]
-
-        // Create empty result array, declare as hidden local
-        self.compiling_chunk
-            .write_opcode_u16(Opcode::CreateArray, 0, span.clone());
-        self.declare_local("__comp_result".to_string())?;
-        let result_slot = self.locals.len() - 1;
-        // Stack: [source, length, result]
-
-        // Push initial counter = 0, declare as hidden local
-        self.emit_constant(0.0)?;
-        self.declare_local("__comp_counter".to_string())?;
-        let counter_slot = self.locals.len() - 1;
-        // Stack: [source, length, result, counter]
-
-        // Consume ']' that closes the comprehension
+        // Consume the closing ']'
         self.parser.consume(
             Token::RightBracket,
             "Expected ']' to close array comprehension",
@@ -1277,115 +1354,217 @@ impl<'a> Compiler<'a> {
         // Save checkpoint position for after the comprehension
         let source_end_checkpoint = self.parser.save_checkpoint();
 
-        // Now emit the loop
-        // LOOP_START:
-        let loop_start = self.compiling_chunk.count();
+        // Commit the buffer so nested parsing doesn't get confused
+        self.parser.commit();
 
-        // Check: counter < length
-        self.compiling_chunk
-            .write_opcode_u16(Opcode::LoadVar, counter_slot as u16, span.clone());
-        self.compiling_chunk
-            .write_opcode_u16(Opcode::LoadVar, length_slot as u16, span.clone());
-        self.emit_opcode(Opcode::Lt, span.clone());
-
-        // JumpIfFalse to end
-        let jump_to_end = self.emit_jump(Opcode::JumpIfFalse, span.clone());
-
-        // Get element: source[counter]
-        self.compiling_chunk
-            .write_opcode_u16(Opcode::LoadVar, source_slot as u16, span.clone());
-        self.compiling_chunk
-            .write_opcode_u16(Opcode::LoadVar, counter_slot as u16, span.clone());
-        self.emit_opcode(Opcode::ArrayIndex, span.clone());
-        // Stack: [source, length, result, counter, element]
-
-        // Enter scope and declare loop variable
+        // Enter a scope for the comprehension state (result array and source loops)
         self.begin_scope();
-        self.declare_local(var_name)?;
-        // element is now bound to var_name
 
-        // Restore parser to body expression and parse it
-        self.parser.restore_checkpoint(body_checkpoint);
-
-        // Parse body expression (with loop variable in scope)
-        self.parse_expr(0, memory_manager)?;
-        // Stack: [source, length, result, counter, element, body_value]
-
-        // End scope for loop variable - this pops element
-        self.end_scope();
-        // Stack: [source, length, result, counter, body_value]
-
-        // Append body_value to result
+        // Create empty result array, declare as hidden local
         self.compiling_chunk
-            .write_opcode_u16(Opcode::LoadVar, result_slot as u16, span.clone());
-        self.emit_opcode(Opcode::Swap, span.clone());
-        self.emit_opcode(Opcode::ArrayAppend, span.clone());
-        // Stack: [source, length, result, counter, new_result]
+            .write_opcode_u16(Opcode::CreateArray, 0, span.clone());
+        self.declare_local("__comp_result".to_string())?;
+        let result_slot = self.locals.len() - 1;
+        // Stack: [result]
 
-        // Store new_result back to result slot
-        self.emit_store_var(result_slot, span.clone());
-        // Stack: [source, length, result, counter]
+        // Now emit the nested loops/conditions recursively
+        self.emit_comprehension_clauses(
+            &clauses,
+            0,
+            body_checkpoint,
+            result_slot,
+            memory_manager,
+            &span,
+        )?;
 
-        // Increment counter
-        self.compiling_chunk
-            .write_opcode_u16(Opcode::LoadVar, counter_slot as u16, span.clone());
-        self.emit_constant(1.0)?;
-        self.emit_opcode(Opcode::Add, span.clone());
-        // Stack: [source, length, result, counter, new_counter]
-
-        // Store new_counter back to counter slot
-        self.emit_store_var(counter_slot, span.clone());
-        // Stack: [source, length, result, counter]
-
-        // Jump back to loop start
-        let jump_back_offset = self.compiling_chunk.count();
-        self.emit_opcode(Opcode::Jump, span.clone());
-        let back_offset = loop_start as i32 - (jump_back_offset as i32 + 1 + 4); // opcode + i32
-        self.emit_i32(back_offset);
-
-        // LOOP_END:
-        self.patch_jump(jump_to_end);
-        // Stack: [source, length, result, counter]
+        // Pop the dummy value left by recursion
+        self.emit_opcode(Opcode::Pop, span.clone());
 
         // Load result before we clean up
         self.compiling_chunk
             .write_opcode_u16(Opcode::LoadVar, result_slot as u16, span.clone());
-        // Stack: [source, length, result, counter, result]
-
-        // End the comprehension scope - this will clean up all hidden locals
-        // but we need to preserve the result on top
-        // Pop counter
-        self.emit_opcode(Opcode::Swap, span.clone());
-        self.emit_opcode(Opcode::Pop, span.clone());
-        // Stack: [source, length, result, result]
-
-        // Pop result (the original slot)
-        self.emit_opcode(Opcode::Swap, span.clone());
-        self.emit_opcode(Opcode::Pop, span.clone());
-        // Stack: [source, length, result]
-
-        // Pop length
-        self.emit_opcode(Opcode::Swap, span.clone());
-        self.emit_opcode(Opcode::Pop, span.clone());
-        // Stack: [source, result]
-
-        // Pop source
-        self.emit_opcode(Opcode::Swap, span.clone());
-        self.emit_opcode(Opcode::Pop, span.clone());
-        // Stack: [result]
-
-        // Manually remove the hidden locals from tracking (we've already popped them)
-        // Pop them in reverse order of declaration
-        self.locals.pop(); // counter
-        self.locals.pop(); // result
-        self.locals.pop(); // length
-        self.locals.pop(); // source
 
         // End the comprehension scope
-        self.scope_depth -= 1;
+        self.end_scope();
 
         // Restore parser to after the comprehension
         self.parser.restore_checkpoint(source_end_checkpoint);
+
+        Ok(())
+    }
+
+    /// Recursively emit code for comprehension clauses
+    fn emit_comprehension_clauses(
+        &mut self,
+        clauses: &[ComprehensionClause],
+        clause_idx: usize,
+        body_checkpoint: ParserCheckpoint,
+        result_slot: usize,
+        memory_manager: &mut MemoryManager,
+        span: &Range<usize>,
+    ) -> Result<(), CompilerError> {
+        if clause_idx >= clauses.len() {
+            // All clauses emitted, now emit the body evaluation and append
+            // Restore parser to body expression
+            self.parser.restore_checkpoint(body_checkpoint);
+            self.parse_expr(0, memory_manager)?;
+
+            // Append body_value to result
+            self.compiling_chunk.write_opcode_u16(
+                Opcode::LoadVar,
+                result_slot as u16,
+                span.clone(),
+            );
+            self.emit_opcode(Opcode::Swap, span.clone());
+            self.emit_opcode(Opcode::ArrayAppend, span.clone());
+
+            // Store new_result back to result slot
+            self.emit_store_var(result_slot, span.clone());
+
+            // Push dummy value for end_scope
+            self.emit_opcode(Opcode::LoadNull, span.clone());
+
+            return Ok(());
+        }
+
+        match &clauses[clause_idx] {
+            ComprehensionClause::For {
+                var_name,
+                source_checkpoint,
+                span: clause_span,
+            } => {
+                // Parse source array expression
+                self.parser.restore_checkpoint(source_checkpoint.clone());
+                self.parse_expr(0, memory_manager)?;
+
+                // Enter a scope for the loop state
+                self.begin_scope();
+
+                self.declare_local("__comp_source".to_string())?;
+                let source_slot = self.locals.len() - 1;
+
+                // Dup source and get length, declare as hidden local
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    source_slot as u16,
+                    clause_span.clone(),
+                );
+                self.emit_opcode(Opcode::ArrayLength, clause_span.clone());
+                self.declare_local("__comp_length".to_string())?;
+                let length_slot = self.locals.len() - 1;
+
+                // Push initial counter = 0, declare as hidden local
+                self.emit_constant(0.0)?;
+                self.declare_local("__comp_counter".to_string())?;
+                let counter_slot = self.locals.len() - 1;
+
+                // LOOP_START:
+                let loop_start = self.compiling_chunk.count();
+
+                // Check: counter < length
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    counter_slot as u16,
+                    clause_span.clone(),
+                );
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    length_slot as u16,
+                    clause_span.clone(),
+                );
+                self.emit_opcode(Opcode::Lt, clause_span.clone());
+
+                // JumpIfFalse to end
+                let jump_to_end = self.emit_jump(Opcode::JumpIfFalse, clause_span.clone());
+
+                // Get element: source[counter]
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    source_slot as u16,
+                    clause_span.clone(),
+                );
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    counter_slot as u16,
+                    clause_span.clone(),
+                );
+                self.emit_opcode(Opcode::ArrayIndex, clause_span.clone());
+
+                // Enter scope and declare loop variable
+                self.begin_scope();
+                self.declare_local(var_name.clone())?;
+
+                // Recurse to next clause
+                self.emit_comprehension_clauses(
+                    clauses,
+                    clause_idx + 1,
+                    body_checkpoint,
+                    result_slot,
+                    memory_manager,
+                    span,
+                )?;
+
+                // End scope for loop variable
+                self.end_scope();
+                // Pop the dummy value from recursion
+                self.emit_opcode(Opcode::Pop, span.clone());
+
+                // Increment counter
+                self.compiling_chunk.write_opcode_u16(
+                    Opcode::LoadVar,
+                    counter_slot as u16,
+                    clause_span.clone(),
+                );
+                self.emit_constant(1.0)?;
+                self.emit_opcode(Opcode::Add, clause_span.clone());
+                self.emit_store_var(counter_slot, clause_span.clone());
+
+                // Jump back to loop start
+                let jump_back_offset = self.compiling_chunk.count();
+                self.emit_opcode(Opcode::Jump, clause_span.clone());
+                let back_offset = loop_start as i32 - (jump_back_offset as i32 + 1 + 4);
+                self.emit_i32(back_offset);
+
+                // LOOP_END:
+                self.patch_jump(jump_to_end);
+
+                // Push dummy value for end_scope of loop state
+                self.emit_opcode(Opcode::LoadNull, clause_span.clone());
+
+                // End scope for loop state
+                self.end_scope();
+            }
+            ComprehensionClause::If {
+                condition_checkpoint,
+                span: clause_span,
+            } => {
+                // Restore parser to condition expression
+                self.parser.restore_checkpoint(condition_checkpoint.clone());
+                self.parse_expr(0, memory_manager)?;
+
+                // JumpIfFalse to skip this entire branch
+                let skip_jump = self.emit_jump(Opcode::JumpIfFalse, clause_span.clone());
+
+                // Recurse to next clause
+                self.emit_comprehension_clauses(
+                    clauses,
+                    clause_idx + 1,
+                    body_checkpoint,
+                    result_slot,
+                    memory_manager,
+                    span,
+                )?;
+
+                let end_if_jump = self.emit_jump(Opcode::Jump, clause_span.clone());
+
+                // Target for skip_jump
+                self.patch_jump(skip_jump);
+                // Push dummy value for false path
+                self.emit_opcode(Opcode::LoadNull, clause_span.clone());
+
+                self.patch_jump(end_if_jump);
+            }
+        }
 
         Ok(())
     }
@@ -2232,5 +2411,50 @@ mod tests {
         assert_eq!(chunk.constants.len(), 3);
         // Verify order of operations: LoadConst(1), LoadConst(2), Add, LoadConst(3), Shl
         assert!(chunk.code.len() > 0);
+    }
+
+    #[test]
+    fn test_skip_comprehension_condition() {
+        // Test simple condition ending with ]
+        let mut scanner = Scanner::new("x == 1]", "test");
+        let mut compiler = Compiler::new(&mut scanner, "test");
+        // Start parsing to prime the parser
+        let _ = compiler.parser.advance();
+        let skip = compiler.skip_comprehension_condition().unwrap();
+        assert_eq!(skip, 3); // x, ==, 1 (stops at ])
+
+        // Test condition ending with 'if'
+        let mut scanner2 = Scanner::new("x == 1 if y == 2]", "test");
+        let mut compiler2 = Compiler::new(&mut scanner2, "test");
+        let _ = compiler2.parser.advance();
+        let skip2 = compiler2.skip_comprehension_condition().unwrap();
+        assert_eq!(skip2, 3); // x, ==, 1 (stops at if)
+
+        // Test condition ending with 'for'
+        let mut scanner3 = Scanner::new("x == 1 for y in z]", "test");
+        let mut compiler3 = Compiler::new(&mut scanner3, "test");
+        let _ = compiler3.parser.advance();
+        let skip3 = compiler3.skip_comprehension_condition().unwrap();
+        assert_eq!(skip3, 3); // x, ==, 1 (stops at for)
+
+        // Test condition with nested brackets
+        let mut scanner4 = Scanner::new("x in [1, 2, 3]]", "test");
+        let mut compiler4 = Compiler::new(&mut scanner4, "test");
+        let _ = compiler4.parser.advance();
+        let skip4 = compiler4.skip_comprehension_condition().unwrap();
+        // Tokens: x, in, [, 1, ,, 2, ,, 3, ]
+        // Stops at the final ] which is at depth 0
+        assert_eq!(skip4, 9);
+
+        // Test condition with nested brackets containing 'if' and 'for'
+        let mut scanner5 = Scanner::new("x in [if true then 1, for i in []]]", "test");
+        let mut compiler5 = Compiler::new(&mut scanner5, "test");
+        let _ = compiler5.parser.advance();
+        let skip5 = compiler5.skip_comprehension_condition().unwrap();
+        // It shouldn't stop at 'if' or 'for' or the inner ']' because depth > 0.
+        // It should stop at the final ']' where depth becomes 0 again.
+        // Tokens: x, in, [, if, true, then, 1, ,, for, i, in, [, ], ], ]
+        // Note: the last ] is what it stops AT.
+        assert_eq!(skip5, 14);
     }
 }

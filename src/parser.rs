@@ -127,8 +127,8 @@ impl<'a> Parser<'a> {
         }
 
         // For n > 0, we need to look in the buffer
-        // Buffer index is n-1 (since buffer starts at current+1)
-        let buffer_index = n - 1;
+        // Buffer index starts from buffer_position
+        let buffer_index = self.buffer_position + n - 1;
 
         // Check if we already have EOF in the buffer - can't look past it
         if let Some(last) = self.token_buffer.last() {
@@ -194,7 +194,7 @@ impl<'a> Parser<'a> {
 }
 
 /// Checkpoint for parser state, used for backtracking
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ParserCheckpoint {
     previous_token: Option<TokenInfo>,
     current_token: Option<TokenInfo>,

@@ -162,6 +162,7 @@ pub enum Opcode {
     BitAnd = 62,
     BitXor = 63,
     BitOr = 64,
+    Mod = 65,
     StringConcat = 67,
 
     // Unary Operators
@@ -234,6 +235,7 @@ impl Opcode {
             62 => Some(Opcode::BitAnd),
             63 => Some(Opcode::BitXor),
             64 => Some(Opcode::BitOr),
+            65 => Some(Opcode::Mod),
             67 => Some(Opcode::StringConcat),
             70 => Some(Opcode::Neg),
             71 => Some(Opcode::Pos),

@@ -573,6 +573,22 @@ impl VirtualMachine {
                     self.advance_pc();
                 }
 
+                Opcode::Mod => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    let b_num = self.to_number(b)?;
+                    if b_num == 0.0 {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Modulo by zero".to_string(),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+                    let result = self.to_number(a)? % b_num;
+                    self.push(Value::Number(result))?;
+                    self.advance_pc();
+                }
+
                 // Comparison operations
                 Opcode::Lt => {
                     let b = self.pop()?;
