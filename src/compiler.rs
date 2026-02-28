@@ -1100,6 +1100,9 @@ impl<'a> Compiler<'a> {
                     Token::RightBrace => {
                         break; // End of object
                     }
+                    Token::Eof => {
+                        return Err(self.unexpected_eof_error(current.span.clone()));
+                    }
                     _ => {
                         return Err(self.make_error(
                             current.span.clone(),
@@ -1220,6 +1223,9 @@ impl<'a> Compiler<'a> {
                     }
                     Token::RightBracket => {
                         break; // End of array
+                    }
+                    Token::Eof => {
+                        return Err(self.unexpected_eof_error(current.span.clone()));
                     }
                     _ => {
                         return Err(self.make_error(
@@ -1979,6 +1985,9 @@ impl<'a> Compiler<'a> {
                     Token::Semicolon => {
                         self.parser.advance()?; // consume ';'
                         break; // Done with bindings
+                    }
+                    Token::Eof => {
+                        return Err(self.unexpected_eof_error(token.span.clone()));
                     }
                     _ => {
                         return Err(self.make_error(

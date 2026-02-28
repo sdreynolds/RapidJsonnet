@@ -89,20 +89,34 @@ fn repl_mode() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Examples: 42, 3 + 4, -5 * (10 + 2), (1 + 2) * 3");
 
+    let mut buffer = String::new();
+
     loop {
-        print!("jsonnet> ");
+        if buffer.is_empty() {
+            print!("jsonnet> ");
+        } else {
+            print!("...> ");
+        }
         io::stdout().flush()?;
 
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
             Ok(0) => break, // EOF
             Ok(_) => {
-                let input = input.trim();
-                if input.is_empty() {
+                if buffer.is_empty() && input.trim().is_empty() {
                     continue;
                 }
 
-                compile_and_execute_repl(input);
+                buffer.push_str(&input);
+
+                match process_repl_input(&buffer) {
+                    ReplResult::Incomplete => {
+                        continue;
+                    }
+                    _ => {
+                        buffer.clear();
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("Error reading input: {}", e);
@@ -114,8 +128,54 @@ fn repl_mode() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn compile_and_execute_repl(input: &str) {
-    if let Err(e) = compile_and_execute(input, "repl") {
-        eprintln!("Failed to process input: {}", e);
+enum ReplResult {
+    Success,
+    Incomplete,
+    Error,
+}
+
+fn process_repl_input(content: &str) -> ReplResult {
+    let source_id = "repl";
+    let source = Source::from(content);
+
+    let mut scanner = Scanner::new(content, source_id);
+    let mut memory_manager = MemoryManager::new();
+    let compiler = Compiler::new(&mut scanner, source_id);
+    
+    match compiler.compile(&mut memory_manager) {
+        Ok(chunk) => {
+            println!("✅ Compilation successful!");
+            println!(
+                "📊 Generated {} bytes of bytecode with {} constants",
+                chunk.code.len(),
+                chunk.constants.len()
+            );
+
+            let debug_report = chunk.debug_compilation();
+            let _ = debug_report.print((source_id, &source));
+
+            match execute(chunk, memory_manager) {
+                Ok(result) => {
+                    println!("🎯 Execution result: {}", result);
+                    ReplResult::Success
+                }
+                Err(runtime_error) => {
+                    println!("❌ Runtime error during execution:");
+                    let report = runtime_error.into_report();
+                    let _ = report.print((source_id, &source));
+                    ReplResult::Error
+                }
+            }
+        }
+        Err(compile_error) => {
+            if compile_error.is_incomplete_input() {
+                return ReplResult::Incomplete;
+            }
+            
+            println!("❌ Compilation failed:");
+            let report = compile_error.into_report();
+            let _ = report.print((source_id, &source));
+            ReplResult::Error
+        }
     }
 }

@@ -60,6 +60,14 @@ pub struct ScanError {
 }
 
 impl ScanError {
+    pub fn is_incomplete_input(&self) -> bool {
+        let msg = self.message.to_lowercase();
+        msg.contains("unexpected end of input")
+            || msg.contains("unterminated")
+            || msg.contains("starting with eof")
+            || msg.contains("found eof")
+    }
+
     pub fn into_report(&self) -> Report<'static, (&str, Range<usize>)> {
         let color = ariadne::Color::Red;
 
