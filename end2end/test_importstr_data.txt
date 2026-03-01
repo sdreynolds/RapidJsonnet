@@ -1,0 +1,4 @@
+Hello, this is a test for importstr!
+It has multiple lines.
+12345
+Bye.

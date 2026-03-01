@@ -1400,6 +1400,55 @@ impl VirtualMachine {
                     self.push(Value::Import(import_idx))?;
                 }
 
+                Opcode::ImportStr => {
+                    // Read constant index, which points to a string constant (the path)
+                    let const_idx = self.read_u16_operand()?;
+
+                    let path_str_idx = match self.current_chunk().constants.get(const_idx as usize)
+                    {
+                        Some(Value::String(idx)) => *idx,
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "ImportStr operand must be a string constant".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    };
+
+                    let path_str = self.memory_manager.load_string(path_str_idx).to_string();
+
+                    // Resolve the path relative to the current chunk's source_id
+                    let current_dir = std::path::Path::new(&self.current_chunk().source_id)
+                        .parent()
+                        .unwrap_or(std::path::Path::new(""));
+                    let target_path = current_dir.join(&path_str);
+                    let target_path_str = target_path.to_string_lossy().to_string();
+
+                    // Read the file content
+                    let content =
+                        std::fs::read_to_string(&target_path_str).map_err(|e| RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!("Failed to read file '{}': {}", target_path_str, e),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        })?;
+
+                    // Allocate content as string
+                    let allocation_result = self.memory_manager.allocate_string(&content);
+                    self.push(Value::String(allocation_result.index))?;
+
+                    if allocation_result.should_garbage_collect {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[VirtualMachine] Running GC at PC={} (ImportStr allocation)",
+                                self.current_frame().ip
+                            );
+                        }
+                        self.run_garbage_collection();
+                    }
+                }
+
                 // Jump opcodes
                 Opcode::Jump => {
                     let offset = self.read_i32_operand()?;

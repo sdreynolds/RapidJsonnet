@@ -302,16 +302,16 @@ impl<'a> Compiler<'a> {
                 self.push_type(ExpressionType::Null);
                 self.parser.advance()?;
             }
-            Token::Import => {
+            Token::Import | Token::ImportStr => {
+                let is_import_str = matches!(token.token, Token::ImportStr);
+                let keyword_len = if is_import_str { 9 } else { 6 };
                 let start_span = token.span.start;
-                self.parser.advance()?; // consume 'import'
+                self.parser.advance()?; // consume 'import' or 'importstr'
 
                 // Expect a string literal next
-                let path_token = self
-                    .parser
-                    .current_token()
-                    .cloned()
-                    .ok_or_else(|| self.unexpected_eof_error(start_span..start_span + 6))?;
+                let path_token = self.parser.current_token().cloned().ok_or_else(|| {
+                    self.unexpected_eof_error(start_span..start_span + keyword_len)
+                })?;
 
                 match &path_token.token {
                     Token::String(path) => {
@@ -327,25 +327,36 @@ impl<'a> Compiler<'a> {
                         let const_index =
                             self.add_constant_pooled(Value::String(allocation_result.index))?;
 
-                        // Span covers from 'import' to the end of the string
+                        // Span covers from 'import'/'importstr' to the end of the string
                         let full_span = start_span..path_token.span.end;
 
-                        // Emit Import opcode with the constant pool index
+                        // Emit Import/ImportStr opcode with the constant pool index
                         self.compiling_chunk.write_opcode_u16(
-                            Opcode::Import,
+                            if is_import_str {
+                                Opcode::ImportStr
+                            } else {
+                                Opcode::Import
+                            },
                             const_index,
                             full_span,
                         );
 
                         // The import evaluates to an unknown type at compile time
-                        self.push_type(ExpressionType::Unknown);
+                        // unless it is importstr, which is always a string
+                        if is_import_str {
+                            self.push_type(ExpressionType::String);
+                        } else {
+                            self.push_type(ExpressionType::Unknown);
+                        }
                         self.parser.advance()?; // consume string
                     }
                     _ => {
-                        return Err(self.make_error(
-                            path_token.span,
-                            "Expected string literal after 'import'".to_string(),
-                        ));
+                        let msg = if is_import_str {
+                            "Expected string literal after 'importstr'"
+                        } else {
+                            "Expected string literal after 'import'"
+                        };
+                        return Err(self.make_error(path_token.span, msg.to_string()));
                     }
                 }
             }
