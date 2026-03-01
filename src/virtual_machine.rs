@@ -1,8 +1,10 @@
 use chunk::{
     Chunk, ClosureIndex, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, OwnedChunk,
-    RuntimeError, Value,
+    RuntimeError, StringIndex, UpvalueIndex, Value,
 };
-use memory_manager::{MemoryManager, UpvalueIndex};
+use compiler;
+use memory_manager::MemoryManager;
+use scanner;
 use std::ops::Range;
 
 /// Maximum number of nested function calls
@@ -118,6 +120,12 @@ impl VirtualMachine {
             message: "Stack underflow - attempted to pop from empty stack".to_string(),
             source_id: self.current_chunk().source_id.to_string(),
         })
+    }
+
+    /// Pop a value and immediately force it if it's an Import Thunk
+    fn pop_forced(&mut self) -> Result<Value, RuntimeError> {
+        let val = self.pop()?;
+        self.force_value(val)
     }
 
     /// Peek at the top value without popping
@@ -339,6 +347,138 @@ impl VirtualMachine {
         new_upvalue_index
     }
 
+    pub fn force_value(&mut self, val: Value) -> Result<Value, RuntimeError> {
+        if let Value::Import(import_idx) = val {
+            // 1. Initial checks and set evaluating flag
+            let (target_path_str, already_cached) = {
+                let import = self.memory_manager.load_import(import_idx);
+
+                // Check if already cached
+                if let Some(cached) = import.cached_result {
+                    return Ok(cached);
+                }
+
+                // Detect cyclic imports
+                if import.evaluating.get() {
+                    let path_str_idx = import.path;
+                    let path_str = self.memory_manager.load_string(path_str_idx).to_string();
+                    return Err(RuntimeError {
+                        span: self.get_current_span(),
+                        message: format!(
+                            "Cyclic import detected: file '{}' is already being evaluated",
+                            path_str
+                        ),
+                        source_id: self.current_chunk().source_id.to_string(),
+                    });
+                }
+
+                // Mark as evaluating
+                import.evaluating.set(true);
+
+                let path_str_idx = import.path;
+                (
+                    self.memory_manager.load_string(path_str_idx).to_string(),
+                    false,
+                )
+            };
+
+            if already_cached {
+                return Ok(self
+                    .memory_manager
+                    .load_import(import_idx)
+                    .cached_result
+                    .unwrap());
+            }
+
+            // 2. Read the file
+            let content = match std::fs::read_to_string(&target_path_str) {
+                Ok(content) => content,
+                Err(e) => {
+                    self.memory_manager
+                        .load_import(import_idx)
+                        .evaluating
+                        .set(false);
+                    return Err(RuntimeError {
+                        span: self.get_current_span(),
+                        message: format!(
+                            "Failed to read imported file '{}': {}",
+                            target_path_str, e
+                        ),
+                        source_id: self.current_chunk().source_id.to_string(),
+                    });
+                }
+            };
+
+            // Protect the current VM roots from GC during nested compilation and execution
+            let mut roots = Vec::from(self.stack.clone());
+            roots.push(val); // Protect the value we are currently forcing
+            for i in 0..self.frame_count {
+                roots.push(Value::Closure(self.frames[i].closure));
+            }
+
+            let mut open_upvalue_roots = Vec::new();
+            let mut upvalue = self.open_upvalues;
+            while let Some(upvalue_index) = upvalue {
+                open_upvalue_roots.push(upvalue_index);
+                upvalue = self.memory_manager.load_upvalue(upvalue_index).next;
+            }
+
+            self.memory_manager
+                .push_external_roots(roots, open_upvalue_roots);
+
+            // 3. Compile the file
+            let mut scanner = scanner::Scanner::new(&content, &target_path_str);
+            let compiler = compiler::Compiler::new(&mut scanner, &target_path_str);
+            let chunk = match compiler.compile(&mut self.memory_manager) {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    self.memory_manager.pop_external_roots();
+                    self.memory_manager
+                        .load_import(import_idx)
+                        .evaluating
+                        .set(false);
+                    return Err(RuntimeError {
+                        span: self.get_current_span(),
+                        message: format!(
+                            "Failed to compile imported file '{}': {:?}",
+                            target_path_str, e
+                        ),
+                        source_id: self.current_chunk().source_id.to_string(),
+                    });
+                }
+            };
+
+            // 4. Execute the chunk
+            let dummy_memory_manager = memory_manager::MemoryManager::new();
+            let actual_memory_manager =
+                std::mem::replace(&mut self.memory_manager, dummy_memory_manager);
+
+            let mut sub_vm = VirtualMachine::new(chunk, actual_memory_manager);
+            let result = sub_vm.interpret();
+
+            self.memory_manager = sub_vm.memory_manager;
+            self.memory_manager.pop_external_roots();
+
+            match result {
+                Ok(evaluated_value) => {
+                    let import = self.memory_manager.load_import_mut(import_idx);
+                    import.cached_result = Some(evaluated_value);
+                    import.evaluating.set(false);
+                    Ok(evaluated_value)
+                }
+                Err(e) => {
+                    self.memory_manager
+                        .load_import_mut(import_idx)
+                        .evaluating
+                        .set(false);
+                    Err(e)
+                }
+            }
+        } else {
+            Ok(val)
+        }
+    }
+
     /// Main interpretation loop
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
         loop {
@@ -419,10 +559,8 @@ impl VirtualMachine {
 
                 // Binary arithmetic operations
                 Opcode::Add => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-
-                    eprintln!("[VM] Add: a={:?}, b={:?}", a, b);
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
 
                     // Check for different addition types
                     match (&a, &b) {
@@ -508,7 +646,8 @@ impl VirtualMachine {
                                 Value::Object(_)
                                 | Value::Array(_)
                                 | Value::Function(_)
-                                | Value::Closure(_) => unreachable!(),
+                                | Value::Closure(_)
+                                | Value::Import(_) => unreachable!(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
@@ -518,7 +657,8 @@ impl VirtualMachine {
                                 Value::Object(_)
                                 | Value::Array(_)
                                 | Value::Function(_)
-                                | Value::Closure(_) => unreachable!(),
+                                | Value::Closure(_)
+                                | Value::Import(_) => unreachable!(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -544,24 +684,24 @@ impl VirtualMachine {
                 }
 
                 Opcode::Sub => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = self.to_number(a)? - self.to_number(b)?;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::Mul => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = self.to_number(a)? * self.to_number(b)?;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::Div => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let b_num = self.to_number(b)?;
                     if b_num == 0.0 {
                         return Err(RuntimeError {
@@ -576,8 +716,8 @@ impl VirtualMachine {
                 }
 
                 Opcode::Mod => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let b_num = self.to_number(b)?;
                     if b_num == 0.0 {
                         return Err(RuntimeError {
@@ -593,32 +733,32 @@ impl VirtualMachine {
 
                 // Comparison operations
                 Opcode::Lt => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = self.to_number(a)? < self.to_number(b)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::Le => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = self.to_number(a)? <= self.to_number(b)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::Gt => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = self.to_number(a)? > self.to_number(b)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::Ge => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = self.to_number(a)? >= self.to_number(b)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
@@ -626,16 +766,16 @@ impl VirtualMachine {
 
                 // Equality operations
                 Opcode::Eq => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = self.values_equal(&a, &b);
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::Ne => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = !self.values_equal(&a, &b);
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
@@ -643,8 +783,8 @@ impl VirtualMachine {
 
                 // String operations
                 Opcode::StringConcat => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
 
                     // @TODO: actually benchmark this optimization. First glance doesn't look like an improvement.
                     // Optimized string concatenation - assumes both are strings
@@ -680,6 +820,7 @@ impl VirtualMachine {
                                 Value::Array(_) => "{array}".to_string(),
                                 Value::Function(_) => "{function}".to_string(),
                                 Value::Closure(_) => "{closure}".to_string(),
+                                Value::Import(_) => "{import}".to_string(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
@@ -690,6 +831,7 @@ impl VirtualMachine {
                                 Value::Array(_) => "{array}".to_string(),
                                 Value::Function(_) => "{function}".to_string(),
                                 Value::Closure(_) => "{closure}".to_string(),
+                                Value::Import(_) => "{import}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -711,8 +853,8 @@ impl VirtualMachine {
 
                 // Bitwise operations
                 Opcode::Shl => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let shift_count = (self.to_integer(b)? % 64) as u32;
                     if shift_count >= 64 {
                         return Err(RuntimeError {
@@ -727,8 +869,8 @@ impl VirtualMachine {
                 }
 
                 Opcode::Shr => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let shift_count = (self.to_integer(b)? % 64) as u32;
                     let result = (self.to_integer(a)? >> shift_count) as f64;
                     self.push(Value::Number(result))?;
@@ -736,24 +878,24 @@ impl VirtualMachine {
                 }
 
                 Opcode::BitAnd => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = (self.to_integer(a)? & self.to_integer(b)?) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::BitXor => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = (self.to_integer(a)? ^ self.to_integer(b)?) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::BitOr => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
+                    let b = self.pop_forced()?;
+                    let a = self.pop_forced()?;
                     let result = (self.to_integer(a)? | self.to_integer(b)?) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
@@ -761,28 +903,28 @@ impl VirtualMachine {
 
                 // Unary operations
                 Opcode::Neg => {
-                    let a = self.pop()?;
+                    let a = self.pop_forced()?;
                     let result = -self.to_number(a)?;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::Pos => {
-                    let a = self.pop()?;
+                    let a = self.pop_forced()?;
                     let result = self.to_number(a)?; // Unary + is essentially a no-op for numbers
                     self.push(Value::Number(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::Not => {
-                    let a = self.pop()?;
-                    let result = !self.is_truthy(a);
+                    let a = self.pop_forced()?;
+                    let result = !self.is_truthy(a)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
 
                 Opcode::BitNot => {
-                    let a = self.pop()?;
+                    let a = self.pop_forced()?;
                     let result = (!self.to_integer(a)?) as f64;
                     self.push(Value::Number(result))?;
                     self.advance_pc();
@@ -974,8 +1116,8 @@ impl VirtualMachine {
                 }
 
                 Opcode::ObjectIndex => {
-                    let field_name = self.pop()?; // Property name to access
-                    let object_value = self.pop()?; // Object to index into
+                    let field_name = self.pop_forced()?; // Property name to access
+                    let object_value = self.pop_forced()?; // Object to index into
 
                     // Ensure we have an object
                     if let Value::Object(object_key) = object_value {
@@ -1012,8 +1154,8 @@ impl VirtualMachine {
                 }
 
                 Opcode::ArrayIndex => {
-                    let index_value = self.pop()?;
-                    let container_value = self.pop()?;
+                    let index_value = self.pop_forced()?;
+                    let container_value = self.pop_forced()?;
 
                     match container_value {
                         Value::Array(array_key) => {
@@ -1104,7 +1246,7 @@ impl VirtualMachine {
                 }
 
                 Opcode::ArrayLength => {
-                    let array_value = self.pop()?;
+                    let array_value = self.pop_forced()?;
 
                     match array_value {
                         Value::Array(array_key) => {
@@ -1169,8 +1311,8 @@ impl VirtualMachine {
                 }
 
                 Opcode::ObjectMerge => {
-                    let right_value = self.pop()?; // Right-hand side object
-                    let left_value = self.pop()?; // Left-hand side object
+                    let right_value = self.pop_forced()?; // Right-hand side object
+                    let left_value = self.pop_forced()?; // Left-hand side object
 
                     // Ensure both values are objects
                     if let (Value::Object(left_key), Value::Object(right_key)) =
@@ -1229,6 +1371,35 @@ impl VirtualMachine {
                     });
                 }
 
+                Opcode::Import => {
+                    // Read constant index, which points to a string constant (the path)
+                    let const_idx = self.read_u16_operand()?;
+
+                    let path_str_idx = match self.current_chunk().constants.get(const_idx as usize)
+                    {
+                        Some(Value::String(idx)) => *idx,
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Import operand must be a string constant".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    };
+
+                    let path_str = self.memory_manager.load_string(path_str_idx).to_string();
+
+                    // Resolve the path relative to the current chunk's source_id
+                    let current_dir = std::path::Path::new(&self.current_chunk().source_id)
+                        .parent()
+                        .unwrap_or(std::path::Path::new(""));
+                    let target_path = current_dir.join(&path_str);
+                    let target_path_str = target_path.to_string_lossy().to_string();
+
+                    let import_idx = self.memory_manager.allocate_import(&target_path_str).index;
+                    self.push(Value::Import(import_idx))?;
+                }
+
                 // Jump opcodes
                 Opcode::Jump => {
                     let offset = self.read_i32_operand()?;
@@ -1240,7 +1411,7 @@ impl VirtualMachine {
                 Opcode::JumpIfFalse => {
                     let offset = self.read_i32_operand()?;
                     let condition = self.pop()?;
-                    if !self.is_truthy(condition) {
+                    if !self.is_truthy(condition)? {
                         let frame = self.current_frame_mut();
                         frame.ip = (frame.ip as i32 + offset) as usize;
                     }
@@ -1250,7 +1421,7 @@ impl VirtualMachine {
                 Opcode::JumpIfTrue => {
                     let offset = self.read_i32_operand()?;
                     let condition = self.pop()?;
-                    if self.is_truthy(condition) {
+                    if self.is_truthy(condition)? {
                         let frame = self.current_frame_mut();
                         frame.ip = (frame.ip as i32 + offset) as usize;
                     }
@@ -1299,7 +1470,9 @@ impl VirtualMachine {
                         });
                     }
 
-                    let callee = self.stack[callee_position];
+                    let mut callee = self.stack[callee_position];
+                    callee = self.force_value(callee)?;
+                    self.stack[callee_position] = callee; // update stack
 
                     match callee {
                         Value::Closure(closure_index) => {
@@ -1329,7 +1502,8 @@ impl VirtualMachine {
 
                     if is_script_complete {
                         // We've returned from the top-level script
-                        return self.pop();
+                        let val = self.pop();
+                        return val;
                     }
                 }
 
@@ -1536,14 +1710,15 @@ impl VirtualMachine {
 
     /// Convert a VM Value to serde_json::Value for JSON output
     fn value_to_json(
-        &self,
+        &mut self,
         value: &Value,
         visited: &mut std::collections::HashSet<ObjectIndex>,
     ) -> Result<serde_json::Value, RuntimeError> {
+        let value = self.force_value(value.clone())?;
         match value {
             Value::Null => Ok(serde_json::Value::Null),
-            Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
-            Value::Number(n) => serde_json::Number::from_f64(*n)
+            Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
+            Value::Number(n) => serde_json::Number::from_f64(n)
                 .map(serde_json::Value::Number)
                 .ok_or_else(|| RuntimeError {
                     span: 0..0,
@@ -1551,11 +1726,11 @@ impl VirtualMachine {
                     source_id: "serialization".to_string(),
                 }),
             Value::String(s) => Ok(serde_json::Value::String(
-                self.memory_manager.load_string(*s).to_owned(),
+                self.memory_manager.load_string(s).to_owned(),
             )),
             Value::Object(object_key) => {
                 // Check for circular references
-                if visited.contains(object_key) {
+                if visited.contains(&object_key) {
                     return Err(RuntimeError {
                         span: 0..0,
                         message: "Circular reference detected in object".to_string(),
@@ -1563,25 +1738,34 @@ impl VirtualMachine {
                     });
                 }
 
-                visited.insert(*object_key);
+                visited.insert(object_key);
 
-                let object = self.memory_manager.load_object(*object_key);
+                // Clone properties so we don't hold the borrow of memory manager
+                let properties: Vec<(StringIndex, Value)> = self
+                    .memory_manager
+                    .load_object(object_key)
+                    .properties
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect();
+
                 let mut json_object = serde_json::Map::new();
 
-                for (key, value) in &object.properties {
-                    let json_value = self.value_to_json(value, visited)?;
-                    json_object
-                        .insert(self.memory_manager.load_string(*key).to_owned(), json_value);
+                for (key, val) in properties {
+                    let json_value = self.value_to_json(&val, visited)?;
+                    json_object.insert(self.memory_manager.load_string(key).to_owned(), json_value);
                 }
 
-                visited.remove(object_key); // Remove after processing
+                visited.remove(&object_key); // Remove after processing
                 Ok(serde_json::Value::Object(json_object))
             }
             Value::Array(array_key) => {
-                let array = self.memory_manager.load_array(*array_key);
+                let elements: Vec<Value> =
+                    self.memory_manager.load_array(array_key).elements.clone();
+
                 let mut json_array = Vec::new();
 
-                for element in &array.elements {
+                for element in &elements {
                     let json_value = self.value_to_json(element, visited)?;
                     json_array.push(json_value);
                 }
@@ -1596,6 +1780,11 @@ impl VirtualMachine {
             Value::Closure(_) => Err(RuntimeError {
                 span: 0..0,
                 message: "Cannot serialize closure to JSON".to_string(),
+                source_id: "serialization".to_string(),
+            }),
+            Value::Import(_) => Err(RuntimeError {
+                span: 0..0,
+                message: "Cannot serialize unresolved import to JSON".to_string(),
                 source_id: "serialization".to_string(),
             }),
         }
@@ -1622,20 +1811,23 @@ impl VirtualMachine {
             .run_garbage_collect(roots, open_upvalue_roots);
     }
 
-    fn is_truthy(&self, value: Value) -> bool {
+    fn is_truthy(&mut self, value: Value) -> Result<bool, RuntimeError> {
+        let value = self.force_value(value)?;
         match value {
-            Value::Null => false,
-            Value::Boolean(b) => b,
-            Value::Number(n) => n > 0.0,
-            Value::String(s) => self.memory_manager.load_string(s) != "",
-            Value::Object(x) => self.memory_manager.load_object(x).len() > 0,
-            Value::Array(x) => self.memory_manager.load_array(x).len() > 0,
-            Value::Function(_) => true, // Functions are truthy
-            Value::Closure(_) => true,  // Closures are truthy
+            Value::Null => Ok(false),
+            Value::Boolean(b) => Ok(b),
+            Value::Number(n) => Ok(n > 0.0),
+            Value::String(s) => Ok(self.memory_manager.load_string(s) != ""),
+            Value::Object(x) => Ok(self.memory_manager.load_object(x).len() > 0),
+            Value::Array(x) => Ok(self.memory_manager.load_array(x).len() > 0),
+            Value::Function(_) => Ok(true), // Functions are truthy
+            Value::Closure(_) => Ok(true),  // Closures are truthy
+            Value::Import(_) => Ok(true),   // Should be unreachable due to force_value
         }
     }
 
-    fn to_number(&self, value: Value) -> Result<f64, RuntimeError> {
+    fn to_number(&mut self, value: Value) -> Result<f64, RuntimeError> {
+        let value = self.force_value(value)?;
         match value {
             Value::Number(n) => Ok(n),
             Value::String(key) => {
@@ -1657,7 +1849,7 @@ impl VirtualMachine {
         }
     }
 
-    fn to_integer(&self, value: Value) -> Result<i64, RuntimeError> {
+    fn to_integer(&mut self, value: Value) -> Result<i64, RuntimeError> {
         let n = self.to_number(value)?;
         if n.is_nan() || n.is_infinite() {
             Err(RuntimeError {
@@ -1699,15 +1891,15 @@ mod tests {
     fn test_value_truthiness() {
         let chunk = create_test_chunk();
         let memory_manager = MemoryManager::new();
-        let vm = VirtualMachine::new(chunk, memory_manager);
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
 
-        assert!(!vm.is_truthy(Value::Null));
-        assert!(!vm.is_truthy(Value::Boolean(false)));
-        assert!(vm.is_truthy(Value::Boolean(true)));
-        assert!(!vm.is_truthy(Value::Number(0.0)));
-        assert!(vm.is_truthy(Value::Number(1.0)));
-        assert!(!vm.is_truthy(Value::Number(-1.0)));
-        assert!(vm.is_truthy(Value::Number(0.1)));
+        assert!(!vm.is_truthy(Value::Null).unwrap());
+        assert!(!vm.is_truthy(Value::Boolean(false)).unwrap());
+        assert!(vm.is_truthy(Value::Boolean(true)).unwrap());
+        assert!(!vm.is_truthy(Value::Number(0.0)).unwrap());
+        assert!(vm.is_truthy(Value::Number(1.0)).unwrap());
+        assert!(!vm.is_truthy(Value::Number(-1.0)).unwrap());
+        assert!(vm.is_truthy(Value::Number(0.1)).unwrap());
     }
 
     #[test]

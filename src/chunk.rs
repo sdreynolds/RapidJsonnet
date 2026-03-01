@@ -16,6 +16,8 @@ pub type StringIndex = DefaultKey;
 pub type ArrayIndex = DefaultKey;
 pub type FunctionIndex = DefaultKey;
 pub type ClosureIndex = DefaultKey;
+pub type ImportIndex = DefaultKey;
+pub type UpvalueIndex = DefaultKey;
 
 /// Value type for the Jsonnet virtual machine
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,6 +30,7 @@ pub enum Value {
     Array(ArrayIndex),
     Function(FunctionIndex),
     Closure(ClosureIndex),
+    Import(ImportIndex),
 }
 
 // Manual implementation of Eq for Value
@@ -75,6 +78,10 @@ impl std::hash::Hash for Value {
                 7u8.hash(state);
                 key.hash(state);
             }
+            Value::Import(key) => {
+                8u8.hash(state);
+                key.hash(state);
+            }
         }
     }
 }
@@ -102,6 +109,7 @@ impl std::fmt::Display for Value {
             Value::Array(index) => write!(f, "Array[{:?}]", index),
             Value::Function(index) => write!(f, "Function[{:?}]", index),
             Value::Closure(index) => write!(f, "Closure[{:?}]", index),
+            Value::Import(index) => write!(f, "Import[{:?}]", index),
         }
     }
 }
@@ -174,6 +182,7 @@ pub enum Opcode {
     // Standard Library Integration
     StdCall = 80, // operands: u16 function_index, u8 arg_count
     Error = 81,
+    Import = 82, // operand: u16 const_index (pointing to the string path in constant pool)
 
     // Stack Management
     Pop = 90,
@@ -243,6 +252,7 @@ impl Opcode {
             73 => Some(Opcode::BitNot),
             80 => Some(Opcode::StdCall),
             81 => Some(Opcode::Error),
+            82 => Some(Opcode::Import),
             90 => Some(Opcode::Pop),
             91 => Some(Opcode::Dup),
             92 => Some(Opcode::Swap),
@@ -570,17 +580,17 @@ impl<'a> Chunk<'a> {
 
                 // Calculate instruction size and end position
                 let instruction_size = match opcode {
-                    Opcode::LoadConst => 3,                                       // opcode + u16
-                    Opcode::LoadVar => 3,                                         // opcode + u16
-                    Opcode::CreateObject => 3,                                    // opcode + u16
-                    Opcode::CreateArray => 3,                                     // opcode + u16
-                    Opcode::FieldDef => 4,       // opcode + u16 + u8
-                    Opcode::CreateFunction => 6, // opcode + u8 + u32
-                    Opcode::Call => 3,           // opcode + u8 + u8
+                    Opcode::LoadConst | Opcode::Import => 3, // opcode + u16
+                    Opcode::LoadVar => 3,                    // opcode + u16
+                    Opcode::CreateObject => 3,               // opcode + u16
+                    Opcode::CreateArray => 3,                // opcode + u16
+                    Opcode::FieldDef => 4,                   // opcode + u16 + u8
+                    Opcode::CreateFunction => 6,             // opcode + u8 + u32
+                    Opcode::Call => 3,                       // opcode + u8 + u8
                     Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue => 5, // opcode + i32
-                    Opcode::LocalScope => 2,     // opcode + u8
-                    Opcode::StdCall => 4,        // opcode + u16 + u8
-                    Opcode::BindDefault => 3,    // opcode + u16
+                    Opcode::LocalScope => 2,                 // opcode + u8
+                    Opcode::StdCall => 4,                    // opcode + u16 + u8
+                    Opcode::BindDefault => 3,                // opcode + u16
                     Opcode::Closure => {
                         // opcode + u16 (func_idx) + u8 (upvalue_count) + upvalue_count * 3
                         // Each upvalue is: u8 (is_local) + u16 (index)
@@ -629,6 +639,41 @@ impl<'a> Chunk<'a> {
                         } else {
                             format!(
                                 "[{}-{}] ({} bytes) LoadConst: opcode={:02X}@{}",
+                                ip, end_pos, instruction_size, opcode as u8, ip
+                            )
+                        }
+                    }
+                    Opcode::Import => {
+                        if let Some(const_index) = self.read_u16(ip + 1) {
+                            if let Some(value) = self.constants.get(const_index as usize) {
+                                format!(
+                                    "[{}-{}] ({} bytes) Import: opcode={:02X}@{}, operand={:04X}@{}-{}, value={}",
+                                    ip,
+                                    end_pos,
+                                    instruction_size,
+                                    opcode as u8,
+                                    ip,
+                                    const_index,
+                                    ip + 1,
+                                    ip + 2,
+                                    value
+                                )
+                            } else {
+                                format!(
+                                    "[{}-{}] ({} bytes) Import: opcode={:02X}@{}, operand={:04X}@{}-{}",
+                                    ip,
+                                    end_pos,
+                                    instruction_size,
+                                    opcode as u8,
+                                    ip,
+                                    const_index,
+                                    ip + 1,
+                                    ip + 2
+                                )
+                            }
+                        } else {
+                            format!(
+                                "[{}-{}] ({} bytes) Import: opcode={:02X}@{}",
                                 ip, end_pos, instruction_size, opcode as u8, ip
                             )
                         }

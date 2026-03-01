@@ -53,13 +53,15 @@ struct CompilerUpvalue {
 // Enclosing scope state for upvalue resolution during nested function compilation
 // This holds the frozen state of outer scopes needed for closure variable capture
 #[derive(Debug)]
-struct EnclosingScope {
+struct EnclosingScope<'a> {
     locals: Vec<Local>,
     upvalues: Vec<CompilerUpvalue>,
-    enclosing: Option<Box<EnclosingScope>>,
+    enclosing: Option<Box<EnclosingScope<'a>>>,
+    chunk: Chunk<'a>,
+    constant_pool: HashMap<Value, u16>,
 }
 
-impl EnclosingScope {
+impl<'a> EnclosingScope<'a> {
     /// Add an upvalue to this scope's upvalue list
     /// Returns the index of the upvalue (reusing existing entry if found)
     fn add_upvalue(&mut self, index: u8, is_local: bool) -> u8 {
@@ -131,7 +133,7 @@ pub struct Compiler<'a> {
     scope_depth: u32,   // Current scope nesting depth (0 = module level)
     upvalues: Vec<CompilerUpvalue>, // Upvalues for this function
     function_type: FunctionType, // Type of function being compiled
-    enclosing: Option<Box<EnclosingScope>>, // Enclosing scope for upvalue resolution
+    enclosing: Option<Box<EnclosingScope<'a>>>, // Enclosing scope for upvalue resolution
 }
 
 impl<'a> Compiler<'a> {
@@ -275,6 +277,12 @@ impl<'a> Compiler<'a> {
             }
             Token::String(value) => {
                 let allocation_result = memory_manager.allocate_string(value);
+                if allocation_result.should_garbage_collect {
+                    self.run_garbage_collect(
+                        memory_manager,
+                        &[Value::String(allocation_result.index)],
+                    );
+                }
                 self.emit_string_constant(allocation_result.index)?;
                 self.push_type(ExpressionType::String);
                 self.parser.advance()?;
@@ -293,6 +301,53 @@ impl<'a> Compiler<'a> {
                 self.emit_opcode(Opcode::LoadNull, token.span);
                 self.push_type(ExpressionType::Null);
                 self.parser.advance()?;
+            }
+            Token::Import => {
+                let start_span = token.span.start;
+                self.parser.advance()?; // consume 'import'
+
+                // Expect a string literal next
+                let path_token = self
+                    .parser
+                    .current_token()
+                    .cloned()
+                    .ok_or_else(|| self.unexpected_eof_error(start_span..start_span + 6))?;
+
+                match &path_token.token {
+                    Token::String(path) => {
+                        let allocation_result = memory_manager.allocate_string(path);
+                        if allocation_result.should_garbage_collect {
+                            self.run_garbage_collect(
+                                memory_manager,
+                                &[Value::String(allocation_result.index)],
+                            );
+                        }
+
+                        // Add the string to the constant pool and get its u16 index
+                        let const_index =
+                            self.add_constant_pooled(Value::String(allocation_result.index))?;
+
+                        // Span covers from 'import' to the end of the string
+                        let full_span = start_span..path_token.span.end;
+
+                        // Emit Import opcode with the constant pool index
+                        self.compiling_chunk.write_opcode_u16(
+                            Opcode::Import,
+                            const_index,
+                            full_span,
+                        );
+
+                        // The import evaluates to an unknown type at compile time
+                        self.push_type(ExpressionType::Unknown);
+                        self.parser.advance()?; // consume string
+                    }
+                    _ => {
+                        return Err(self.make_error(
+                            path_token.span,
+                            "Expected string literal after 'import'".to_string(),
+                        ));
+                    }
+                }
             }
             Token::Operator(op) if op == "-" => {
                 self.parser.advance()?; // consume the operator
@@ -702,6 +757,9 @@ impl<'a> Compiler<'a> {
         // Allocate function in memory manager
         let func_result =
             memory_manager.allocate_function(None, arity, upvalues.len() as u8, owned_chunk);
+        if func_result.should_garbage_collect {
+            self.run_garbage_collect(memory_manager, &[Value::Function(func_result.index)]);
+        }
 
         // Add function to constants pool
         let func_index = self.add_constant_pooled(Value::Function(func_result.index))?;
@@ -886,6 +944,12 @@ impl<'a> Compiler<'a> {
                     Token::Identifier(name) => {
                         self.parser.advance()?; // consume identifier
                         let allocation_result = memory_manager.allocate_string(name);
+                        if allocation_result.should_garbage_collect {
+                            self.run_garbage_collect(
+                                memory_manager,
+                                &[Value::String(allocation_result.index)],
+                            );
+                        }
 
                         let _index = self.emit_string_constant(allocation_result.index)?;
 
@@ -1039,6 +1103,12 @@ impl<'a> Compiler<'a> {
                 match &key_token.token {
                     Token::String(key_value) => {
                         let allocation_result = memory_manager.allocate_string(key_value);
+                        if allocation_result.should_garbage_collect {
+                            self.run_garbage_collect(
+                                memory_manager,
+                                &[Value::String(allocation_result.index)],
+                            );
+                        }
                         let interned_key = allocation_result.index;
                         let _key_index = self.emit_string_constant(interned_key)?;
                         self.push_type(ExpressionType::String);
@@ -1047,6 +1117,12 @@ impl<'a> Compiler<'a> {
                     }
                     Token::Identifier(key_name) => {
                         let allocation_result = memory_manager.allocate_string(key_name);
+                        if allocation_result.should_garbage_collect {
+                            self.run_garbage_collect(
+                                memory_manager,
+                                &[Value::String(allocation_result.index)],
+                            );
+                        }
                         let interned_key = allocation_result.index;
                         let _key_index = self.emit_string_constant(interned_key)?;
                         self.push_type(ExpressionType::String);
@@ -1468,12 +1544,24 @@ impl<'a> Compiler<'a> {
             match &key_token.token {
                 Token::String(key_value) => {
                     let allocation_result = memory_manager.allocate_string(key_value);
+                    if allocation_result.should_garbage_collect {
+                        self.run_garbage_collect(
+                            memory_manager,
+                            &[Value::String(allocation_result.index)],
+                        );
+                    }
                     let _key_index = self.emit_string_constant(allocation_result.index)?;
                     self.push_type(ExpressionType::String);
                     self.parser.advance()?;
                 }
                 Token::Identifier(key_name) => {
                     let allocation_result = memory_manager.allocate_string(key_name);
+                    if allocation_result.should_garbage_collect {
+                        self.run_garbage_collect(
+                            memory_manager,
+                            &[Value::String(allocation_result.index)],
+                        );
+                    }
                     let _key_index = self.emit_string_constant(allocation_result.index)?;
                     self.push_type(ExpressionType::String);
                     self.parser.advance()?;
@@ -2128,8 +2216,8 @@ impl<'a> Compiler<'a> {
     }
 
     /// Begin compiling a new function, setting up enclosing scope chain
-    /// Returns the saved state (chunk, scope_depth, function_type) for restoration
-    fn begin_function(&mut self) -> (Chunk<'a>, u32, FunctionType) {
+    /// Returns the saved state (scope_depth, function_type) for restoration
+    fn begin_function(&mut self) -> (u32, FunctionType) {
         // Save source_id before we move compiling_chunk
         let source_id = self.compiling_chunk.source_id;
 
@@ -2138,13 +2226,14 @@ impl<'a> Compiler<'a> {
             locals: std::mem::take(&mut self.locals),
             upvalues: std::mem::take(&mut self.upvalues),
             enclosing: self.enclosing.take(),
+            chunk: std::mem::replace(&mut self.compiling_chunk, Chunk::new(source_id)),
+            constant_pool: std::mem::take(&mut self.constant_pool),
         };
 
         // Set up enclosing chain
         self.enclosing = Some(Box::new(enclosing_scope));
 
-        // Save chunk state
-        let old_chunk = std::mem::replace(&mut self.compiling_chunk, Chunk::new(source_id));
+        // Save state
         let old_scope_depth = self.scope_depth;
         let old_function_type = self.function_type;
 
@@ -2152,27 +2241,56 @@ impl<'a> Compiler<'a> {
         self.scope_depth = 0;
         self.function_type = FunctionType::Function;
 
-        (old_chunk, old_scope_depth, old_function_type)
+        (old_scope_depth, old_function_type)
+    }
+
+    fn run_garbage_collect(&mut self, memory_manager: &mut MemoryManager, extra_roots: &[Value]) {
+        let mut roots = Vec::from(extra_roots);
+
+        // Mark current chunk's constants
+        for constant in &self.compiling_chunk.constants {
+            roots.push(constant.clone());
+        }
+
+        // Mark current constant pool keys
+        for (value, _) in &self.constant_pool {
+            roots.push(value.clone());
+        }
+
+        // Mark all enclosing scopes' constants and chunks
+        let mut current_enclosing = &self.enclosing;
+        while let Some(enclosing) = current_enclosing {
+            for constant in &enclosing.chunk.constants {
+                roots.push(constant.clone());
+            }
+            for (value, _) in &enclosing.constant_pool {
+                roots.push(value.clone());
+            }
+            current_enclosing = &enclosing.enclosing;
+        }
+
+        memory_manager.run_garbage_collect(roots, Vec::new());
     }
 
     /// End function compilation, restoring previous state from enclosing scope
     /// Returns the compiled function chunk and upvalues
     fn end_function(
         &mut self,
-        saved_state: (Chunk<'a>, u32, FunctionType),
+        saved_state: (u32, FunctionType),
     ) -> (Chunk<'a>, Vec<CompilerUpvalue>) {
-        let (old_chunk, old_scope_depth, old_function_type) = saved_state;
+        let (old_scope_depth, old_function_type) = saved_state;
 
-        // Get the compiled function's chunk and upvalues
-        let function_chunk = std::mem::replace(&mut self.compiling_chunk, old_chunk);
+        // Restore locals and upvalues and chunk from enclosing scope
+        let enclosing = self.enclosing.take().expect("Must have enclosing scope");
+
+        let function_chunk = std::mem::replace(&mut self.compiling_chunk, enclosing.chunk);
+        self.constant_pool = enclosing.constant_pool;
+
         let function_upvalues = std::mem::take(&mut self.upvalues);
 
-        // Restore locals and upvalues from enclosing scope
-        if let Some(enclosing) = self.enclosing.take() {
-            self.locals = enclosing.locals;
-            self.upvalues = enclosing.upvalues;
-            self.enclosing = enclosing.enclosing;
-        }
+        self.locals = enclosing.locals;
+        self.upvalues = enclosing.upvalues;
+        self.enclosing = enclosing.enclosing;
 
         // Restore other state
         self.scope_depth = old_scope_depth;

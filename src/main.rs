@@ -68,16 +68,32 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
                 }
                 Err(runtime_error) => {
                     println!("❌ Runtime error during execution:");
+                    let error_source_id = runtime_error.source_id.clone();
+                    let error_content = if error_source_id == source_id {
+                        content.to_string()
+                    } else {
+                        fs::read_to_string(&error_source_id)
+                            .unwrap_or_else(|_| "<file not found>".to_string())
+                    };
+                    let error_source = Source::from(error_content);
                     let report = runtime_error.into_report();
-                    report.print((source_id, &source))?;
+                    report.print((error_source_id.as_str(), error_source))?;
                     Err(Box::new(MainError::RuntimeError))
                 }
             }
         }
         Err(compile_error) => {
             println!("❌ Compilation failed:");
+            let error_source_id = compile_error.source_id.clone();
+            let error_content = if error_source_id == source_id {
+                content.to_string()
+            } else {
+                fs::read_to_string(&error_source_id)
+                    .unwrap_or_else(|_| "<file not found>".to_string())
+            };
+            let error_source = Source::from(error_content);
             let report = compile_error.into_report();
-            report.print((source_id, &source))?;
+            report.print((error_source_id.as_str(), error_source))?;
             Err(Box::new(MainError::CompilerError))
         }
     }
@@ -141,7 +157,7 @@ fn process_repl_input(content: &str) -> ReplResult {
     let mut scanner = Scanner::new(content, source_id);
     let mut memory_manager = MemoryManager::new();
     let compiler = Compiler::new(&mut scanner, source_id);
-    
+
     match compiler.compile(&mut memory_manager) {
         Ok(chunk) => {
             println!("✅ Compilation successful!");
@@ -161,8 +177,16 @@ fn process_repl_input(content: &str) -> ReplResult {
                 }
                 Err(runtime_error) => {
                     println!("❌ Runtime error during execution:");
+                    let error_source_id = runtime_error.source_id.clone();
+                    let error_content = if error_source_id == source_id {
+                        content.to_string()
+                    } else {
+                        fs::read_to_string(&error_source_id)
+                            .unwrap_or_else(|_| "<file not found>".to_string())
+                    };
+                    let error_source = Source::from(error_content);
                     let report = runtime_error.into_report();
-                    let _ = report.print((source_id, &source));
+                    let _ = report.print((error_source_id.as_str(), error_source));
                     ReplResult::Error
                 }
             }
@@ -171,10 +195,18 @@ fn process_repl_input(content: &str) -> ReplResult {
             if compile_error.is_incomplete_input() {
                 return ReplResult::Incomplete;
             }
-            
+
             println!("❌ Compilation failed:");
+            let error_source_id = compile_error.source_id.clone();
+            let error_content = if error_source_id == source_id {
+                content.to_string()
+            } else {
+                fs::read_to_string(&error_source_id)
+                    .unwrap_or_else(|_| "<file not found>".to_string())
+            };
+            let error_source = Source::from(error_content);
             let report = compile_error.into_report();
-            let _ = report.print((source_id, &source));
+            let _ = report.print((error_source_id.as_str(), error_source));
             ReplResult::Error
         }
     }

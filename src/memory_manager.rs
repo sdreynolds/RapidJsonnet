@@ -1,12 +1,11 @@
-use chunk::{ArrayIndex, ObjectIndex, OwnedChunk, SpanRunLength, StringIndex, Value};
+use chunk::{
+    ArrayIndex, ClosureIndex, FunctionIndex, ImportIndex, ObjectIndex, OwnedChunk, SpanRunLength,
+    StringIndex, UpvalueIndex, Value,
+};
 use slotmap::{DefaultKey, SlotMap};
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-
-pub type FunctionIndex = DefaultKey;
-pub type UpvalueIndex = DefaultKey;
-pub type ClosureIndex = DefaultKey;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AllocationResult<T> {
@@ -264,6 +263,34 @@ impl ManagedClosure {
     }
 }
 
+/// A heap-allocated representation of an imported file
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagedImport {
+    /// String index for the file path
+    pub path: StringIndex,
+    /// Cached evaluation result, if any
+    pub cached_result: Option<Value>,
+    /// Whether this import is currently being evaluated (for cycle detection)
+    pub evaluating: Cell<bool>,
+    /// GC marking flag
+    marked: Cell<bool>,
+}
+
+impl ManagedImport {
+    pub fn new(path: StringIndex) -> Self {
+        Self {
+            path,
+            cached_result: None,
+            evaluating: Cell::new(false),
+            marked: Cell::new(false),
+        }
+    }
+
+    fn size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
 /// A HashSet-based string interning system with garbage collection support
 pub struct MemoryManager {
     /// HashSet containing all interned strings
@@ -279,10 +306,18 @@ pub struct MemoryManager {
     closures: SlotMap<ClosureIndex, ManagedClosure>,
     /// Collection of Upvalues
     upvalues: SlotMap<UpvalueIndex, ManagedUpvalue>,
+    /// Collection of Imports
+    imports: SlotMap<ImportIndex, ManagedImport>,
+    /// Lookup map for imports by absolute path to ensure uniqueness
+    import_lookup: HashMap<String, ImportIndex>,
     /// Total bytes allocated for all strings
     allocated_bytes: usize,
     /// GC threshold for triggering collection
     gc_threshold: usize,
+    /// External roots to be considered during GC (used for nested VM execution)
+    external_roots: Vec<Vec<Value>>,
+    /// External upvalue roots to be considered during GC
+    external_upvalue_roots: Vec<Vec<UpvalueIndex>>,
 }
 
 impl MemoryManager {
@@ -293,12 +328,28 @@ impl MemoryManager {
             strings: SlotMap::new(),
             objects: SlotMap::new(),
             arrays: SlotMap::new(),
-            functions: SlotMap::new(),
-            closures: SlotMap::new(),
-            upvalues: SlotMap::new(),
+            functions: SlotMap::with_key(),
+            closures: SlotMap::with_key(),
+            upvalues: SlotMap::with_key(),
+            imports: SlotMap::with_key(),
+            import_lookup: HashMap::new(),
             allocated_bytes: 0,
             gc_threshold: 1024 * 1024, // 1MB initial threshold
+            external_roots: Vec::new(),
+            external_upvalue_roots: Vec::new(),
         }
+    }
+
+    /// Push a set of external roots to be protected from GC
+    pub fn push_external_roots(&mut self, roots: Vec<Value>, upvalues: Vec<UpvalueIndex>) {
+        self.external_roots.push(roots);
+        self.external_upvalue_roots.push(upvalues);
+    }
+
+    /// Pop the last set of external roots
+    pub fn pop_external_roots(&mut self) {
+        self.external_roots.pop();
+        self.external_upvalue_roots.pop();
     }
 
     /// Allocate_String a string, returning a handle
@@ -405,6 +456,38 @@ impl MemoryManager {
         }
     }
 
+    pub fn allocate_import(&mut self, resolved_path: &str) -> AllocationResult<ImportIndex> {
+        // Check if we already have an import for this resolved path
+        if let Some(&index) = self.import_lookup.get(resolved_path) {
+            return AllocationResult {
+                should_garbage_collect: false,
+                index,
+            };
+        }
+
+        // Create new import
+        let path_index = self.allocate_string(resolved_path).index;
+        let import = ManagedImport::new(path_index);
+        self.allocated_bytes += import.size();
+        let index = self.imports.insert(import);
+
+        // Update lookup map
+        self.import_lookup.insert(resolved_path.to_string(), index);
+
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    pub fn load_import(&self, index: ImportIndex) -> &ManagedImport {
+        self.imports.get(index).expect("Import must exist")
+    }
+
+    pub fn load_import_mut(&mut self, index: ImportIndex) -> &mut ManagedImport {
+        self.imports.get_mut(index).expect("Import must exist")
+    }
+
     /// Check if garbage collection should be triggered
     pub fn should_collect(&self) -> bool {
         #[cfg(feature = "stress_gc")]
@@ -462,9 +545,24 @@ impl MemoryManager {
     ) {
         let mut values = VecDeque::from(roots);
 
+        // Add external roots if any
+        for extra_roots in &self.external_roots {
+            for &value in extra_roots {
+                values.push_back(value);
+            }
+        }
+
         // Mark open upvalues as roots - these haven't been captured into closures yet
         for upvalue_index in open_upvalue_roots {
             self.mark_upvalue(upvalue_index, &mut values);
+        }
+
+        // Add external upvalue roots if any
+        let extra_upvalue_roots = self.external_upvalue_roots.clone();
+        for extra_upvalues in extra_upvalue_roots {
+            for upvalue_index in extra_upvalues {
+                self.mark_upvalue(upvalue_index, &mut values);
+            }
         }
 
         // Mark Phase, iterate over the roots, mark Values that need to remain
@@ -586,6 +684,31 @@ impl MemoryManager {
                         }
                     }
                 }
+                Value::Import(import_index) => {
+                    if let Some(managed_import) = self.imports.get_mut(import_index) {
+                        managed_import.marked.set(true);
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] Marking Import {:?}", import_index)
+                        }
+
+                        // Mark the path string
+                        values.push_back(Value::String(managed_import.path));
+
+                        // Mark the cached result if it exists
+                        if let Some(cached_value) = managed_import.cached_result {
+                            values.push_back(cached_value);
+                        }
+                    } else {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[MemoryManager] WARNING: Failed to mark Import {:?} - not found",
+                                import_index
+                            )
+                        }
+                    }
+                }
 
                 _ => continue,
             };
@@ -653,6 +776,16 @@ impl MemoryManager {
             }
         }
 
+        let mut imports_to_delete: Vec<ImportIndex> = Vec::new();
+        for (import_idx, import) in self.imports.iter_mut() {
+            if import.marked.get() {
+                import.marked.set(false);
+            } else {
+                imports_to_delete.push(import_idx);
+                self.allocated_bytes -= import.size();
+            }
+        }
+
         for string_idx in strings_to_delete {
             #[cfg(feature = "gc_debug")]
             {
@@ -699,6 +832,18 @@ impl MemoryManager {
                 eprintln!("[MemoryManager] Removing Upvalue {:?}", upvalue_idx)
             }
             self.upvalues.remove(upvalue_idx);
+        }
+
+        for import_idx in imports_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing Import {:?}", import_idx)
+            }
+            if let Some(import) = self.imports.get(import_idx) {
+                let path = self.load_string(import.path).to_string();
+                self.import_lookup.remove(&path);
+            }
+            self.imports.remove(import_idx);
         }
 
         self.gc_threshold = self.allocated_bytes * 2;

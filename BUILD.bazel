@@ -58,6 +58,7 @@ rust_library(
     srcs = ["src/virtual_machine.rs"],
     deps = [
         ":chunk",
+        ":compiler",
         ":memory_manager",
         ":scanner",
         "@crates//:serde_json",
@@ -142,7 +143,7 @@ sh_test(
     name = "jsonnet_validation_test",
      srcs = ["test_runner.sh"],
 
-     data = glob(["end2end/*.jsonnet"]) + [
+     data = glob(["end2end/*.jsonnet", "end2end/*.libsonnet"]) + [
         ":main",
     ],
 
