@@ -209,7 +209,7 @@ impl<'a> Compiler<'a> {
         // Parse left-hand side (prefix)
         self.parse_prefix(memory_manager)?;
 
-        // Parse infix operators
+        // Parse infix and postfix operators in a single loop to correctly handle precedence
         loop {
             // Check if we're at the end or if there's no current token
             if self.parser.is_at_end() {
@@ -221,38 +221,27 @@ impl<'a> Compiler<'a> {
                 None => break,
             };
 
-            if let Some((left_bp, right_bp)) = self.get_binding_power(&current.token) {
-                if left_bp <= min_bp {
-                    break;
-                }
-
-                self.parse_infix(right_bp, memory_manager)?;
-            } else {
-                break;
-            }
-        }
-
-        // Parse postfix operators
-        loop {
-            // Check if we're at the end or if there's no current token
-            if self.parser.is_at_end() {
-                break;
-            }
-
-            let current = match self.parser.current_token() {
-                Some(token) => token,
-                None => break,
-            };
-
+            // Check for postfix operators first (highest precedence)
             if let Some(postfix_bp) = self.get_postfix_binding_power(&current.token) {
                 if postfix_bp <= min_bp {
                     break;
                 }
 
                 self.parse_postfix(memory_manager)?;
-            } else {
-                break;
+                continue;
             }
+
+            // Check for infix operators
+            if let Some((left_bp, right_bp)) = self.get_binding_power(&current.token) {
+                if left_bp <= min_bp {
+                    break;
+                }
+
+                self.parse_infix(right_bp, memory_manager)?;
+                continue;
+            }
+
+            break;
         }
 
         Ok(())
@@ -302,11 +291,18 @@ impl<'a> Compiler<'a> {
                 self.push_type(ExpressionType::Null);
                 self.parser.advance()?;
             }
-            Token::Import | Token::ImportStr => {
+            Token::Import | Token::ImportStr | Token::ImportBin => {
                 let is_import_str = matches!(token.token, Token::ImportStr);
-                let keyword_len = if is_import_str { 9 } else { 6 };
+                let is_import_bin = matches!(token.token, Token::ImportBin);
+                let keyword_len = if is_import_str {
+                    9
+                } else if is_import_bin {
+                    9
+                } else {
+                    6
+                };
                 let start_span = token.span.start;
-                self.parser.advance()?; // consume 'import' or 'importstr'
+                self.parser.advance()?; // consume 'import', 'importstr', or 'importbin'
 
                 // Expect a string literal next
                 let path_token = self.parser.current_token().cloned().ok_or_else(|| {
@@ -327,13 +323,15 @@ impl<'a> Compiler<'a> {
                         let const_index =
                             self.add_constant_pooled(Value::String(allocation_result.index))?;
 
-                        // Span covers from 'import'/'importstr' to the end of the string
+                        // Span covers from 'import'/'importstr'/'importbin' to the end of the string
                         let full_span = start_span..path_token.span.end;
 
-                        // Emit Import/ImportStr opcode with the constant pool index
+                        // Emit Import/ImportStr/ImportBin opcode with the constant pool index
                         self.compiling_chunk.write_opcode_u16(
                             if is_import_str {
                                 Opcode::ImportStr
+                            } else if is_import_bin {
+                                Opcode::ImportBin
                             } else {
                                 Opcode::Import
                             },
@@ -342,9 +340,11 @@ impl<'a> Compiler<'a> {
                         );
 
                         // The import evaluates to an unknown type at compile time
-                        // unless it is importstr, which is always a string
+                        // unless it is importstr (string) or importbin (array)
                         if is_import_str {
                             self.push_type(ExpressionType::String);
+                        } else if is_import_bin {
+                            self.push_type(ExpressionType::Array);
                         } else {
                             self.push_type(ExpressionType::Unknown);
                         }
@@ -353,6 +353,8 @@ impl<'a> Compiler<'a> {
                     _ => {
                         let msg = if is_import_str {
                             "Expected string literal after 'importstr'"
+                        } else if is_import_bin {
+                            "Expected string literal after 'importbin'"
                         } else {
                             "Expected string literal after 'import'"
                         };

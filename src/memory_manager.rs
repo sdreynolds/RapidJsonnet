@@ -1,6 +1,6 @@
 use chunk::{
-    ArrayIndex, ClosureIndex, FunctionIndex, ImportIndex, ObjectIndex, OwnedChunk, SpanRunLength,
-    StringIndex, UpvalueIndex, Value,
+    ArrayIndex, BinaryIndex, ClosureIndex, FunctionIndex, ImportIndex, ObjectIndex, OwnedChunk,
+    SpanRunLength, StringIndex, UpvalueIndex, Value,
 };
 use slotmap::{DefaultKey, SlotMap};
 use std::cell::Cell;
@@ -291,6 +291,30 @@ impl ManagedImport {
     }
 }
 
+/// A heap-allocated binary object containing raw bytes
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManagedBinary {
+    /// The raw bytes
+    pub data: Vec<u8>,
+    /// GC marking flag
+    marked: Cell<bool>,
+}
+
+impl ManagedBinary {
+    /// Create a new binary object
+    pub fn new(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            marked: Cell::new(false),
+        }
+    }
+
+    /// Calculate the actual size of this binary including its data
+    fn size(&self) -> usize {
+        std::mem::size_of::<Self>() + self.data.capacity()
+    }
+}
+
 /// A HashSet-based string interning system with garbage collection support
 pub struct MemoryManager {
     /// HashSet containing all interned strings
@@ -308,6 +332,8 @@ pub struct MemoryManager {
     upvalues: SlotMap<UpvalueIndex, ManagedUpvalue>,
     /// Collection of Imports
     imports: SlotMap<ImportIndex, ManagedImport>,
+    /// Collection of Binary objects
+    binaries: SlotMap<BinaryIndex, ManagedBinary>,
     /// Lookup map for imports by absolute path to ensure uniqueness
     import_lookup: HashMap<String, ImportIndex>,
     /// Total bytes allocated for all strings
@@ -332,6 +358,7 @@ impl MemoryManager {
             closures: SlotMap::with_key(),
             upvalues: SlotMap::with_key(),
             imports: SlotMap::with_key(),
+            binaries: SlotMap::with_key(),
             import_lookup: HashMap::new(),
             allocated_bytes: 0,
             gc_threshold: 1024 * 1024, // 1MB initial threshold
@@ -486,6 +513,24 @@ impl MemoryManager {
 
     pub fn load_import_mut(&mut self, index: ImportIndex) -> &mut ManagedImport {
         self.imports.get_mut(index).expect("Import must exist")
+    }
+
+    pub fn allocate_binary(&mut self, data: Vec<u8>) -> AllocationResult<BinaryIndex> {
+        let binary = ManagedBinary::new(data);
+        self.allocated_bytes += binary.size();
+        let index = self.binaries.insert(binary);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    pub fn load_binary(&self, index: BinaryIndex) -> &ManagedBinary {
+        self.binaries.get(index).expect("Binary must exist")
+    }
+
+    pub fn load_binary_mut(&mut self, index: BinaryIndex) -> &mut ManagedBinary {
+        self.binaries.get_mut(index).expect("Binary must exist")
     }
 
     /// Check if garbage collection should be triggered
@@ -709,6 +754,23 @@ impl MemoryManager {
                         }
                     }
                 }
+                Value::Binary(binary_index) => {
+                    if let Some(managed_binary) = self.binaries.get_mut(binary_index) {
+                        managed_binary.marked.set(true);
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!("[MemoryManager] Marking Binary {:?}", binary_index)
+                        }
+                    } else {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[MemoryManager] WARNING: Failed to mark Binary {:?} - not found",
+                                binary_index
+                            )
+                        }
+                    }
+                }
 
                 _ => continue,
             };
@@ -786,6 +848,16 @@ impl MemoryManager {
             }
         }
 
+        let mut binaries_to_delete: Vec<BinaryIndex> = Vec::new();
+        for (binary_idx, binary) in self.binaries.iter_mut() {
+            if binary.marked.get() {
+                binary.marked.set(false);
+            } else {
+                binaries_to_delete.push(binary_idx);
+                self.allocated_bytes -= binary.size();
+            }
+        }
+
         for string_idx in strings_to_delete {
             #[cfg(feature = "gc_debug")]
             {
@@ -844,6 +916,14 @@ impl MemoryManager {
                 self.import_lookup.remove(&path);
             }
             self.imports.remove(import_idx);
+        }
+
+        for binary_idx in binaries_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing Binary {:?}", binary_idx)
+            }
+            self.binaries.remove(binary_idx);
         }
 
         self.gc_threshold = self.allocated_bytes * 2;

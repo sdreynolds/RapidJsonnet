@@ -647,7 +647,8 @@ impl VirtualMachine {
                                 | Value::Array(_)
                                 | Value::Function(_)
                                 | Value::Closure(_)
-                                | Value::Import(_) => unreachable!(),
+                                | Value::Import(_)
+                                | Value::Binary(_) => unreachable!(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
@@ -658,7 +659,8 @@ impl VirtualMachine {
                                 | Value::Array(_)
                                 | Value::Function(_)
                                 | Value::Closure(_)
-                                | Value::Import(_) => unreachable!(),
+                                | Value::Import(_)
+                                | Value::Binary(_) => unreachable!(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -821,6 +823,7 @@ impl VirtualMachine {
                                 Value::Function(_) => "{function}".to_string(),
                                 Value::Closure(_) => "{closure}".to_string(),
                                 Value::Import(_) => "{import}".to_string(),
+                                Value::Binary(_) => "{binary}".to_string(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
@@ -832,6 +835,7 @@ impl VirtualMachine {
                                 Value::Function(_) => "{function}".to_string(),
                                 Value::Closure(_) => "{closure}".to_string(),
                                 Value::Import(_) => "{import}".to_string(),
+                                Value::Binary(_) => "{binary}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -1213,6 +1217,61 @@ impl VirtualMachine {
                                 });
                             }
                         }
+                        Value::Binary(binary_key) => {
+                            // Binary indexing with number
+                            if let Value::Number(index_num) = index_value {
+                                // Check for negative index
+                                if index_num < 0.0 {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Binary index cannot be negative, got {}",
+                                            index_num
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+
+                                // Check for non-integer index
+                                if index_num.fract() != 0.0 {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Binary index must be an integer, got {}",
+                                            index_num
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+
+                                let index = index_num as usize;
+                                let binary = self.memory_manager.load_binary(binary_key);
+
+                                // Bounds check
+                                if index >= binary.data.len() {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Binary index {} out of bounds (length: {})",
+                                            index,
+                                            binary.data.len()
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+
+                                self.push(Value::Number(binary.data[index] as f64))?;
+                            } else {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Binary index must be a number, got {:?}",
+                                        index_value
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        }
                         Value::Object(object_key) => {
                             // Object indexing with string
                             if let Value::String(field_key) = index_value {
@@ -1252,6 +1311,11 @@ impl VirtualMachine {
                         Value::Array(array_key) => {
                             let array = self.memory_manager.load_array(array_key);
                             let length = array.len() as f64;
+                            self.push(Value::Number(length))?;
+                        }
+                        Value::Binary(binary_key) => {
+                            let binary = self.memory_manager.load_binary(binary_key);
+                            let length = binary.data.len() as f64;
                             self.push(Value::Number(length))?;
                         }
                         _ => {
@@ -1442,6 +1506,54 @@ impl VirtualMachine {
                         {
                             eprintln!(
                                 "[VirtualMachine] Running GC at PC={} (ImportStr allocation)",
+                                self.current_frame().ip
+                            );
+                        }
+                        self.run_garbage_collection();
+                    }
+                }
+
+                Opcode::ImportBin => {
+                    // Read constant index, which points to a string constant (the path)
+                    let const_idx = self.read_u16_operand()?;
+
+                    let path_str_idx = match self.current_chunk().constants.get(const_idx as usize)
+                    {
+                        Some(Value::String(idx)) => *idx,
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "ImportBin operand must be a string constant".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    };
+
+                    let path_str = self.memory_manager.load_string(path_str_idx).to_string();
+
+                    // Resolve the path relative to the current chunk's source_id
+                    let current_dir = std::path::Path::new(&self.current_chunk().source_id)
+                        .parent()
+                        .unwrap_or(std::path::Path::new(""));
+                    let target_path = current_dir.join(&path_str);
+                    let target_path_str = target_path.to_string_lossy().to_string();
+
+                    // Read the file content as binary
+                    let content = std::fs::read(&target_path_str).map_err(|e| RuntimeError {
+                        span: self.get_current_span(),
+                        message: format!("Failed to read file '{}': {}", target_path_str, e),
+                        source_id: self.current_chunk().source_id.to_string(),
+                    })?;
+
+                    // Allocate content as binary object
+                    let allocation_result = self.memory_manager.allocate_binary(content);
+                    self.push(Value::Binary(allocation_result.index))?;
+
+                    if allocation_result.should_garbage_collect {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[VirtualMachine] Running GC at PC={} (ImportBin allocation)",
                                 self.current_frame().ip
                             );
                         }
@@ -1751,6 +1863,7 @@ impl VirtualMachine {
             (Value::String(a), Value::String(b)) => a == b, // compares only the keys and so can be quick
             (Value::Function(a), Value::Function(b)) => a == b, // compare function indices
             (Value::Closure(a), Value::Closure(b)) => a == b, // compare closure indices
+            (Value::Binary(a), Value::Binary(b)) => a == b, // compare binary object keys (identity)
 
             // Different types are never equal
             _ => false,
@@ -1821,6 +1934,14 @@ impl VirtualMachine {
 
                 Ok(serde_json::Value::Array(json_array))
             }
+            Value::Binary(binary_key) => {
+                let data = self.memory_manager.load_binary(binary_key).data.clone();
+                let json_array: Vec<serde_json::Value> = data
+                    .into_iter()
+                    .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
+                    .collect();
+                Ok(serde_json::Value::Array(json_array))
+            }
             Value::Function(_) => Err(RuntimeError {
                 span: 0..0,
                 message: "Cannot serialize function to JSON".to_string(),
@@ -1869,6 +1990,7 @@ impl VirtualMachine {
             Value::String(s) => Ok(self.memory_manager.load_string(s) != ""),
             Value::Object(x) => Ok(self.memory_manager.load_object(x).len() > 0),
             Value::Array(x) => Ok(self.memory_manager.load_array(x).len() > 0),
+            Value::Binary(x) => Ok(self.memory_manager.load_binary(x).data.len() > 0),
             Value::Function(_) => Ok(true), // Functions are truthy
             Value::Closure(_) => Ok(true),  // Closures are truthy
             Value::Import(_) => Ok(true),   // Should be unreachable due to force_value
@@ -1949,6 +2071,12 @@ mod tests {
         assert!(vm.is_truthy(Value::Number(1.0)).unwrap());
         assert!(!vm.is_truthy(Value::Number(-1.0)).unwrap());
         assert!(vm.is_truthy(Value::Number(0.1)).unwrap());
+
+        let bin_empty = vm.memory_manager.allocate_binary(vec![]).index;
+        assert!(!vm.is_truthy(Value::Binary(bin_empty)).unwrap());
+
+        let bin_full = vm.memory_manager.allocate_binary(vec![1]).index;
+        assert!(vm.is_truthy(Value::Binary(bin_full)).unwrap());
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub type FunctionIndex = DefaultKey;
 pub type ClosureIndex = DefaultKey;
 pub type ImportIndex = DefaultKey;
 pub type UpvalueIndex = DefaultKey;
+pub type BinaryIndex = DefaultKey;
 
 /// Value type for the Jsonnet virtual machine
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -31,6 +32,7 @@ pub enum Value {
     Function(FunctionIndex),
     Closure(ClosureIndex),
     Import(ImportIndex),
+    Binary(BinaryIndex),
 }
 
 // Manual implementation of Eq for Value
@@ -82,6 +84,10 @@ impl std::hash::Hash for Value {
                 8u8.hash(state);
                 key.hash(state);
             }
+            Value::Binary(key) => {
+                9u8.hash(state);
+                key.hash(state);
+            }
         }
     }
 }
@@ -110,6 +116,7 @@ impl std::fmt::Display for Value {
             Value::Function(index) => write!(f, "Function[{:?}]", index),
             Value::Closure(index) => write!(f, "Closure[{:?}]", index),
             Value::Import(index) => write!(f, "Import[{:?}]", index),
+            Value::Binary(index) => write!(f, "Binary[{:?}]", index),
         }
     }
 }
@@ -184,6 +191,7 @@ pub enum Opcode {
     Error = 81,
     Import = 82, // operand: u16 const_index (pointing to the string path in constant pool)
     ImportStr = 83, // operand: u16 const_index (pointing to the string path in constant pool)
+    ImportBin = 84, // operand: u16 const_index (pointing to the string path in constant pool)
 
     // Stack Management
     Pop = 90,
@@ -255,6 +263,7 @@ impl Opcode {
             81 => Some(Opcode::Error),
             82 => Some(Opcode::Import),
             83 => Some(Opcode::ImportStr),
+            84 => Some(Opcode::ImportBin),
             90 => Some(Opcode::Pop),
             91 => Some(Opcode::Dup),
             92 => Some(Opcode::Swap),
@@ -582,10 +591,10 @@ impl<'a> Chunk<'a> {
 
                 // Calculate instruction size and end position
                 let instruction_size = match opcode {
-                    Opcode::LoadConst | Opcode::Import | Opcode::ImportStr => 3, // opcode + u16
-                    Opcode::LoadVar => 3,                                        // opcode + u16
-                    Opcode::CreateObject => 3,                                   // opcode + u16
-                    Opcode::CreateArray => 3,                                    // opcode + u16
+                    Opcode::LoadConst | Opcode::Import | Opcode::ImportStr | Opcode::ImportBin => 3, // opcode + u16
+                    Opcode::LoadVar => 3,        // opcode + u16
+                    Opcode::CreateObject => 3,   // opcode + u16
+                    Opcode::CreateArray => 3,    // opcode + u16
                     Opcode::FieldDef => 4,       // opcode + u16 + u8
                     Opcode::CreateFunction => 6, // opcode + u8 + u32
                     Opcode::Call => 3,           // opcode + u8 + u8
@@ -645,7 +654,7 @@ impl<'a> Chunk<'a> {
                             )
                         }
                     }
-                    Opcode::Import | Opcode::ImportStr => {
+                    Opcode::Import | Opcode::ImportStr | Opcode::ImportBin => {
                         if let Some(const_index) = self.read_u16(ip + 1) {
                             if let Some(value) = self.constants.get(const_index as usize) {
                                 format!(
