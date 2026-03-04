@@ -593,9 +593,13 @@ impl VirtualMachine {
                                 merged_properties.insert(*key, value.clone());
                             }
 
+                            // Concatenate assertions: left then right
+                            let mut merged_assertions = left_object.assertions.clone();
+                            merged_assertions.extend(right_object.assertions.clone());
+
                             let merged_allocation = self
                                 .memory_manager
-                                .allocate_object_with_properties(merged_properties);
+                                .allocate_object_full(merged_properties, merged_assertions);
                             self.push(Value::Object(merged_allocation.index))?;
                             if merged_allocation.should_garbage_collect {
                                 #[cfg(feature = "gc_debug")]
@@ -1062,8 +1066,15 @@ impl VirtualMachine {
                                     source_id: self.current_chunk().source_id.to_string(),
                                 });
                             }
-                            // Push object back onto stack
+
+                            // Push object back onto stack (it's the result of this opcode)
                             self.push(Value::Object(obj_idx))?;
+
+                            // Execute assertion immediately for early failure detection.
+                            // Object assertions in Jsonnet are conceptually checked during manifestation,
+                            // but in an eager VM, construction is effectively the beginning of manifestation.
+                            // We use execute_closure_sync which preserves current VM state.
+                            self.execute_closure_sync(closure_idx)?;
                         }
                         (c, o) => {
                             return Err(RuntimeError {
@@ -1088,6 +1099,7 @@ impl VirtualMachine {
                         Value::Object(obj_key) => {
                             let obj = self.memory_manager.load_object(obj_key);
                             let mut properties = obj.properties.clone();
+                            let assertions = obj.assertions.clone();
 
                             match key {
                                 Value::String(key_str) => {
@@ -1110,7 +1122,7 @@ impl VirtualMachine {
 
                             let object_allocation = self
                                 .memory_manager
-                                .allocate_object_with_properties(properties);
+                                .allocate_object_full(properties, assertions);
                             self.push(Value::Object(object_allocation.index))?;
 
                             if object_allocation.should_garbage_collect {
@@ -1441,9 +1453,13 @@ impl VirtualMachine {
                             merged_properties.insert(*key, value.clone());
                         }
 
+                        // Concatenate assertions: left then right
+                        let mut merged_assertions = left_object.assertions.clone();
+                        merged_assertions.extend(right_object.assertions.clone());
+
                         let merged_allocation = self
                             .memory_manager
-                            .allocate_object_with_properties(merged_properties);
+                            .allocate_object_full(merged_properties, merged_assertions);
                         self.push(Value::Object(merged_allocation.index))?;
                         if merged_allocation.should_garbage_collect {
                             #[cfg(feature = "gc_debug")]
@@ -1805,10 +1821,12 @@ impl VirtualMachine {
                                 source_id: self.current_chunk().source_id.to_string(),
                             });
                         }
-                        self.stack[location]
+                        let val = self.stack[location];
+                        val
                     } else if let Some(closed_value) = upvalue.closed_value {
                         // Upvalue is closed - read from heap
-                        closed_value
+                        let val = closed_value;
+                        val
                     } else {
                         return Err(RuntimeError {
                             span: self.get_current_span(),
@@ -2005,20 +2023,12 @@ impl VirtualMachine {
                 }
 
                 visited.insert(object_key);
-
-                // Clone assertions and properties so we don't hold the borrow of memory manager
                 let obj = self.memory_manager.load_object(object_key);
-                let assertions = obj.assertions.clone();
                 let properties: Vec<(StringIndex, Value)> = obj
                     .properties
                     .iter()
                     .map(|(k, v)| (*k, v.clone()))
                     .collect();
-
-                // Run assertions
-                for assertion in assertions {
-                    self.execute_closure_sync(assertion)?;
-                }
 
                 let mut json_object = serde_json::Map::new();
 

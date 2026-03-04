@@ -1177,14 +1177,9 @@ impl<'a> Compiler<'a> {
                     };
 
                     if !has_msg {
-                        let msg_idx = self.emit_string_constant(
+                        self.emit_string_constant(
                             memory_manager.allocate_string("Assertion failed").index,
                         )?;
-                        self.compiling_chunk.write_opcode_u16(
-                            Opcode::LoadConst,
-                            msg_idx,
-                            assert_span.clone(),
-                        );
                     }
 
                     self.emit_opcode(Opcode::Error, assert_span.clone());
@@ -2553,10 +2548,7 @@ impl<'a> Compiler<'a> {
         };
 
         if !has_msg {
-            let msg_idx = self
-                .emit_string_constant(memory_manager.allocate_string("Assertion failed").index)?;
-            self.compiling_chunk
-                .write_opcode_u16(Opcode::LoadConst, msg_idx, assert_span.clone());
+            self.emit_string_constant(memory_manager.allocate_string("Assertion failed").index)?;
         }
 
         self.emit_opcode(Opcode::Error, assert_span.clone());

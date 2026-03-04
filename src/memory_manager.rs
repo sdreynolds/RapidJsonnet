@@ -55,6 +55,18 @@ impl ManagedObject {
         }
     }
 
+    /// Create a Jsonnet object with the given properties and assertions
+    pub fn with_properties_and_assertions(
+        properties: HashMap<StringIndex, Value>,
+        assertions: Vec<ClosureIndex>,
+    ) -> Self {
+        Self {
+            properties,
+            assertions,
+            marked: Cell::new(false),
+        }
+    }
+
     /// Get a property value by key
     pub fn get(&self, key: &StringIndex) -> Option<&Value> {
         self.properties.get(key)
@@ -431,6 +443,20 @@ impl MemoryManager {
         properties: HashMap<StringIndex, Value>,
     ) -> AllocationResult<ObjectIndex> {
         let obj = ManagedObject::with_properties(properties);
+        self.allocated_bytes += obj.size();
+        let index = self.objects.insert(obj);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    pub fn allocate_object_full(
+        &mut self,
+        properties: HashMap<StringIndex, Value>,
+        assertions: Vec<ClosureIndex>,
+    ) -> AllocationResult<ObjectIndex> {
+        let obj = ManagedObject::with_properties_and_assertions(properties, assertions);
         self.allocated_bytes += obj.size();
         let index = self.objects.insert(obj);
         AllocationResult {
