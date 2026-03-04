@@ -18,6 +18,8 @@ pub struct AllocationResult<T> {
 pub struct ManagedObject {
     /// Object properties mapping interned string keys to values
     pub properties: HashMap<StringIndex, Value>,
+    /// List of object-level assertions to be evaluated during manifestation
+    pub assertions: Vec<ClosureIndex>,
     // GC marking
     marked: Cell<bool>,
 }
@@ -29,7 +31,9 @@ impl ManagedObject {
         // HashMap capacity accounts for actual allocated memory, not just length
         let map_capacity_bytes = self.properties.capacity()
             * (std::mem::size_of::<StringIndex>() + std::mem::size_of::<Value>());
-        base_size + map_capacity_bytes
+        let assertions_capacity_bytes =
+            self.assertions.capacity() * std::mem::size_of::<ClosureIndex>();
+        base_size + map_capacity_bytes + assertions_capacity_bytes
     }
 
     /// Create a new empty Jsonnet object
@@ -37,6 +41,7 @@ impl ManagedObject {
         let properties = HashMap::new();
         Self {
             properties,
+            assertions: Vec::new(),
             marked: Cell::new(false),
         }
     }
@@ -45,6 +50,7 @@ impl ManagedObject {
     pub fn with_properties(properties: HashMap<StringIndex, Value>) -> Self {
         Self {
             properties,
+            assertions: Vec::new(),
             marked: Cell::new(false),
         }
     }
@@ -645,6 +651,10 @@ impl MemoryManager {
                                 values.push_back(Value::String(*field_key));
                                 values.push_back(*field_value);
                             }
+
+                            for assertion in &managed_object.assertions {
+                                values.push_back(Value::Closure(*assertion));
+                            }
                         }
                     } else {
                         #[cfg(feature = "gc_debug")]
@@ -946,6 +956,10 @@ impl MemoryManager {
         self.objects
             .get(key)
             .expect(format!("Object not found in SlotMap: {:?}", key).as_str())
+    }
+
+    pub fn get_object_mut(&mut self, key: ObjectIndex) -> Option<&mut ManagedObject> {
+        self.objects.get_mut(key)
     }
 
     pub fn load_string(&self, key: StringIndex) -> &str {

@@ -183,6 +183,15 @@ impl VirtualMachine {
         self.current_frame_mut().ip += 1;
     }
 
+    /// Execute a closure synchronously and return its result, preserving the current execution state.
+    /// This is used for evaluating object-level assertions during manifestation.
+    fn execute_closure_sync(&mut self, closure_index: ClosureIndex) -> Result<Value, RuntimeError> {
+        self.push(Value::Closure(closure_index))?;
+        let target_frame_count = self.frame_count;
+        self.call_closure(closure_index, 0)?;
+        self.interpret_until(target_frame_count)
+    }
+
     /// Call a closure with the given number of arguments.
     /// Stack layout: [..., closure, arg0, arg1, ..., argN]
     /// The closure stays on the stack and becomes slot 0 of the new frame.
@@ -483,6 +492,10 @@ impl VirtualMachine {
 
     /// Main interpretation loop
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
+        self.interpret_until(0)
+    }
+
+    fn interpret_until(&mut self, target_frame_count: usize) -> Result<Value, RuntimeError> {
         loop {
             let frame = self.current_frame();
             let chunk = self.current_chunk();
@@ -1034,16 +1047,42 @@ impl VirtualMachine {
                     }
                 }
 
+                Opcode::Assert => {
+                    let closure_val = self.pop()?;
+                    let object_val = self.pop()?;
+
+                    match (closure_val, object_val) {
+                        (Value::Closure(closure_idx), Value::Object(obj_idx)) => {
+                            if let Some(obj) = self.memory_manager.get_object_mut(obj_idx) {
+                                obj.assertions.push(closure_idx);
+                            } else {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "Invalid object reference for assert".to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                            // Push object back onto stack
+                            self.push(Value::Object(obj_idx))?;
+                        }
+                        (c, o) => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!(
+                                    "Invalid operands for Opcode::Assert: expected closure and object, got {:?} and {:?}",
+                                    c, o
+                                ),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+                    self.advance_pc();
+                }
+
                 Opcode::ObjectInsert => {
-                    let stack_len_before = self.stack.len();
                     let value = self.pop()?;
                     let key = self.pop()?;
                     let object_val = self.pop()?;
-
-                    eprintln!(
-                        "[VM] ObjectInsert: stack_len_before={}, value={:?}, key={:?}, object={:?}",
-                        stack_len_before, value, key, object_val
-                    );
 
                     match object_val {
                         Value::Object(obj_key) => {
@@ -1713,13 +1752,18 @@ impl VirtualMachine {
                     let return_value = self.pop()?;
 
                     // Check if this is the top-level script return
-                    if self.frame_count == 1 {
+                    if self.frame_count == 1 && target_frame_count == 0 {
                         // Top-level return - just return the value
                         return Ok(return_value);
                     }
 
                     // Return from function
                     let is_script_complete = self.return_from_function(return_value);
+
+                    if self.frame_count == target_frame_count {
+                        let val = self.pop()?;
+                        return Ok(val);
+                    }
 
                     if is_script_complete {
                         // We've returned from the top-level script
@@ -1962,14 +2006,19 @@ impl VirtualMachine {
 
                 visited.insert(object_key);
 
-                // Clone properties so we don't hold the borrow of memory manager
-                let properties: Vec<(StringIndex, Value)> = self
-                    .memory_manager
-                    .load_object(object_key)
+                // Clone assertions and properties so we don't hold the borrow of memory manager
+                let obj = self.memory_manager.load_object(object_key);
+                let assertions = obj.assertions.clone();
+                let properties: Vec<(StringIndex, Value)> = obj
                     .properties
                     .iter()
                     .map(|(k, v)| (*k, v.clone()))
                     .collect();
+
+                // Run assertions
+                for assertion in assertions {
+                    self.execute_closure_sync(assertion)?;
+                }
 
                 let mut json_object = serde_json::Map::new();
 
