@@ -425,7 +425,7 @@ impl<'a> Chunk<'a> {
         self.constants.len() - 1
     }
 
-    /// Gets the span for a given instruction index
+    /// Returns the source span for the instruction at the given index
     pub fn get_span(&self, instruction_index: usize) -> Option<&Range<usize>> {
         let mut current_index = 0;
 
@@ -437,6 +437,39 @@ impl<'a> Chunk<'a> {
         }
 
         None
+    }
+
+    /// Update the source span for the instruction at the given index.
+    /// This may involve splitting a run-length encoded span entry.
+    pub fn patch_span(&mut self, index: usize, span: Range<usize>) {
+        let mut current_pos = 0;
+        for i in 0..self.spans.len() {
+            let run_len = self.spans[i].repeated_values;
+            if index >= current_pos && index < current_pos + run_len {
+                if self.spans[i].span == span {
+                    return; // Already correct
+                }
+
+                let original_span = self.spans[i].span.clone();
+                let before_len = index - current_pos;
+                let after_len = (current_pos + run_len) - (index + 1);
+
+                // Split the run: [before] [index] [after]
+                let mut new_entries = Vec::new();
+                if before_len > 0 {
+                    new_entries.push(SpanRunLength::new(original_span.clone(), before_len));
+                }
+                new_entries.push(SpanRunLength::new(span, 1));
+                if after_len > 0 {
+                    new_entries.push(SpanRunLength::new(original_span, after_len));
+                }
+
+                // Replace the old entry with new entries
+                self.spans.splice(i..i + 1, new_entries);
+                return;
+            }
+            current_pos += run_len;
+        }
     }
 
     /// Creates an ariadne error report for a range of code offsets with the given message
@@ -568,11 +601,11 @@ impl<'a> Chunk<'a> {
         }
     }
 
-    /// Write a 32-bit signed integer to the bytecode (little-endian)
-    pub fn write_i32(&mut self, value: i32) {
+    /// Write a 32-bit signed integer to the bytecode (little-endian) with associated span
+    pub fn write_i32(&mut self, value: i32, span: Range<usize>) {
         let bytes = value.to_le_bytes();
         for byte in bytes {
-            self.code.push(byte);
+            self.write(byte, span.clone());
         }
     }
 

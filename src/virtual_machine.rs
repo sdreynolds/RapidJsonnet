@@ -46,6 +46,8 @@ pub struct VirtualMachine {
     stack: Vec<Value>,
     /// String pool for string interning and GC
     memory_manager: MemoryManager,
+    /// Start IP of the instruction currently being executed
+    instruction_start_ip: usize,
 }
 
 impl VirtualMachine {
@@ -70,8 +72,9 @@ impl VirtualMachine {
             frames,
             frame_count: 1,
             open_upvalues: None,
-            stack: Vec::with_capacity(1024),
+            stack: Vec::with_capacity(256),
             memory_manager,
+            instruction_start_ip: 0,
         }
     }
 
@@ -141,9 +144,8 @@ impl VirtualMachine {
 
     /// Get the source span for the current instruction
     fn get_current_span(&self) -> Range<usize> {
-        let frame = self.current_frame();
         self.current_chunk()
-            .get_span(frame.ip)
+            .get_span(self.instruction_start_ip)
             .cloned()
             .unwrap_or(0..0)
     }
@@ -497,6 +499,9 @@ impl VirtualMachine {
 
     fn interpret_until(&mut self, target_frame_count: usize) -> Result<Value, RuntimeError> {
         loop {
+            // Store the start IP of this instruction for error reporting
+            self.instruction_start_ip = self.current_frame().ip;
+
             let frame = self.current_frame();
             let chunk = self.current_chunk();
 

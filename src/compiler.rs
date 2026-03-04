@@ -719,16 +719,16 @@ impl<'a> Compiler<'a> {
     }
 
     /// Emit a 32-bit signed integer to the bytecode
-    fn emit_i32(&mut self, value: i32) {
-        self.compiling_chunk.write_i32(value);
+    fn emit_i32(&mut self, value: i32, span: Range<usize>) {
+        self.compiling_chunk.write_i32(value, span);
     }
 
     /// Emit a jump instruction with a placeholder offset, return position for patching
     fn emit_jump(&mut self, opcode: Opcode, span: Range<usize>) -> usize {
-        self.emit_opcode(opcode, span);
+        self.emit_opcode(opcode, span.clone());
         let jump_pos = self.compiling_chunk.count();
         const PLACEHOLDER_OFFSET: i32 = 0x7FFFFFFF; // Use max i32 as placeholder
-        self.emit_i32(PLACEHOLDER_OFFSET);
+        self.emit_i32(PLACEHOLDER_OFFSET, span);
         jump_pos
     }
 
@@ -740,6 +740,14 @@ impl<'a> Compiler<'a> {
 
         // Go back and write the actual offset
         self.compiling_chunk.patch_i32(jump_pos, offset);
+    }
+
+    /// Update the source span for a previously emitted jump instruction (opcode + i32 operand)
+    fn patch_jump_span(&mut self, jump_pos: usize, span: std::ops::Range<usize>) {
+        // Opcode (1 byte) + i32 operand (4 bytes) = 5 bytes
+        for i in 0..5 {
+            self.compiling_chunk.patch_span(jump_pos - 1 + i, span.clone());
+        }
     }
 
     fn emit_constant(&mut self, value: f64) -> Result<u16, CompilerError> {
@@ -1146,8 +1154,8 @@ impl<'a> Compiler<'a> {
                 }
 
                 if key_token.token == Token::Assert {
+                    let assert_start = key_token.span.start;
                     self.parser.advance()?; // consume 'assert'
-                    let assert_span = key_token.span;
 
                     // Compile the assertion as a closure
                     let saved_state = self.begin_function();
@@ -1157,38 +1165,48 @@ impl<'a> Compiler<'a> {
 
                     // Evaluate condition
                     self.parse_expr(0, memory_manager)?;
-                    let jump_to_success = self.emit_jump(Opcode::JumpIfTrue, assert_span.clone());
 
-                    // Evaluate error msg
-                    let has_msg = if let Some(TokenInfo {
+                    // Check for optional msg token
+                    let has_msg_colon = if let Some(TokenInfo {
                         token: Token::Operator(op),
                         ..
                     }) = self.parser.current_token()
                     {
-                        if op == ":" {
-                            self.parser.advance()?; // consume ':'
-                            self.parse_expr(0, memory_manager)?;
-                            true
-                        } else {
-                            false
-                        }
+                        op == ":"
                     } else {
                         false
                     };
 
-                    if !has_msg {
+                    let jump_to_success = self.emit_jump(Opcode::JumpIfTrue, 0..0);
+
+                    // Evaluate error msg (failure path)
+                    if has_msg_colon {
+                        self.parser.advance()?; // consume ':'
+                        self.parse_expr(0, memory_manager)?;
+                    } else {
                         self.emit_string_constant(
                             memory_manager.allocate_string("Assertion failed").index,
                         )?;
                     }
 
-                    self.emit_opcode(Opcode::Error, assert_span.clone());
+                    // Calculate full span for reporting errors
+                    let assert_end = if let Some(prev_token) = self.parser.previous_token() {
+                        prev_token.span.end
+                    } else {
+                        assert_start + 6
+                    };
+                    let full_assert_span = assert_start..assert_end;
+
+                    // Patch the jump span
+                    self.patch_jump_span(jump_to_success, full_assert_span.clone());
+
+                    self.emit_opcode(Opcode::Error, full_assert_span.clone());
 
                     self.patch_jump(jump_to_success);
 
                     // Return null on success
-                    self.emit_opcode(Opcode::LoadNull, assert_span.clone());
-                    self.emit_opcode(Opcode::Return, assert_span.clone());
+                    self.emit_opcode(Opcode::LoadNull, full_assert_span.clone());
+                    self.emit_opcode(Opcode::Return, full_assert_span);
 
                     self.end_scope();
 
@@ -1197,7 +1215,7 @@ impl<'a> Compiler<'a> {
                     self.emit_closure(chunk, upvalues, arity, memory_manager)?;
 
                     // Attach the closure to the object
-                    self.emit_opcode(Opcode::Assert, assert_span.clone());
+                    self.emit_opcode(Opcode::Assert, key_token.span.clone());
 
                     // Check for trailing comma or end
                     if let Some(current) = self.parser.current_token() {
@@ -1794,7 +1812,7 @@ impl<'a> Compiler<'a> {
                 let jump_back_offset = self.compiling_chunk.count();
                 self.emit_opcode(Opcode::Jump, clause_span.clone());
                 let back_offset = loop_start as i32 - (jump_back_offset as i32 + 1 + 4);
-                self.emit_i32(back_offset);
+                self.emit_i32(back_offset, clause_span.clone());
                 self.patch_jump(jump_to_end);
 
                 self.emit_opcode(Opcode::LoadNull, clause_span.clone());
@@ -2092,7 +2110,7 @@ impl<'a> Compiler<'a> {
                 let jump_back_offset = self.compiling_chunk.count();
                 self.emit_opcode(Opcode::Jump, clause_span.clone());
                 let back_offset = loop_start as i32 - (jump_back_offset as i32 + 1 + 4);
-                self.emit_i32(back_offset);
+                self.emit_i32(back_offset, clause_span.clone());
 
                 // LOOP_END:
                 self.patch_jump(jump_to_end);
@@ -2514,44 +2532,54 @@ impl<'a> Compiler<'a> {
         &mut self,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
-        let assert_span = self.current_span();
+        let assert_start = self.current_span().start;
 
         self.parser.advance()?; // consume 'assert'
 
         // 1. Evaluate condition
         self.parse_expr(0, memory_manager)?;
 
-        // 2. JumpIfFalse to error branch
-        let jump_to_error_offset = self.emit_jump(Opcode::JumpIfFalse, assert_span.clone());
-
-        // 3. We jump over the message evaluation and error logic directly to the body
-        let jump_to_body_offset = self.emit_jump(Opcode::Jump, assert_span.clone());
-
-        // 4. We are at error branch. Backpatch JumpIfFalse to here.
-        self.patch_jump(jump_to_error_offset);
-
-        // Parse optional msg
-        let has_msg = if let Some(TokenInfo {
+        // Check for optional msg token but don't parse the expression yet
+        let has_msg_colon = if let Some(TokenInfo {
             token: Token::Operator(op),
             ..
         }) = self.parser.current_token()
         {
-            if op == ":" {
-                self.parser.advance()?; // consume ':'
-                self.parse_expr(0, memory_manager)?;
-                true
-            } else {
-                false
-            }
+            op == ":"
         } else {
             false
         };
 
-        if !has_msg {
+        // 2. JumpIfFalse to error branch
+        // We'll calculate the full assert span once we've parsed the message (if any)
+        let jump_to_error_offset = self.emit_jump(Opcode::JumpIfFalse, 0..0);
+
+        // 3. We jump over the message evaluation and error logic directly to the body
+        let jump_to_body_offset = self.emit_jump(Opcode::Jump, 0..0);
+
+        // 4. We are at error branch. Backpatch JumpIfFalse to here.
+        self.patch_jump(jump_to_error_offset);
+
+        if has_msg_colon {
+            self.parser.advance()?; // consume ':'
+            self.parse_expr(0, memory_manager)?;
+        } else {
             self.emit_string_constant(memory_manager.allocate_string("Assertion failed").index)?;
         }
 
-        self.emit_opcode(Opcode::Error, assert_span.clone());
+        // Calculate the span from 'assert' to the end of the condition or message
+        let assert_end = if let Some(prev_token) = self.parser.previous_token() {
+            prev_token.span.end
+        } else {
+            assert_start + 6
+        };
+        let full_assert_span = assert_start..assert_end;
+
+        // Update the jump spans
+        self.patch_jump_span(jump_to_error_offset, full_assert_span.clone());
+        self.patch_jump_span(jump_to_body_offset, full_assert_span.clone());
+
+        self.emit_opcode(Opcode::Error, full_assert_span);
 
         // 5. We are at body branch. Backpatch the unconditional Jump to here.
         self.patch_jump(jump_to_body_offset);
