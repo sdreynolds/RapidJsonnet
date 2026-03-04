@@ -1038,6 +1038,14 @@ impl<'a> Compiler<'a> {
             Token::LeftParen => {
                 self.parser.advance()?; // consume '('
 
+                // Check if we are calling a native function
+                let native_id =
+                    if let Some(ExpressionType::NativeFunction(id)) = self.type_stack.last() {
+                        Some(*id)
+                    } else {
+                        None
+                    };
+
                 // Parse argument list
                 let mut arg_count = 0u8;
 
@@ -1067,13 +1075,22 @@ impl<'a> Compiler<'a> {
                 self.parser
                     .consume(Token::RightParen, "Expected ')' after arguments")?;
 
-                // Emit Call opcode with positional_count and named_count
-                // For now, we only support positional arguments
-                let span = token.span;
-                self.compiling_chunk
-                    .write_opcode(Opcode::Call, span.clone());
-                self.compiling_chunk.write(arg_count, span.clone()); // positional_count
-                self.compiling_chunk.write(0, span); // named_count (not yet supported)
+                if let Some(id) = native_id {
+                    self.type_stack.pop();
+                    // Emit StdCall opcode with native function ID and arg count
+                    let span = token.span;
+                    self.compiling_chunk
+                        .write_opcode_u16(Opcode::StdCall, id as u16, span.clone());
+                    self.compiling_chunk.write(arg_count, span);
+                } else {
+                    // Emit Call opcode with positional_count and named_count
+                    // For now, we only support positional arguments
+                    let span = token.span;
+                    self.compiling_chunk
+                        .write_opcode(Opcode::Call, span.clone());
+                    self.compiling_chunk.write(arg_count, span.clone()); // positional_count
+                    self.compiling_chunk.write(0, span); // named_count (not yet supported)
+                }
 
                 // Function call can return any type
                 self.push_type(ExpressionType::Unknown);

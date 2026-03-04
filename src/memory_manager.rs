@@ -359,9 +359,9 @@ pub struct MemoryManager {
     /// GC threshold for triggering collection
     gc_threshold: usize,
     /// External roots to be considered during GC (used for nested VM execution)
-    external_roots: Vec<Vec<Value>>,
+    pub external_roots: Vec<Vec<Value>>,
     /// External upvalue roots to be considered during GC
-    external_upvalue_roots: Vec<Vec<UpvalueIndex>>,
+    pub external_upvalue_roots: Vec<Vec<UpvalueIndex>>,
 }
 
 impl MemoryManager {

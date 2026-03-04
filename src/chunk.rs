@@ -26,6 +26,9 @@ pub enum NativeFuncId {
     Type = 0,
     Length = 1,
     Abs = 2,
+    Codepoint = 3,
+    Char = 4,
+    MakeArray = 5,
 }
 
 impl NativeFuncId {
@@ -35,6 +38,9 @@ impl NativeFuncId {
             0 => Some(NativeFuncId::Type),
             1 => Some(NativeFuncId::Length),
             2 => Some(NativeFuncId::Abs),
+            3 => Some(NativeFuncId::Codepoint),
+            4 => Some(NativeFuncId::Char),
+            5 => Some(NativeFuncId::MakeArray),
             _ => None,
         }
     }
@@ -45,6 +51,9 @@ impl NativeFuncId {
             NativeFuncId::Type => 1,
             NativeFuncId::Length => 1,
             NativeFuncId::Abs => 1,
+            NativeFuncId::Codepoint => 1,
+            NativeFuncId::Char => 1,
+            NativeFuncId::MakeArray => 2,
         }
     }
 
@@ -54,6 +63,9 @@ impl NativeFuncId {
             NativeFuncId::Type => "type",
             NativeFuncId::Length => "length",
             NativeFuncId::Abs => "abs",
+            NativeFuncId::Codepoint => "codepoint",
+            NativeFuncId::Char => "char",
+            NativeFuncId::MakeArray => "makeArray",
         }
     }
 
@@ -63,6 +75,9 @@ impl NativeFuncId {
             "type" => Some(NativeFuncId::Type),
             "length" => Some(NativeFuncId::Length),
             "abs" => Some(NativeFuncId::Abs),
+            "codepoint" => Some(NativeFuncId::Codepoint),
+            "char" => Some(NativeFuncId::Char),
+            "makeArray" => Some(NativeFuncId::MakeArray),
             _ => None,
         }
     }

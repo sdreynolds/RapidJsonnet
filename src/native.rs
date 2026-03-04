@@ -27,6 +27,83 @@ pub fn call_native(
         NativeFuncId::Type => std_type(args[0], memory_manager, span),
         NativeFuncId::Length => std_length(args[0], memory_manager, span, source_id),
         NativeFuncId::Abs => std_abs(args[0], span, source_id),
+        NativeFuncId::Codepoint => std_codepoint(args[0], memory_manager, span, source_id),
+        NativeFuncId::Char => std_char(args[0], memory_manager, span, source_id),
+        NativeFuncId::MakeArray => Err(RuntimeError {
+            span,
+            message: "std.makeArray must be handled specially by the VM".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.codepoint(str): Returns the positive integer representing the unicode codepoint of the string
+fn std_codepoint(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx);
+            let mut chars = s.chars();
+
+            if let Some(c) = chars.next() {
+                if chars.next().is_none() {
+                    return Ok(Value::Number(c as u32 as f64));
+                }
+            }
+
+            Err(RuntimeError {
+                span,
+                message: format!("std.codepoint() expected string of length 1, got '{}'", s),
+                source_id,
+            })
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: format!("std.codepoint() expected string, but got something else"),
+            source_id,
+        }),
+    }
+}
+
+/// std.char(n): Returns a string containing a single character corresponding to the unicode codepoint n
+fn std_char(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => {
+            if n < 0.0 || n.fract() != 0.0 {
+                return Err(RuntimeError {
+                    span,
+                    message: format!("std.char() expected a positive integer, got {}", n),
+                    source_id,
+                });
+            }
+
+            let codepoint = n as u32;
+            match std::char::from_u32(codepoint) {
+                Some(c) => {
+                    let allocation = memory_manager.allocate_string(&c.to_string());
+                    Ok(Value::String(allocation.index))
+                }
+                None => Err(RuntimeError {
+                    span,
+                    message: format!("std.char() invalid unicode codepoint {}", codepoint),
+                    source_id,
+                }),
+            }
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: format!("std.char() expected number, but got something else"),
+            source_id,
+        }),
     }
 }
 

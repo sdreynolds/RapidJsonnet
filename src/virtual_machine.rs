@@ -1511,9 +1511,95 @@ impl VirtualMachine {
 
                     // Extract arguments from stack
                     let args = self.stack[self.stack.len() - arg_count..].to_vec();
-                    // Pop arguments
-                    for _ in 0..arg_count {
+                    // Pop arguments and the native function value itself
+                    for _ in 0..=arg_count {
                         self.pop()?;
+                    }
+
+                    if func_id == chunk::NativeFuncId::MakeArray {
+                        // Handle MakeArray natively within the VM to allow calling closures
+                        let sz_val = args[0];
+                        let func_val = args[1];
+
+                        let sz = match sz_val {
+                            Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "std.makeArray expected positive integer for size, got {}",
+                                        sz_val
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+
+                        // Create ephemeral chunk to loop and create the array
+                        let mut make_array_chunk = chunk::Chunk::new("<makearray>");
+                        let func_idx = make_array_chunk.add_constant(func_val);
+
+                        make_array_chunk.write_opcode_u16(Opcode::CreateArray, 0, 0..0);
+
+                        for i in 0..sz {
+                            let i_idx = make_array_chunk.add_constant(Value::Number(i as f64));
+                            make_array_chunk.write_opcode_u16(
+                                Opcode::LoadConst,
+                                func_idx as u16,
+                                0..0,
+                            );
+                            make_array_chunk.write_opcode_u16(
+                                Opcode::LoadConst,
+                                i_idx as u16,
+                                0..0,
+                            );
+                            make_array_chunk.write_opcode_u8_u8(Opcode::Call, 1, 0, 0..0);
+                            make_array_chunk.write_opcode(Opcode::ArrayAppend, 0..0);
+                        }
+
+                        make_array_chunk.write_opcode(Opcode::Return, 0..0);
+
+                        let owned_chunk = make_array_chunk.into_owned();
+                        let function_allocation =
+                            self.memory_manager
+                                .allocate_function(None, 0, 0, owned_chunk);
+                        let function_index = function_allocation.index;
+
+                        // Temporarily root the function while we allocate the closure
+                        self.memory_manager
+                            .external_roots
+                            .push(vec![Value::Function(function_index)]);
+
+                        // Create a closure from the function to invoke it
+                        let closure_allocation = self
+                            .memory_manager
+                            .allocate_closure(function_index, Vec::new());
+                        let closure_index = closure_allocation.index;
+
+                        // Remove the temporary root
+                        self.memory_manager.external_roots.pop();
+
+                        // Call it by pushing a frame!
+                        let new_frame = CallFrame {
+                            closure: closure_index,
+                            ip: 0,
+                            stack_base: self.stack.len(),
+                        };
+
+                        if self.frame_count < self.frames.len() {
+                            self.frames[self.frame_count] = new_frame;
+                        } else {
+                            self.frames.push(new_frame);
+                        }
+                        self.frame_count += 1;
+
+                        if function_allocation.should_garbage_collect
+                            || closure_allocation.should_garbage_collect
+                        {
+                            self.run_garbage_collection();
+                        }
+
+                        continue;
                     }
 
                     // Call native function
@@ -1988,8 +2074,45 @@ impl VirtualMachine {
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b, // compares only the keys and so can be quick
+            (Value::Array(a_idx), Value::Array(b_idx)) => {
+                if a_idx == b_idx {
+                    return true;
+                }
+                let a_arr = self.memory_manager.load_array(*a_idx);
+                let b_arr = self.memory_manager.load_array(*b_idx);
+                if a_arr.elements.len() != b_arr.elements.len() {
+                    return false;
+                }
+                for (v_a, v_b) in a_arr.elements.iter().zip(b_arr.elements.iter()) {
+                    if !self.values_equal(v_a, v_b) {
+                        return false;
+                    }
+                }
+                true
+            }
+            (Value::Object(a_idx), Value::Object(b_idx)) => {
+                if a_idx == b_idx {
+                    return true;
+                }
+                let a_obj = self.memory_manager.load_object(*a_idx);
+                let b_obj = self.memory_manager.load_object(*b_idx);
+                if a_obj.properties.len() != b_obj.properties.len() {
+                    return false;
+                }
+                for (name, val_a) in a_obj.properties.iter() {
+                    match b_obj.properties.get(name) {
+                        Some(val_b) => {
+                            if !self.values_equal(val_a, val_b) {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+                true
+            }
             (Value::Function(a), Value::Function(b)) => a == b, // compare function indices
-            (Value::Closure(a), Value::Closure(b)) => a == b, // compare closure indices
+            (Value::Closure(a), Value::Closure(b)) => a == b,   // compare closure indices
             (Value::Binary(a), Value::Binary(b)) => a == b, // compare binary object keys (identity)
 
             // Different types are never equal
