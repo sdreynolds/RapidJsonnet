@@ -2,7 +2,7 @@ use chunk::{
     ArrayIndex, BinaryIndex, ClosureIndex, FunctionIndex, ImportIndex, ObjectIndex, OwnedChunk,
     SpanRunLength, StringIndex, UpvalueIndex, Value,
 };
-use slotmap::{DefaultKey, SlotMap};
+use slotmap::SlotMap;
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -615,10 +615,12 @@ impl MemoryManager {
             match head {
                 Value::String(string_index) => {
                     if let Some(ms) = self.strings.get_mut(string_index) {
-                        ms.marked.set(true);
-                        #[cfg(feature = "gc_debug")]
-                        {
-                            eprintln!("[MemoryManager] Marking String {:?}", string_index)
+                        if !ms.marked.get() {
+                            ms.marked.set(true);
+                            #[cfg(feature = "gc_debug")]
+                            {
+                                eprintln!("[MemoryManager] Marking String {:?}", string_index)
+                            }
                         }
                     } else {
                         #[cfg(feature = "gc_debug")]
@@ -632,15 +634,17 @@ impl MemoryManager {
                 }
                 Value::Object(object_index) => {
                     if let Some(managed_object) = self.objects.get_mut(object_index) {
-                        managed_object.marked.set(true);
-                        #[cfg(feature = "gc_debug")]
-                        {
-                            eprintln!("[MemoryManager] Marking Object {:?}", object_index)
-                        }
+                        if !managed_object.marked.get() {
+                            managed_object.marked.set(true);
+                            #[cfg(feature = "gc_debug")]
+                            {
+                                eprintln!("[MemoryManager] Marking Object {:?}", object_index)
+                            }
 
-                        for (field_key, field_value) in &managed_object.properties {
-                            values.push_back(Value::String(*field_key));
-                            values.push_back(*field_value);
+                            for (field_key, field_value) in &managed_object.properties {
+                                values.push_back(Value::String(*field_key));
+                                values.push_back(*field_value);
+                            }
                         }
                     } else {
                         #[cfg(feature = "gc_debug")]
@@ -654,15 +658,17 @@ impl MemoryManager {
                 }
                 Value::Array(array_index) => {
                     if let Some(managed_array) = self.arrays.get_mut(array_index) {
-                        managed_array.marked.set(true);
-                        #[cfg(feature = "gc_debug")]
-                        {
-                            eprintln!("[MemoryManager] Marking Array {:?}", array_index)
-                        }
+                        if !managed_array.marked.get() {
+                            managed_array.marked.set(true);
+                            #[cfg(feature = "gc_debug")]
+                            {
+                                eprintln!("[MemoryManager] Marking Array {:?}", array_index)
+                            }
 
-                        // Mark all elements in the array
-                        for element in &managed_array.elements {
-                            values.push_back(*element);
+                            // Mark all elements in the array
+                            for element in &managed_array.elements {
+                                values.push_back(*element);
+                            }
                         }
                     } else {
                         #[cfg(feature = "gc_debug")]
@@ -676,20 +682,22 @@ impl MemoryManager {
                 }
                 Value::Function(function_index) => {
                     if let Some(managed_function) = self.functions.get_mut(function_index) {
-                        managed_function.marked.set(true);
-                        #[cfg(feature = "gc_debug")]
-                        {
-                            eprintln!("[MemoryManager] Marking Function {:?}", function_index)
-                        }
+                        if !managed_function.marked.get() {
+                            managed_function.marked.set(true);
+                            #[cfg(feature = "gc_debug")]
+                            {
+                                eprintln!("[MemoryManager] Marking Function {:?}", function_index)
+                            }
 
-                        // Mark the function name if present
-                        if let Some(name_index) = managed_function.name {
-                            values.push_back(Value::String(name_index));
-                        }
+                            // Mark the function name if present
+                            if let Some(name_index) = managed_function.name {
+                                values.push_back(Value::String(name_index));
+                            }
 
-                        // Mark all constants in the function's chunk
-                        for constant in &managed_function.chunk.constants {
-                            values.push_back(*constant);
+                            // Mark all constants in the function's chunk
+                            for constant in &managed_function.chunk.constants {
+                                values.push_back(*constant);
+                            }
                         }
                     } else {
                         #[cfg(feature = "gc_debug")]
@@ -703,21 +711,24 @@ impl MemoryManager {
                 }
                 Value::Closure(closure_index) => {
                     if let Some(managed_closure) = self.closures.get_mut(closure_index) {
-                        managed_closure.marked.set(true);
-                        #[cfg(feature = "gc_debug")]
-                        {
-                            eprintln!("[MemoryManager] Marking Closure {:?}", closure_index)
-                        }
+                        if !managed_closure.marked.get() {
+                            managed_closure.marked.set(true);
+                            #[cfg(feature = "gc_debug")]
+                            {
+                                eprintln!("[MemoryManager] Marking Closure {:?}", closure_index)
+                            }
 
-                        // Mark the function this closure wraps
-                        values.push_back(Value::Function(managed_closure.function));
+                            // Mark the function this closure wraps
+                            values.push_back(Value::Function(managed_closure.function));
 
-                        // Collect upvalue indices to avoid borrow checker issues
-                        let upvalue_indices: Vec<UpvalueIndex> = managed_closure.upvalues.clone();
+                            // Collect upvalue indices to avoid borrow checker issues
+                            let upvalue_indices: Vec<UpvalueIndex> =
+                                managed_closure.upvalues.clone();
 
-                        // Mark all upvalues in this closure
-                        for upvalue_index in upvalue_indices {
-                            self.mark_upvalue(upvalue_index, &mut values);
+                            // Mark all upvalues in this closure
+                            for upvalue_index in upvalue_indices {
+                                self.mark_upvalue(upvalue_index, &mut values);
+                            }
                         }
                     } else {
                         #[cfg(feature = "gc_debug")]
@@ -731,18 +742,20 @@ impl MemoryManager {
                 }
                 Value::Import(import_index) => {
                     if let Some(managed_import) = self.imports.get_mut(import_index) {
-                        managed_import.marked.set(true);
-                        #[cfg(feature = "gc_debug")]
-                        {
-                            eprintln!("[MemoryManager] Marking Import {:?}", import_index)
-                        }
+                        if !managed_import.marked.get() {
+                            managed_import.marked.set(true);
+                            #[cfg(feature = "gc_debug")]
+                            {
+                                eprintln!("[MemoryManager] Marking Import {:?}", import_index)
+                            }
 
-                        // Mark the path string
-                        values.push_back(Value::String(managed_import.path));
+                            // Mark the path string
+                            values.push_back(Value::String(managed_import.path));
 
-                        // Mark the cached result if it exists
-                        if let Some(cached_value) = managed_import.cached_result {
-                            values.push_back(cached_value);
+                            // Mark the cached result if it exists
+                            if let Some(cached_value) = managed_import.cached_result {
+                                values.push_back(cached_value);
+                            }
                         }
                     } else {
                         #[cfg(feature = "gc_debug")]

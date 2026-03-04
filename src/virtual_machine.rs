@@ -7,6 +7,8 @@ use memory_manager::MemoryManager;
 use scanner;
 use std::ops::Range;
 
+use native::call_native;
+
 /// Maximum number of nested function calls
 const MAX_FRAMES: usize = 256;
 
@@ -647,6 +649,7 @@ impl VirtualMachine {
                                 | Value::Array(_)
                                 | Value::Function(_)
                                 | Value::Closure(_)
+                                | Value::NativeFunction(_)
                                 | Value::Import(_)
                                 | Value::Binary(_) => unreachable!(),
                             };
@@ -659,6 +662,7 @@ impl VirtualMachine {
                                 | Value::Array(_)
                                 | Value::Function(_)
                                 | Value::Closure(_)
+                                | Value::NativeFunction(_)
                                 | Value::Import(_)
                                 | Value::Binary(_) => unreachable!(),
                             };
@@ -820,7 +824,9 @@ impl VirtualMachine {
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                                 Value::Array(_) => "{array}".to_string(),
-                                Value::Function(_) => "{function}".to_string(),
+                                Value::Function(_) | Value::NativeFunction(_) => {
+                                    "{function}".to_string()
+                                }
                                 Value::Closure(_) => "{closure}".to_string(),
                                 Value::Import(_) => "{import}".to_string(),
                                 Value::Binary(_) => "{binary}".to_string(),
@@ -832,7 +838,9 @@ impl VirtualMachine {
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                                 Value::Array(_) => "{array}".to_string(),
-                                Value::Function(_) => "{function}".to_string(),
+                                Value::Function(_) | Value::NativeFunction(_) => {
+                                    "{function}".to_string()
+                                }
                                 Value::Closure(_) => "{closure}".to_string(),
                                 Value::Import(_) => "{import}".to_string(),
                                 Value::Binary(_) => "{binary}".to_string(),
@@ -1418,6 +1426,44 @@ impl VirtualMachine {
                     self.advance_pc();
                 }
 
+                Opcode::StdCall => {
+                    let frame = self.current_frame();
+                    let chunk = self.current_chunk();
+
+                    if frame.ip + 3 >= chunk.count() {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing StdCall operands".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        });
+                    }
+
+                    let func_id_val = chunk.read_u16(frame.ip + 1).unwrap();
+                    let arg_count = chunk.read_u8(frame.ip + 3).unwrap() as usize;
+                    self.current_frame_mut().ip += 4; // opcode + u16 + u8
+
+                    let func_id =
+                        chunk::NativeFuncId::from_u16(func_id_val).ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!("Invalid native function ID: {}", func_id_val),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        })?;
+
+                    // Extract arguments from stack
+                    let args = self.stack[self.stack.len() - arg_count..].to_vec();
+                    // Pop arguments
+                    for _ in 0..arg_count {
+                        self.pop()?;
+                    }
+
+                    // Call native function
+                    let span = self.get_current_span();
+                    let source_id = self.current_chunk().source_id.to_string();
+                    let result =
+                        call_native(func_id, &args, &mut self.memory_manager, span, source_id)?;
+                    self.push(result)?;
+                }
+
                 Opcode::Error => {
                     // Pop the error message value from the stack
                     let error_value = self.pop()?;
@@ -1638,6 +1684,20 @@ impl VirtualMachine {
                     match callee {
                         Value::Closure(closure_index) => {
                             self.call_closure(closure_index, arg_count)?;
+                        }
+                        Value::NativeFunction(id) => {
+                            // Extract arguments from stack
+                            let args = self.stack[self.stack.len() - arg_count..].to_vec();
+                            // Pop arguments and callee
+                            for _ in 0..=arg_count {
+                                self.pop()?;
+                            }
+                            // Call native function
+                            let span = self.get_current_span();
+                            let source_id = self.current_chunk().source_id.to_string();
+                            let result =
+                                call_native(id, &args, &mut self.memory_manager, span, source_id)?;
+                            self.push(result)?;
                         }
                         _ => {
                             return Err(RuntimeError {
@@ -1952,6 +2012,11 @@ impl VirtualMachine {
                 message: "Cannot serialize closure to JSON".to_string(),
                 source_id: "serialization".to_string(),
             }),
+            Value::NativeFunction(_) => Err(RuntimeError {
+                span: 0..0,
+                message: "Cannot serialize native function to JSON".to_string(),
+                source_id: "serialization".to_string(),
+            }),
             Value::Import(_) => Err(RuntimeError {
                 span: 0..0,
                 message: "Cannot serialize unresolved import to JSON".to_string(),
@@ -1993,6 +2058,7 @@ impl VirtualMachine {
             Value::Binary(x) => Ok(self.memory_manager.load_binary(x).data.len() > 0),
             Value::Function(_) => Ok(true), // Functions are truthy
             Value::Closure(_) => Ok(true),  // Closures are truthy
+            Value::NativeFunction(_) => Ok(true), // Native functions are truthy
             Value::Import(_) => Ok(true),   // Should be unreachable due to force_value
         }
     }

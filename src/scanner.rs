@@ -253,11 +253,11 @@ impl<'a> Scanner<'a> {
     }
 
     fn peek(&self) -> char {
-        self.input.chars().nth(self.position).unwrap_or('\0')
+        self.input[self.position..].chars().next().unwrap_or('\0')
     }
 
     fn peek_ahead(&self, offset: usize) -> Option<char> {
-        self.input.chars().nth(self.position + offset)
+        self.input[self.position..].chars().nth(offset)
     }
 
     fn advance(&mut self) -> char {
@@ -707,6 +707,18 @@ mod tests {
             scan_single_token("@\"verbatim\"").unwrap(),
             Token::String("verbatim".to_string())
         );
+    }
+
+    #[test]
+    fn test_unicode() {
+        let mut scanner = Scanner::new("\"🚀\"", "test");
+        let tokens = scanner.scan_all().unwrap();
+        assert_eq!(tokens.len(), 2); // String and Eof
+        if let Token::String(s) = &tokens[0].token {
+            assert_eq!(s, "🚀");
+        } else {
+            panic!("Expected string token");
+        }
     }
 
     #[test]

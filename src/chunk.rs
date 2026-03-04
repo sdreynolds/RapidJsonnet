@@ -20,6 +20,54 @@ pub type ImportIndex = DefaultKey;
 pub type UpvalueIndex = DefaultKey;
 pub type BinaryIndex = DefaultKey;
 
+/// Unique identifier for each native function
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NativeFuncId {
+    Type = 0,
+    Length = 1,
+    Abs = 2,
+}
+
+impl NativeFuncId {
+    /// Convert a u16 to a NativeFuncId, returning None if invalid
+    pub fn from_u16(val: u16) -> Option<Self> {
+        match val {
+            0 => Some(NativeFuncId::Type),
+            1 => Some(NativeFuncId::Length),
+            2 => Some(NativeFuncId::Abs),
+            _ => None,
+        }
+    }
+
+    /// Get the arity (number of expected arguments) for the function
+    pub fn arity(&self) -> u8 {
+        match self {
+            NativeFuncId::Type => 1,
+            NativeFuncId::Length => 1,
+            NativeFuncId::Abs => 1,
+        }
+    }
+
+    /// Get the name of the function
+    pub fn name(&self) -> &'static str {
+        match self {
+            NativeFuncId::Type => "type",
+            NativeFuncId::Length => "length",
+            NativeFuncId::Abs => "abs",
+        }
+    }
+
+    /// Lookup a native function by name
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "type" => Some(NativeFuncId::Type),
+            "length" => Some(NativeFuncId::Length),
+            "abs" => Some(NativeFuncId::Abs),
+            _ => None,
+        }
+    }
+}
+
 /// Value type for the Jsonnet virtual machine
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Value {
@@ -33,6 +81,7 @@ pub enum Value {
     Closure(ClosureIndex),
     Import(ImportIndex),
     Binary(BinaryIndex),
+    NativeFunction(NativeFuncId),
 }
 
 // Manual implementation of Eq for Value
@@ -88,6 +137,10 @@ impl std::hash::Hash for Value {
                 9u8.hash(state);
                 key.hash(state);
             }
+            Value::NativeFunction(id) => {
+                10u8.hash(state);
+                id.hash(state);
+            }
         }
     }
 }
@@ -117,6 +170,7 @@ impl std::fmt::Display for Value {
             Value::Closure(index) => write!(f, "Closure[{:?}]", index),
             Value::Import(index) => write!(f, "Import[{:?}]", index),
             Value::Binary(index) => write!(f, "Binary[{:?}]", index),
+            Value::NativeFunction(id) => write!(f, "NativeFunction[{:?}]", id),
         }
     }
 }
@@ -767,6 +821,11 @@ impl OwnedChunk {
     /// Returns the number of instructions in the chunk
     pub fn count(&self) -> usize {
         self.code.len()
+    }
+
+    /// Read a u8 from the code at the given index
+    pub fn read_u8(&self, index: usize) -> Option<u8> {
+        self.code.get(index).copied()
     }
 
     /// Read a u16 from the code at the given index (little-endian)

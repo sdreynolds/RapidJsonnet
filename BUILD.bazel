@@ -61,8 +61,22 @@ rust_library(
         ":compiler",
         ":memory_manager",
         ":scanner",
+        ":native",
         "@crates//:serde_json",
         "@crates//:slotmap"
+    ],
+    crate_features = [
+        "stress_gc",
+        "gc_debug",
+    ]
+)
+
+rust_library(
+    name = "native",
+    srcs = ["src/native.rs"],
+    deps = [
+        ":chunk",
+        ":memory_manager",
     ],
     crate_features = [
         "stress_gc",
@@ -135,7 +149,8 @@ rustfmt_test(
         ":scanner",
         ":parser",
         ":chunk",
-        ":memory_manager"
+        ":memory_manager",
+        ":native"
     ],
 )
 

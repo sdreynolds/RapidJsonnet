@@ -32,6 +32,8 @@ enum ExpressionType {
     Object,
     Array,
     Unknown,
+    StdNamespace,
+    NativeFunction(chunk::NativeFuncId),
 }
 
 // Local variable tracking for compile-time stack slot assignment
@@ -480,6 +482,9 @@ impl<'a> Compiler<'a> {
                         span,
                     );
                     self.push_type(ExpressionType::Unknown);
+                } else if name_clone == "std" {
+                    // Special case for std namespace
+                    self.push_type(ExpressionType::StdNamespace);
                 } else {
                     // Variable not found
                     return Err(
@@ -826,13 +831,6 @@ impl<'a> Compiler<'a> {
         self.type_stack.pop().unwrap_or(ExpressionType::Unknown)
     }
 
-    fn peek_type(&self) -> ExpressionType {
-        self.type_stack
-            .last()
-            .cloned()
-            .unwrap_or(ExpressionType::Unknown)
-    }
-
     fn unexpected_eof_error(&self, span: Range<usize>) -> CompilerError {
         self.make_error(span, "Unexpected end of input".to_string())
     }
@@ -956,6 +954,30 @@ impl<'a> Compiler<'a> {
                 match &property_token.token {
                     Token::Identifier(name) => {
                         self.parser.advance()?; // consume identifier
+
+                        // Check if we are accessing a native function on 'std'
+                        if let Some(ExpressionType::StdNamespace) = self.type_stack.last() {
+                            self.type_stack.pop();
+                            if let Some(id) = chunk::NativeFuncId::from_name(name) {
+                                // Instead of runtime property access, load the native function ID as a value
+                                let const_idx = self
+                                    .compiling_chunk
+                                    .add_constant(chunk::Value::NativeFunction(id));
+                                self.compiling_chunk.write_opcode_u16(
+                                    Opcode::LoadConst,
+                                    const_idx as u16,
+                                    property_token.span.clone(),
+                                );
+                                self.push_type(ExpressionType::NativeFunction(id));
+                                return Ok(());
+                            } else {
+                                return Err(self.make_error(
+                                    property_token.span,
+                                    format!("Native function 'std.{}' not found", name),
+                                ));
+                            }
+                        }
+
                         let allocation_result = memory_manager.allocate_string(name);
                         if allocation_result.should_garbage_collect {
                             self.run_garbage_collect(
@@ -2615,6 +2637,22 @@ mod tests {
         assert_eq!(chunk.code[0], Opcode::LoadConst as u8);
         assert_eq!(chunk.code[3], Opcode::Not as u8);
         assert_eq!(chunk.code[4], Opcode::Return as u8);
+    }
+
+    #[test]
+    fn test_unicode_literal() {
+        let input = "\"🚀\"";
+        let mut scanner = Scanner::new(input, "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = Compiler::new(&mut scanner, "test.jsonnet");
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert_eq!(chunk.constants.len(), 1);
+        if let Value::String(s_idx) = chunk.constants[0] {
+            assert_eq!(memory_manager.load_string(s_idx), "🚀");
+        } else {
+            panic!("Expected string constant");
+        }
     }
 
     #[test]
