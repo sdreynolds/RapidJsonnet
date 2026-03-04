@@ -746,7 +746,8 @@ impl<'a> Compiler<'a> {
     fn patch_jump_span(&mut self, jump_pos: usize, span: std::ops::Range<usize>) {
         // Opcode (1 byte) + i32 operand (4 bytes) = 5 bytes
         for i in 0..5 {
-            self.compiling_chunk.patch_span(jump_pos - 1 + i, span.clone());
+            self.compiling_chunk
+                .patch_span(jump_pos - 1 + i, span.clone());
         }
     }
 
@@ -800,18 +801,19 @@ impl<'a> Compiler<'a> {
             .write_opcode_u16(Opcode::Closure, func_index, span.clone());
 
         // Manually push upvalue count byte to code vector
-        self.compiling_chunk.code.push(upvalues.len() as u8);
+        self.compiling_chunk
+            .write(upvalues.len() as u8, span.clone());
 
         // Emit upvalue descriptors
         for upvalue in upvalues {
             // Emit is_local (1 if local, 0 if upvalue)
             let is_local_byte = if upvalue.is_local { 1u8 } else { 0u8 };
-            self.compiling_chunk.code.push(is_local_byte);
+            self.compiling_chunk.write(is_local_byte, span.clone());
 
             // Emit index (u16) in little-endian
             let index_bytes = (upvalue.index as u16).to_le_bytes();
-            self.compiling_chunk.code.push(index_bytes[0]);
-            self.compiling_chunk.code.push(index_bytes[1]);
+            self.compiling_chunk.write(index_bytes[0], span.clone());
+            self.compiling_chunk.write(index_bytes[1], span.clone());
         }
 
         Ok(())
@@ -1070,8 +1072,8 @@ impl<'a> Compiler<'a> {
                 let span = token.span;
                 self.compiling_chunk
                     .write_opcode(Opcode::Call, span.clone());
-                self.compiling_chunk.code.push(arg_count); // positional_count
-                self.compiling_chunk.code.push(0); // named_count (not yet supported)
+                self.compiling_chunk.write(arg_count, span.clone()); // positional_count
+                self.compiling_chunk.write(0, span); // named_count (not yet supported)
 
                 // Function call can return any type
                 self.push_type(ExpressionType::Unknown);

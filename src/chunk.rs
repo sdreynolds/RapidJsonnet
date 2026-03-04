@@ -401,7 +401,7 @@ impl<'a> Chunk<'a> {
     }
 
     /// Writes a byte to the chunk's code with the associated source span
-    fn write(&mut self, byte: u8, span: Range<usize>) {
+    pub fn write(&mut self, byte: u8, span: Range<usize>) {
         self.code.push(byte);
 
         // Update span information using run-length encoding
