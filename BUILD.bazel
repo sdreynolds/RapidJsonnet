@@ -154,14 +154,4 @@ rustfmt_test(
     ],
 )
 
-sh_test(
-    name = "jsonnet_validation_test",
-     srcs = ["test_runner.sh"],
 
-     data = glob(["end2end/*.jsonnet", "end2end/*.libsonnet", "end2end/*.txt", "end2end/*.bin"]) + [
-        ":main",
-    ],
-
-    # We set this to true to ensure the test is executed.
-    local = True,
-)

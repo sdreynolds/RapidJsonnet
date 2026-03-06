@@ -1,0 +1,20 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+JSONNET_FILES = glob(["*.jsonnet"])
+DATA_FILES = glob(["*.libsonnet", "*.txt", "*.bin"])
+
+[
+    sh_test(
+        name = f.replace(".jsonnet", "_test"),
+        srcs = ["run_test.sh"],
+        args = [
+            "$(location //:main)",
+            "$(location %s)" % f,
+        ],
+        data = [
+            "//:main",
+            f,
+        ] + DATA_FILES,
+    )
+    for f in JSONNET_FILES
+]
