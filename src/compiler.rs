@@ -2425,10 +2425,10 @@ impl<'a> Compiler<'a> {
                 if is_captured {
                     // Emit CloseUpvalue to move captured local from stack to heap
                     self.emit_opcode(Opcode::CloseUpvalue, span.clone());
-                } else {
-                    // Just pop it if not captured
-                    self.emit_opcode(Opcode::Pop, span.clone());
                 }
+
+                // Always pop the local after potentially closing it
+                self.emit_opcode(Opcode::Pop, span.clone());
                 self.locals.pop();
             } else {
                 break; // Reached locals from outer scope
