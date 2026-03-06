@@ -1,6 +1,6 @@
 use chunk::{
-    ArrayIndex, BinaryIndex, ClosureIndex, FunctionIndex, ImportIndex, ObjectIndex, OwnedChunk,
-    SpanRunLength, StringIndex, UpvalueIndex, Value,
+    ArrayIndex, BinaryIndex, ClosureIndex, FieldVisibility, FunctionIndex, ImportIndex,
+    ObjectIndex, OwnedChunk, SpanRunLength, StringIndex, UpvalueIndex, Value,
 };
 use slotmap::SlotMap;
 use std::cell::Cell;
@@ -13,15 +13,26 @@ pub struct AllocationResult<T> {
     pub index: T,
 }
 
+/// Represents an individual field in a Jsonnet object
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectField {
+    /// The actual value or Thunk (Closure)
+    pub value: Value,
+    /// The 'super' object context for this specific field, used during late-binding inheritance
+    pub super_obj: Option<ObjectIndex>,
+    /// Field visibility status (: , :: , or :::)
+    pub visibility: FieldVisibility,
+}
+
 /// A Jsonnet object containing property key-value pairs
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManagedObject {
-    /// Object properties mapping interned string keys to values
-    pub properties: HashMap<StringIndex, Value>,
+    /// Object properties mapping interned string keys to fields
+    pub properties: HashMap<StringIndex, ObjectField>,
     /// List of object-level assertions to be evaluated during manifestation
     pub assertions: Vec<ClosureIndex>,
     // GC marking
-    marked: Cell<bool>,
+    pub(crate) marked: Cell<bool>,
 }
 
 impl ManagedObject {
@@ -30,7 +41,7 @@ impl ManagedObject {
         let base_size = std::mem::size_of::<Self>();
         // HashMap capacity accounts for actual allocated memory, not just length
         let map_capacity_bytes = self.properties.capacity()
-            * (std::mem::size_of::<StringIndex>() + std::mem::size_of::<Value>());
+            * (std::mem::size_of::<StringIndex>() + std::mem::size_of::<ObjectField>());
         let assertions_capacity_bytes =
             self.assertions.capacity() * std::mem::size_of::<ClosureIndex>();
         base_size + map_capacity_bytes + assertions_capacity_bytes
@@ -47,7 +58,7 @@ impl ManagedObject {
     }
 
     /// Create a Jsonnet object with the given properties
-    pub fn with_properties(properties: HashMap<StringIndex, Value>) -> Self {
+    pub fn with_properties(properties: HashMap<StringIndex, ObjectField>) -> Self {
         Self {
             properties,
             assertions: Vec::new(),
@@ -57,7 +68,7 @@ impl ManagedObject {
 
     /// Create a Jsonnet object with the given properties and assertions
     pub fn with_properties_and_assertions(
-        properties: HashMap<StringIndex, Value>,
+        properties: HashMap<StringIndex, ObjectField>,
         assertions: Vec<ClosureIndex>,
     ) -> Self {
         Self {
@@ -69,6 +80,11 @@ impl ManagedObject {
 
     /// Get a property value by key
     pub fn get(&self, key: &StringIndex) -> Option<&Value> {
+        self.properties.get(key).map(|field| &field.value)
+    }
+
+    /// Get a property field by key
+    pub fn get_field(&self, key: &StringIndex) -> Option<&ObjectField> {
         self.properties.get(key)
     }
 
@@ -440,7 +456,7 @@ impl MemoryManager {
 
     pub fn allocate_object_with_properties(
         &mut self,
-        properties: HashMap<StringIndex, Value>,
+        properties: HashMap<StringIndex, ObjectField>,
     ) -> AllocationResult<ObjectIndex> {
         let obj = ManagedObject::with_properties(properties);
         self.allocated_bytes += obj.size();
@@ -453,7 +469,7 @@ impl MemoryManager {
 
     pub fn allocate_object_full(
         &mut self,
-        properties: HashMap<StringIndex, Value>,
+        properties: HashMap<StringIndex, ObjectField>,
         assertions: Vec<ClosureIndex>,
     ) -> AllocationResult<ObjectIndex> {
         let obj = ManagedObject::with_properties_and_assertions(properties, assertions);
@@ -567,26 +583,11 @@ impl MemoryManager {
 
     /// Check if garbage collection should be triggered
     pub fn should_collect(&self) -> bool {
-        #[cfg(feature = "stress_gc")]
-        {
-            eprintln!(
-                "[MemoryManager] Stress GC enabled - triggering collection ({} bytes)",
-                self.allocated_bytes
-            );
+        if cfg!(feature = "stress_gc") {
             return true;
         }
 
-        #[cfg(not(feature = "stress_gc"))]
-        {
-            let should_collect = self.allocated_bytes >= self.gc_threshold;
-            if should_collect {
-                eprintln!(
-                    "[MemoryManager] Threshold exceeded - triggering collection ({} bytes >= {} bytes)",
-                    self.allocated_bytes, self.gc_threshold
-                );
-            }
-            should_collect
-        }
+        self.allocated_bytes >= self.gc_threshold
     }
 
     /// Helper method to mark an upvalue and its closed value if present
@@ -673,9 +674,12 @@ impl MemoryManager {
                                 eprintln!("[MemoryManager] Marking Object {:?}", object_index)
                             }
 
-                            for (field_key, field_value) in &managed_object.properties {
+                            for (field_key, field) in &managed_object.properties {
                                 values.push_back(Value::String(*field_key));
-                                values.push_back(*field_value);
+                                values.push_back(field.value);
+                                if let Some(super_obj) = field.super_obj {
+                                    values.push_back(Value::Object(super_obj));
+                                }
                             }
 
                             for assertion in &managed_object.assertions {
@@ -1106,7 +1110,14 @@ mod tests {
 
         let mut properties = HashMap::new();
 
-        properties.insert(name, field_value);
+        properties.insert(
+            name,
+            ObjectField {
+                value: field_value,
+                super_obj: None,
+                visibility: FieldVisibility::Visible,
+            },
+        );
         let object_index = manager.allocate_object_with_properties(properties).index;
 
         let object = manager.load_object(object_index);
@@ -1121,7 +1132,14 @@ mod tests {
 
         let mut properties = HashMap::new();
 
-        properties.insert(name, field_value);
+        properties.insert(
+            name,
+            ObjectField {
+                value: field_value,
+                super_obj: None,
+                visibility: FieldVisibility::Visible,
+            },
+        );
         let object_index = manager.allocate_object_with_properties(properties).index;
 
         let object_size = manager.load_object(object_index).size();

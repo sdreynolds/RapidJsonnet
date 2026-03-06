@@ -209,7 +209,8 @@ pub enum Opcode {
     FieldDef = 12, // operands: u16 name_index, u8 hidden_type
     Assert = 13,
     ObjectIndex = 14,
-    ObjectMerge = 15,
+    SuperIndex = 15,
+    ObjectMerge = 16,
 
     // Array Operations
     CreateArray = 20, // operand: u16 element_count
@@ -293,7 +294,8 @@ impl Opcode {
             12 => Some(Opcode::FieldDef),
             13 => Some(Opcode::Assert),
             14 => Some(Opcode::ObjectIndex),
-            15 => Some(Opcode::ObjectMerge),
+            15 => Some(Opcode::SuperIndex),
+            16 => Some(Opcode::ObjectMerge),
             20 => Some(Opcode::CreateArray),
             21 => Some(Opcode::ArrayIndex),
             22 => Some(Opcode::ArrayConcat),
@@ -696,6 +698,7 @@ impl<'a> Chunk<'a> {
                     Opcode::LoadConst | Opcode::Import | Opcode::ImportStr | Opcode::ImportBin => 3, // opcode + u16
                     Opcode::LoadVar => 3,        // opcode + u16
                     Opcode::CreateObject => 3,   // opcode + u16
+                    Opcode::ObjectInsert => 2,   // opcode + u8
                     Opcode::CreateArray => 3,    // opcode + u16
                     Opcode::FieldDef => 4,       // opcode + u16 + u8
                     Opcode::CreateFunction => 6, // opcode + u8 + u32

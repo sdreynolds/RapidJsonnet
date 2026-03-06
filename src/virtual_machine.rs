@@ -1,9 +1,9 @@
 use chunk::{
-    Chunk, ClosureIndex, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode, OwnedChunk,
-    RuntimeError, StringIndex, UpvalueIndex, Value,
+    Chunk, ClosureIndex, FieldVisibility, I32_SIZE_BYTES, OPCODE_SIZE_BYTES, ObjectIndex, Opcode,
+    OwnedChunk, RuntimeError, StringIndex, UpvalueIndex, Value,
 };
 use compiler;
-use memory_manager::MemoryManager;
+use memory_manager::{MemoryManager, ObjectField};
 use scanner;
 use std::ops::Range;
 
@@ -21,15 +21,27 @@ pub struct CallFrame {
     pub ip: usize,
     /// Base position in VM stack where this frame's locals begin
     pub stack_base: usize,
+    /// The current object (self) for this frame
+    pub self_obj: Option<ObjectIndex>,
+    /// The current super object for this frame
+    pub super_obj: Option<ObjectIndex>,
 }
 
 impl CallFrame {
     /// Create a new call frame
-    pub fn new(closure: ClosureIndex, ip: usize, stack_base: usize) -> Self {
+    pub fn new(
+        closure: ClosureIndex,
+        ip: usize,
+        stack_base: usize,
+        self_obj: Option<ObjectIndex>,
+        super_obj: Option<ObjectIndex>,
+    ) -> Self {
         Self {
             closure,
             ip,
             stack_base,
+            self_obj,
+            super_obj,
         }
     }
 }
@@ -63,7 +75,7 @@ impl VirtualMachine {
         let closure_result = memory_manager.allocate_closure(func_result.index, Vec::new());
 
         // Create initial frame with the top-level closure
-        let initial_frame = CallFrame::new(closure_result.index, 0, 0);
+        let initial_frame = CallFrame::new(closure_result.index, 0, 0, None, None);
 
         let mut frames = Vec::with_capacity(MAX_FRAMES);
         frames.push(initial_frame);
@@ -150,6 +162,20 @@ impl VirtualMachine {
             .unwrap_or(0..0)
     }
 
+    /// Read a u8 operand from the current position and advance PC
+    fn read_u8_operand(&mut self) -> Result<u8, RuntimeError> {
+        let frame = self.current_frame();
+        let chunk = self.current_chunk();
+        let operand = chunk.read_u8(frame.ip + 1).ok_or_else(|| RuntimeError {
+            span: self.get_current_span(),
+            message: "Invalid bytecode - missing operand".to_string(),
+            source_id: chunk.source_id.to_string(),
+        })?;
+
+        self.current_frame_mut().ip += 2; // opcode + 1 byte for u8
+        Ok(operand)
+    }
+
     /// Read a u16 operand from the current position and advance PC
     fn read_u16_operand(&mut self) -> Result<u16, RuntimeError> {
         let frame = self.current_frame();
@@ -185,22 +211,30 @@ impl VirtualMachine {
         self.current_frame_mut().ip += 1;
     }
 
-    /// Execute a closure synchronously and return its result, preserving the current execution state.
-    /// This is used for evaluating object-level assertions during manifestation.
-    fn execute_closure_sync(&mut self, closure_index: ClosureIndex) -> Result<Value, RuntimeError> {
+    /// Execute a thunk (field closure) synchronously and return its result.
+    fn execute_thunk_sync(
+        &mut self,
+        closure_index: ClosureIndex,
+        self_obj: Option<ObjectIndex>,
+        super_obj: Option<ObjectIndex>,
+    ) -> Result<Value, RuntimeError> {
         self.push(Value::Closure(closure_index))?;
+        self.push(self_obj.map(Value::Object).unwrap_or(Value::Null))?;
+        self.push(super_obj.map(Value::Object).unwrap_or(Value::Null))?;
         let target_frame_count = self.frame_count;
-        self.call_closure(closure_index, 0)?;
+        self.call_closure(closure_index, 2, self_obj, super_obj)?;
         self.interpret_until(target_frame_count)
     }
 
-    /// Call a closure with the given number of arguments.
+    /// Call a closure with the given number of arguments and optional object context.
     /// Stack layout: [..., closure, arg0, arg1, ..., argN]
     /// The closure stays on the stack and becomes slot 0 of the new frame.
     fn call_closure(
         &mut self,
         closure_index: ClosureIndex,
         arg_count: usize,
+        self_obj: Option<ObjectIndex>,
+        super_obj: Option<ObjectIndex>,
     ) -> Result<(), RuntimeError> {
         let closure = self.memory_manager.load_closure(closure_index);
         let function = self.memory_manager.load_function(closure.function);
@@ -235,7 +269,7 @@ impl VirtualMachine {
         let stack_base = self.stack.len() - arg_count - 1;
 
         // Create new call frame
-        let new_frame = CallFrame::new(closure_index, 0, stack_base);
+        let new_frame = CallFrame::new(closure_index, 0, stack_base, self_obj, super_obj);
 
         // Push frame
         if self.frame_count < self.frames.len() {
@@ -358,6 +392,20 @@ impl VirtualMachine {
         }
 
         new_upvalue_index
+    }
+
+    /// Swap two stack slots and update any open upvalues pointing to them
+    fn swap_upvalues(&mut self, slot_a: usize, slot_b: usize) {
+        let mut upvalue = self.open_upvalues;
+        while let Some(upvalue_index) = upvalue {
+            let managed_upvalue = self.memory_manager.load_upvalue_mut(upvalue_index);
+            if managed_upvalue.stack_location == Some(slot_a) {
+                managed_upvalue.stack_location = Some(slot_b);
+            } else if managed_upvalue.stack_location == Some(slot_b) {
+                managed_upvalue.stack_location = Some(slot_a);
+            }
+            upvalue = managed_upvalue.next;
+        }
     }
 
     pub fn force_value(&mut self, val: Value) -> Result<Value, RuntimeError> {
@@ -521,6 +569,85 @@ impl VirtualMachine {
             })?;
 
             match opcode {
+                Opcode::LoadSelf => {
+                    let self_obj = self.current_frame().self_obj.ok_or_else(|| RuntimeError {
+                        span: self.get_current_span(),
+                        message: "'self' used outside of object scope".to_string(),
+                        source_id: self.current_chunk().source_id.to_string(),
+                    })?;
+                    self.push(Value::Object(self_obj))?;
+                    self.advance_pc();
+                }
+
+                Opcode::LoadSuper => {
+                    let super_obj = self.current_frame().super_obj.ok_or_else(|| RuntimeError {
+                        span: self.get_current_span(),
+                        message: "'super' used outside of object scope".to_string(),
+                        source_id: self.current_chunk().source_id.to_string(),
+                    })?;
+                    self.push(Value::Object(super_obj))?;
+                    self.advance_pc();
+                }
+
+                Opcode::SuperIndex => {
+                    let field_name = self.pop_forced()?; // Pop property name
+
+                    let (self_obj_key, super_obj_key) = {
+                        let frame = self.current_frame();
+                        let s = frame.self_obj.ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "'super' used outside of object scope".to_string(),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        })?;
+                        let su = frame.super_obj.ok_or_else(|| RuntimeError {
+                            span: self.get_current_span(),
+                            message: "'super' used outside of object scope".to_string(),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        })?;
+                        (s, su)
+                    };
+
+                    if let Value::String(field_key) = field_name {
+                        let field = self
+                            .memory_manager
+                            .load_object(super_obj_key)
+                            .get_field(&field_key)
+                            .cloned();
+
+                        if let Some(field) = field {
+                            match field.value {
+                                Value::Closure(closure_idx) => {
+                                    self.advance_pc();
+                                    self.push(Value::Closure(closure_idx))?;
+                                    self.push(Value::Object(self_obj_key))?; // ORIGINAL self
+                                    let super_val =
+                                        field.super_obj.map(Value::Object).unwrap_or(Value::Null);
+                                    self.push(super_val)?;
+                                    self.call_closure(
+                                        closure_idx,
+                                        2,
+                                        Some(self_obj_key),
+                                        field.super_obj,
+                                    )?;
+                                    continue;
+                                }
+                                _ => {
+                                    self.push(field.value.clone())?;
+                                }
+                            }
+                        } else {
+                            self.push(Value::Null)?;
+                        }
+                    } else {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!("Super index must be a string, got {:?}", field_name),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+                    self.advance_pc();
+                }
+
                 Opcode::LoadNull => {
                     self.push(Value::Null)?;
                     self.advance_pc();
@@ -586,16 +713,37 @@ impl VirtualMachine {
                     match (&a, &b) {
                         // Object merging (according to Jsonnet spec)
                         (Value::Object(left_key), Value::Object(right_key)) => {
+                            let left_key = *left_key;
+                            let right_key = *right_key;
                             let (left_object, right_object) = (
-                                self.memory_manager.load_object(*left_key),
-                                self.memory_manager.load_object(*right_key),
+                                self.memory_manager.load_object(left_key),
+                                self.memory_manager.load_object(right_key),
                             );
                             // Create merged properties starting with left object
                             let mut merged_properties = left_object.properties.clone();
 
                             // Override/add properties from right object
-                            for (key, value) in &right_object.properties {
-                                merged_properties.insert(*key, value.clone());
+                            for (key, right_field) in &right_object.properties {
+                                // Visibility inheritance: if right visibility is ':', inherit from left if it exists
+                                let visibility =
+                                    if right_field.visibility == FieldVisibility::Visible {
+                                        if let Some(left_field) = left_object.get_field(key) {
+                                            left_field.visibility
+                                        } else {
+                                            FieldVisibility::Visible
+                                        }
+                                    } else {
+                                        right_field.visibility
+                                    };
+
+                                merged_properties.insert(
+                                    *key,
+                                    ObjectField {
+                                        value: right_field.value.clone(),
+                                        super_obj: Some(left_key), // Field's super is the left object
+                                        visibility,
+                                    },
+                                );
                             }
 
                             // Concatenate assertions: left then right
@@ -977,10 +1125,13 @@ impl VirtualMachine {
                 }
 
                 Opcode::Swap => {
+                    let b_idx = self.stack.len() - 1;
+                    let a_idx = self.stack.len() - 2;
                     let b = self.pop()?;
                     let a = self.pop()?;
                     self.push(b)?;
                     self.push(a)?;
+                    self.swap_upvalues(a_idx, b_idx);
                     self.advance_pc();
                 }
 
@@ -1022,7 +1173,14 @@ impl VirtualMachine {
                         // Ensure key is a string or null
                         match key {
                             Value::String(key_str) => {
-                                properties.insert(key_str, value);
+                                properties.insert(
+                                    key_str,
+                                    ObjectField {
+                                        value,
+                                        super_obj: None,
+                                        visibility: FieldVisibility::Visible,
+                                    },
+                                );
                             }
                             Value::Null => {
                                 // Null keys are omitted as per Jsonnet spec
@@ -1062,14 +1220,9 @@ impl VirtualMachine {
 
                     match (closure_val, object_val) {
                         (Value::Closure(closure_idx), Value::Object(obj_idx)) => {
+                            // Attach the assertion to the object
                             if let Some(obj) = self.memory_manager.get_object_mut(obj_idx) {
                                 obj.assertions.push(closure_idx);
-                            } else {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "Invalid object reference for assert".to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
                             }
 
                             // Push object back onto stack (it's the result of this opcode)
@@ -1078,8 +1231,8 @@ impl VirtualMachine {
                             // Execute assertion immediately for early failure detection.
                             // Object assertions in Jsonnet are conceptually checked during manifestation,
                             // but in an eager VM, construction is effectively the beginning of manifestation.
-                            // We use execute_closure_sync which preserves current VM state.
-                            self.execute_closure_sync(closure_idx)?;
+                            // We use execute_thunk_sync which correctly passes self and super.
+                            self.execute_thunk_sync(closure_idx, Some(obj_idx), None)?;
                         }
                         (c, o) => {
                             return Err(RuntimeError {
@@ -1096,6 +1249,14 @@ impl VirtualMachine {
                 }
 
                 Opcode::ObjectInsert => {
+                    let visibility_byte = self.read_u8_operand()?;
+                    let visibility = match visibility_byte {
+                        0 => FieldVisibility::Visible,
+                        1 => FieldVisibility::Hidden,
+                        2 => FieldVisibility::ForceVisible,
+                        _ => FieldVisibility::Visible,
+                    };
+
                     let value = self.pop()?;
                     let key = self.pop()?;
                     let object_val = self.pop()?;
@@ -1108,7 +1269,14 @@ impl VirtualMachine {
 
                             match key {
                                 Value::String(key_str) => {
-                                    properties.insert(key_str, value);
+                                    properties.insert(
+                                        key_str,
+                                        ObjectField {
+                                            value,
+                                            super_obj: None,
+                                            visibility,
+                                        },
+                                    );
                                 }
                                 Value::Null => {
                                     // Null keys are omitted
@@ -1152,7 +1320,8 @@ impl VirtualMachine {
                             });
                         }
                     }
-                    self.advance_pc();
+                    // No advance_pc() here because read_u8_operand already moved it to the start of the next instruction
+                    continue;
                 }
 
                 Opcode::CreateArray => {
@@ -1191,9 +1360,37 @@ impl VirtualMachine {
                     if let Value::Object(object_key) = object_value {
                         // Ensure field name is a string
                         if let Value::String(field_key) = field_name {
-                            let object = self.memory_manager.load_object(object_key);
-                            if let Some(value) = object.get(&field_key) {
-                                self.push(value.clone())?;
+                            let field = self
+                                .memory_manager
+                                .load_object(object_key)
+                                .get_field(&field_key)
+                                .cloned();
+
+                            if let Some(field) = field {
+                                match field.value {
+                                    Value::Closure(closure_idx) => {
+                                        // It's a thunk! We need to call it with (self, super)
+                                        self.advance_pc(); // Advance past ObjectIndex before calling
+                                        self.push(Value::Closure(closure_idx))?;
+                                        self.push(Value::Object(object_key))?; // self
+                                        let super_val = field
+                                            .super_obj
+                                            .map(Value::Object)
+                                            .unwrap_or(Value::Null);
+                                        self.push(super_val)?; // super
+                                        self.call_closure(
+                                            closure_idx,
+                                            2,
+                                            Some(object_key),
+                                            field.super_obj,
+                                        )?;
+                                        continue;
+                                    }
+                                    _ => {
+                                        // It's a raw value
+                                        self.push(field.value.clone())?;
+                                    }
+                                }
                             } else {
                                 // Property doesn't exist, push null
                                 self.push(Value::Null)?;
@@ -1339,9 +1536,35 @@ impl VirtualMachine {
                         Value::Object(object_key) => {
                             // Object indexing with string
                             if let Value::String(field_key) = index_value {
-                                let object = self.memory_manager.load_object(object_key);
-                                if let Some(value) = object.get(&field_key) {
-                                    self.push(value.clone())?;
+                                let field = self
+                                    .memory_manager
+                                    .load_object(object_key)
+                                    .get_field(&field_key)
+                                    .cloned();
+
+                                if let Some(field) = field {
+                                    match field.value {
+                                        Value::Closure(closure_idx) => {
+                                            self.advance_pc();
+                                            self.push(Value::Closure(closure_idx))?;
+                                            self.push(Value::Object(object_key))?; // self
+                                            let super_val = field
+                                                .super_obj
+                                                .map(Value::Object)
+                                                .unwrap_or(Value::Null);
+                                            self.push(super_val)?;
+                                            self.call_closure(
+                                                closure_idx,
+                                                2,
+                                                Some(object_key),
+                                                field.super_obj,
+                                            )?;
+                                            continue;
+                                        }
+                                        _ => {
+                                            self.push(field.value.clone())?;
+                                        }
+                                    }
                                 } else {
                                     self.push(Value::Null)?;
                                 }
@@ -1454,8 +1677,26 @@ impl VirtualMachine {
                         let mut merged_properties = left_object.properties.clone();
 
                         // Override/add properties from right object
-                        for (key, value) in &right_object.properties {
-                            merged_properties.insert(*key, value.clone());
+                        for (key, right_field) in &right_object.properties {
+                            // Visibility inheritance: if right visibility is ':', inherit from left if it exists
+                            let visibility = if right_field.visibility == FieldVisibility::Visible {
+                                if let Some(left_field) = left_object.get_field(key) {
+                                    left_field.visibility
+                                } else {
+                                    FieldVisibility::Visible
+                                }
+                            } else {
+                                right_field.visibility
+                            };
+
+                            merged_properties.insert(
+                                *key,
+                                ObjectField {
+                                    value: right_field.value,
+                                    super_obj: Some(left_key), // Field's super is the left object
+                                    visibility,
+                                },
+                            );
                         }
 
                         // Concatenate assertions: left then right
@@ -1580,11 +1821,8 @@ impl VirtualMachine {
                         self.memory_manager.external_roots.pop();
 
                         // Call it by pushing a frame!
-                        let new_frame = CallFrame {
-                            closure: closure_index,
-                            ip: 0,
-                            stack_base: self.stack.len(),
-                        };
+                        let new_frame =
+                            CallFrame::new(closure_index, 0, self.stack.len(), None, None);
 
                         if self.frame_count < self.frames.len() {
                             self.frames[self.frame_count] = new_frame;
@@ -1829,7 +2067,7 @@ impl VirtualMachine {
 
                     match callee {
                         Value::Closure(closure_index) => {
-                            self.call_closure(closure_index, arg_count)?;
+                            self.call_closure(closure_index, arg_count, None, None)?;
                         }
                         Value::NativeFunction(id) => {
                             // Extract arguments from stack
@@ -2099,10 +2337,10 @@ impl VirtualMachine {
                 if a_obj.properties.len() != b_obj.properties.len() {
                     return false;
                 }
-                for (name, val_a) in a_obj.properties.iter() {
+                for (name, field_a) in a_obj.properties.iter() {
                     match b_obj.properties.get(name) {
-                        Some(val_b) => {
-                            if !self.values_equal(val_a, val_b) {
+                        Some(field_b) => {
+                            if !self.values_equal(&field_a.value, &field_b.value) {
                                 return false;
                             }
                         }
@@ -2126,90 +2364,94 @@ impl VirtualMachine {
         value: &Value,
         visited: &mut std::collections::HashSet<ObjectIndex>,
     ) -> Result<serde_json::Value, RuntimeError> {
-        let value = self.force_value(value.clone())?;
-        match value {
-            Value::Null => Ok(serde_json::Value::Null),
-            Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
-            Value::Number(n) => serde_json::Number::from_f64(n)
-                .map(serde_json::Value::Number)
-                .ok_or_else(|| RuntimeError {
-                    span: 0..0,
-                    message: "Invalid number for JSON conversion".to_string(),
+        // Protect current value from GC during its serialization
+        self.memory_manager.external_roots.push(vec![value.clone()]);
+
+        let result = (|| {
+            let value = self.force_value(value.clone())?;
+            match value {
+                Value::Null => Ok(serde_json::Value::Null),
+                Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
+                Value::Number(n) => serde_json::Number::from_f64(n)
+                    .map(serde_json::Value::Number)
+                    .ok_or_else(|| RuntimeError {
+                        span: 0..0,
+                        message: "Invalid number for JSON conversion".to_string(),
+                        source_id: "serialization".to_string(),
+                    }),
+                Value::String(s) => Ok(serde_json::Value::String(
+                    self.memory_manager.load_string(s).to_owned(),
+                )),
+                Value::Object(object_key) => {
+                    // Check for circular references
+                    if visited.contains(&object_key) {
+                        return Err(RuntimeError {
+                            span: 0..0,
+                            message: "Circular reference detected in object".to_string(),
+                            source_id: "serialization".to_string(),
+                        });
+                    }
+
+                    visited.insert(object_key);
+                    let obj = self.memory_manager.load_object(object_key);
+                    let properties: Vec<(StringIndex, ObjectField)> = obj
+                        .properties
+                        .iter()
+                        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+                        .map(|(k, field)| (*k, field.clone()))
+                        .collect();
+
+                    let mut json_object = serde_json::Map::new();
+
+                    for (key, field) in properties {
+                        let field_value = match field.value {
+                            Value::Closure(closure_idx) => self.execute_thunk_sync(
+                                closure_idx,
+                                Some(object_key),
+                                field.super_obj,
+                            )?,
+                            v => v,
+                        };
+                        let json_value = self.value_to_json(&field_value, visited)?;
+                        json_object
+                            .insert(self.memory_manager.load_string(key).to_owned(), json_value);
+                    }
+
+                    visited.remove(&object_key); // Remove after processing
+                    Ok(serde_json::Value::Object(json_object))
+                }
+                Value::Array(array_key) => {
+                    let elements: Vec<Value> =
+                        self.memory_manager.load_array(array_key).elements.clone();
+
+                    let mut json_array = Vec::new();
+
+                    for element in &elements {
+                        let json_value = self.value_to_json(element, visited)?;
+                        json_array.push(json_value);
+                    }
+
+                    Ok(serde_json::Value::Array(json_array))
+                }
+                Value::Binary(binary_key) => {
+                    let data = self.memory_manager.load_binary(binary_key).data.clone();
+                    let json_array: Vec<serde_json::Value> = data
+                        .into_iter()
+                        .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
+                        .collect();
+                    Ok(serde_json::Value::Array(json_array))
+                }
+                _ => Err(RuntimeError {
+                    span: self.get_current_span(),
+                    message: format!("Cannot serialize value to JSON: {:?}", value),
                     source_id: "serialization".to_string(),
                 }),
-            Value::String(s) => Ok(serde_json::Value::String(
-                self.memory_manager.load_string(s).to_owned(),
-            )),
-            Value::Object(object_key) => {
-                // Check for circular references
-                if visited.contains(&object_key) {
-                    return Err(RuntimeError {
-                        span: 0..0,
-                        message: "Circular reference detected in object".to_string(),
-                        source_id: "serialization".to_string(),
-                    });
-                }
-
-                visited.insert(object_key);
-                let obj = self.memory_manager.load_object(object_key);
-                let properties: Vec<(StringIndex, Value)> = obj
-                    .properties
-                    .iter()
-                    .map(|(k, v)| (*k, v.clone()))
-                    .collect();
-
-                let mut json_object = serde_json::Map::new();
-
-                for (key, val) in properties {
-                    let json_value = self.value_to_json(&val, visited)?;
-                    json_object.insert(self.memory_manager.load_string(key).to_owned(), json_value);
-                }
-
-                visited.remove(&object_key); // Remove after processing
-                Ok(serde_json::Value::Object(json_object))
             }
-            Value::Array(array_key) => {
-                let elements: Vec<Value> =
-                    self.memory_manager.load_array(array_key).elements.clone();
+        })();
 
-                let mut json_array = Vec::new();
-
-                for element in &elements {
-                    let json_value = self.value_to_json(element, visited)?;
-                    json_array.push(json_value);
-                }
-
-                Ok(serde_json::Value::Array(json_array))
-            }
-            Value::Binary(binary_key) => {
-                let data = self.memory_manager.load_binary(binary_key).data.clone();
-                let json_array: Vec<serde_json::Value> = data
-                    .into_iter()
-                    .map(|b| serde_json::Value::Number(serde_json::Number::from(b)))
-                    .collect();
-                Ok(serde_json::Value::Array(json_array))
-            }
-            Value::Function(_) => Err(RuntimeError {
-                span: 0..0,
-                message: "Cannot serialize function to JSON".to_string(),
-                source_id: "serialization".to_string(),
-            }),
-            Value::Closure(_) => Err(RuntimeError {
-                span: 0..0,
-                message: "Cannot serialize closure to JSON".to_string(),
-                source_id: "serialization".to_string(),
-            }),
-            Value::NativeFunction(_) => Err(RuntimeError {
-                span: 0..0,
-                message: "Cannot serialize native function to JSON".to_string(),
-                source_id: "serialization".to_string(),
-            }),
-            Value::Import(_) => Err(RuntimeError {
-                span: 0..0,
-                message: "Cannot serialize unresolved import to JSON".to_string(),
-                source_id: "serialization".to_string(),
-            }),
-        }
+        // Remove the protection root
+        self.memory_manager.external_roots.pop();
+        result
     }
 
     fn run_garbage_collection(&mut self) {

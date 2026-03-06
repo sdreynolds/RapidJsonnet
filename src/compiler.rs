@@ -1,4 +1,4 @@
-use chunk::{Chunk, I32_SIZE_BYTES, Opcode, StringIndex, Value};
+use chunk::{Chunk, FieldVisibility, I32_SIZE_BYTES, Opcode, StringIndex, Value};
 use memory_manager::MemoryManager;
 use parser::{Parser, ParserCheckpoint};
 use scanner::{ScanError, Scanner, Token, TokenInfo};
@@ -81,23 +81,32 @@ impl<'a> EnclosingScope<'a> {
     }
 
     /// Resolve an upvalue by name, checking this scope and its enclosing scopes
-    /// Returns the upvalue index if found, None otherwise
-    fn resolve_upvalue(&mut self, name: &str) -> Option<u8> {
+    /// Returns the upvalue descriptor if found, None otherwise
+    fn resolve_upvalue(&mut self, name: &str) -> Option<CompilerUpvalue> {
         // Try to find in this scope's locals
         for (i, local) in self.locals.iter_mut().enumerate().rev() {
             if local.name == name {
                 // Mark the local as captured
                 local.is_captured = true;
-                // Add as upvalue capturing a local
-                return Some(self.add_upvalue(i as u8, true));
+                // Capture this local from the enclosing scope
+                return Some(CompilerUpvalue {
+                    index: i as u8,
+                    is_local: true,
+                });
             }
         }
 
         // Try to find in enclosing scope's upvalues (recursive)
         if let Some(enclosing) = self.enclosing.as_mut() {
-            if let Some(upvalue_index) = enclosing.resolve_upvalue(name) {
-                // Add as upvalue capturing another upvalue
-                return Some(self.add_upvalue(upvalue_index, false));
+            if let Some(upvalue) = enclosing.resolve_upvalue(name) {
+                // We found it in an even outer scope.
+                // We must add it as an upvalue to THIS scope so our inner scopes can see it.
+                let index = self.add_upvalue(upvalue.index, upvalue.is_local);
+                // Return a descriptor saying: capture from our upvalues
+                return Some(CompilerUpvalue {
+                    index,
+                    is_local: false,
+                });
             }
         }
 
@@ -136,6 +145,7 @@ pub struct Compiler<'a> {
     upvalues: Vec<CompilerUpvalue>, // Upvalues for this function
     function_type: FunctionType, // Type of function being compiled
     enclosing: Option<Box<EnclosingScope<'a>>>, // Enclosing scope for upvalue resolution
+    object_depth: u32,  // Track object literal nesting depth
 }
 
 impl<'a> Compiler<'a> {
@@ -153,6 +163,7 @@ impl<'a> Compiler<'a> {
             upvalues: Vec::new(),
             function_type: FunctionType::Script,
             enclosing: None,
+            object_depth: 0,
         }
     }
 
@@ -241,9 +252,9 @@ impl<'a> Compiler<'a> {
 
                 self.parse_infix(right_bp, memory_manager)?;
                 continue;
+            } else {
+                break;
             }
-
-            break;
         }
 
         Ok(())
@@ -467,6 +478,88 @@ impl<'a> Compiler<'a> {
                 self.parse_function_expression(memory_manager)?;
                 // Function expressions produce function values
                 self.push_type(ExpressionType::Unknown);
+            }
+            Token::Self_ => {
+                self.parser.advance()?;
+                self.emit_opcode(Opcode::LoadSelf, token.span);
+                self.push_type(ExpressionType::Object);
+            }
+            Token::Super => {
+                self.parser.advance()?;
+                // Expect '.' or '['
+                let next = self.parser.current_token().cloned().ok_or_else(|| {
+                    self.make_error(
+                        token.span.clone(),
+                        "Expected '.' or '[' after 'super'".to_string(),
+                    )
+                })?;
+
+                match next.token {
+                    Token::Dot => {
+                        self.parser.advance()?; // consume '.'
+                        let field_token =
+                            self.parser.current_token().cloned().ok_or_else(|| {
+                                self.make_error(
+                                    next.span.clone(),
+                                    "Expected field name after 'super.'".to_string(),
+                                )
+                            })?;
+
+                        if let Token::Identifier(field_name) = &field_token.token {
+                            let allocation_result = memory_manager.allocate_string(field_name);
+                            if allocation_result.should_garbage_collect {
+                                self.run_garbage_collect(
+                                    memory_manager,
+                                    &[Value::String(allocation_result.index)],
+                                );
+                            }
+                            let interned_key = allocation_result.index;
+                            self.emit_string_constant(interned_key)?;
+                            self.parser.advance()?; // consume identifier
+                        } else {
+                            return Err(self.make_error(
+                                field_token.span,
+                                "Expected field name after 'super.'".to_string(),
+                            ));
+                        }
+                    }
+                    Token::LeftBracket => {
+                        self.parser.advance()?; // consume '['
+                        self.parse_expr(0, memory_manager)?; // dynamic key
+                        self.parser
+                            .consume(Token::RightBracket, "Expected ']' after 'super[expr]'")?;
+                    }
+                    _ => {
+                        return Err(self.make_error(
+                            next.span,
+                            "Expected '.' or '[' after 'super'".to_string(),
+                        ));
+                    }
+                }
+
+                self.emit_opcode(Opcode::SuperIndex, token.span.clone());
+                self.push_type(ExpressionType::Unknown);
+            }
+            Token::Operator(op) if op == "$" => {
+                self.parser.advance()?;
+                if let Some(stack_slot) = self.resolve_local(&"$".to_string()) {
+                    self.compiling_chunk.write_opcode_u16(
+                        Opcode::LoadVar,
+                        stack_slot as u16,
+                        token.span,
+                    );
+                } else if let Some(upvalue_slot) = self.resolve_upvalue(&"$".to_string()) {
+                    self.compiling_chunk.write_opcode_u16(
+                        Opcode::GetUpvalue,
+                        upvalue_slot as u16,
+                        token.span,
+                    );
+                } else {
+                    return Err(
+                        self.make_error(token.span, "'$' used outside of object scope".to_string())
+                    );
+                }
+                self.push_type(ExpressionType::Object);
             }
             Token::Identifier(name) => {
                 let name_clone = name.clone();
@@ -1112,6 +1205,7 @@ impl<'a> Compiler<'a> {
         start_token: &TokenInfo,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
+        self.object_depth += 1;
         self.parser.advance()?; // consume '{'
 
         // Handle empty object: {}
@@ -1123,6 +1217,7 @@ impl<'a> Compiler<'a> {
                     0,
                     start_token.span.clone(),
                 );
+                self.object_depth -= 1;
                 return Ok(());
             }
         }
@@ -1158,7 +1253,9 @@ impl<'a> Compiler<'a> {
         }
 
         if is_comprehension {
-            return self.parse_object_comprehension(start_token, lookahead_idx, memory_manager);
+            let res = self.parse_object_comprehension(start_token, lookahead_idx, memory_manager);
+            self.object_depth -= 1;
+            return res;
         }
 
         // Create the object immediately (with 0 initial fields)
@@ -1176,11 +1273,10 @@ impl<'a> Compiler<'a> {
                     let assert_start = key_token.span.start;
                     self.parser.advance()?; // consume 'assert'
 
-                    // Compile the assertion as a closure
+                    // Compile the assertion as a closure (thunk)
                     let saved_state = self.begin_function();
-                    let arity = 0;
-
                     self.begin_scope();
+                    self.declare_local("<closure>".to_string())?; // Slot 0
 
                     // Evaluate condition
                     self.parse_expr(0, memory_manager)?;
@@ -1204,7 +1300,9 @@ impl<'a> Compiler<'a> {
                         self.parse_expr(0, memory_manager)?;
                     } else {
                         self.emit_string_constant(
-                            memory_manager.allocate_string("Assertion failed").index,
+                            memory_manager
+                                .allocate_string("Object assertion failed")
+                                .index,
                         )?;
                     }
 
@@ -1231,7 +1329,8 @@ impl<'a> Compiler<'a> {
 
                     let (chunk, upvalues) = self.end_function(saved_state);
 
-                    self.emit_closure(chunk, upvalues, arity, memory_manager)?;
+                    // Assertions take 2 arguments (self, super) just like fields
+                    self.emit_closure(chunk, upvalues, 2, memory_manager)?;
 
                     // Attach the closure to the object
                     self.emit_opcode(Opcode::Assert, key_token.span.clone());
@@ -1310,17 +1409,59 @@ impl<'a> Compiler<'a> {
                 return Err(self.unexpected_eof_error(start_token.span.clone()));
             }
 
-            // Expect ':' after key
-            self.parser.consume(
-                Token::Operator(":".to_string()),
-                "Expected ':' after object key",
-            )?;
+            // Expect field separator after key
+            let visibility = if let Some(current) = self.parser.current_token() {
+                match &current.token {
+                    Token::Operator(op) if op == ":" => {
+                        self.parser.advance()?;
+                        FieldVisibility::Visible
+                    }
+                    Token::Operator(op) if op == "::" => {
+                        self.parser.advance()?;
+                        FieldVisibility::Hidden
+                    }
+                    Token::Operator(op) if op == ":::" => {
+                        self.parser.advance()?;
+                        FieldVisibility::ForceVisible
+                    }
+                    _ => {
+                        return Err(self.make_error(
+                            current.span.clone(),
+                            "Expected ':', '::', or ':::' after object key".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                return Err(self.unexpected_eof_error(start_token.span.clone()));
+            };
 
-            // Parse the value expression
+            // Compile the field value as a Thunk (Closure)
+            let (saved_scope_depth, saved_function_type) = self.begin_function();
+            self.begin_scope();
+            self.declare_local("<closure>".to_string())?; // Slot 0
+
+            if self.object_depth == 1 {
+                // local $ = self
+                self.emit_opcode(Opcode::LoadSelf, 0..0);
+                self.declare_local("$".to_string())?; // Slot 1
+            }
+
             self.parse_expr(0, memory_manager)?;
+            self.emit_opcode(Opcode::Return, 0..0);
+            self.end_scope();
 
-            // Emit ObjectInsert
-            self.emit_opcode(Opcode::ObjectInsert, start_token.span.clone());
+            let (field_chunk, field_upvalues) =
+                self.end_function((saved_scope_depth, saved_function_type));
+
+            // Emit Closure with arity 2 (self, super)
+            self.emit_closure(field_chunk, field_upvalues, 2, memory_manager)?;
+
+            // Emit ObjectInsert with visibility operand
+            self.compiling_chunk.write_opcode_u8(
+                Opcode::ObjectInsert,
+                visibility as u8,
+                start_token.span.clone(),
+            );
 
             // Check for more fields or end of object
             if let Some(current) = self.parser.current_token() {
@@ -1358,6 +1499,7 @@ impl<'a> Compiler<'a> {
         self.parser
             .consume(Token::RightBrace, "Expected '}' to close object literal")?;
 
+        self.object_depth -= 1;
         Ok(())
     }
 
@@ -1741,7 +1883,11 @@ impl<'a> Compiler<'a> {
                 .consume(Token::Operator(":".to_string()), "Expected ':' after key")?;
             self.parse_expr(0, memory_manager)?;
 
-            self.emit_opcode(Opcode::ObjectInsert, span.clone());
+            self.compiling_chunk.write_opcode_u8(
+                Opcode::ObjectInsert,
+                FieldVisibility::Visible as u8,
+                span.clone(),
+            );
             self.emit_store_var(result_slot, span.clone());
             self.emit_opcode(Opcode::LoadNull, span.clone());
 
@@ -2272,13 +2418,17 @@ impl<'a> Compiler<'a> {
         // This keeps the result on top while removing locals underneath.
         while let Some(local) = self.locals.last() {
             if local.depth == self.scope_depth {
-                if local.is_captured {
+                let is_captured = local.is_captured;
+                // Swap result with this local so the local is on top
+                self.emit_opcode(Opcode::Swap, span.clone());
+
+                if is_captured {
                     // Emit CloseUpvalue to move captured local from stack to heap
                     self.emit_opcode(Opcode::CloseUpvalue, span.clone());
+                } else {
+                    // Just pop it if not captured
+                    self.emit_opcode(Opcode::Pop, span.clone());
                 }
-                // Swap result with this local, then pop the local
-                self.emit_opcode(Opcode::Swap, span.clone());
-                self.emit_opcode(Opcode::Pop, span.clone());
                 self.locals.pop();
             } else {
                 break; // Reached locals from outer scope
@@ -2363,9 +2513,9 @@ impl<'a> Compiler<'a> {
         }
 
         // Try to find in enclosing function's upvalues (recursive)
-        if let Some(upvalue_index) = enclosing.resolve_upvalue(name) {
+        if let Some(upvalue) = enclosing.resolve_upvalue(name) {
             // Add as upvalue capturing another upvalue
-            return Some(self.add_upvalue(upvalue_index, false));
+            return Some(self.add_upvalue(upvalue.index, upvalue.is_local));
         }
 
         None
