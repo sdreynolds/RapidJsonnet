@@ -72,6 +72,15 @@ pub enum NativeFuncId {
     Any = 46,
     Sum = 47,
     AssertEqual = 48,
+    Format = 49,
+    SplitLimit = 50,
+    Repeat = 51,
+    Slice = 52,
+    Get = 53,
+    ObjectHasAll = 54,
+    ObjectFieldsAll = 55,
+    EncodeUTF8 = 56,
+    DecodeUTF8 = 57,
 }
 
 impl NativeFuncId {
@@ -127,6 +136,15 @@ impl NativeFuncId {
             46 => Some(NativeFuncId::Any),
             47 => Some(NativeFuncId::Sum),
             48 => Some(NativeFuncId::AssertEqual),
+            49 => Some(NativeFuncId::Format),
+            50 => Some(NativeFuncId::SplitLimit),
+            51 => Some(NativeFuncId::Repeat),
+            52 => Some(NativeFuncId::Slice),
+            53 => Some(NativeFuncId::Get),
+            54 => Some(NativeFuncId::ObjectHasAll),
+            55 => Some(NativeFuncId::ObjectFieldsAll),
+            56 => Some(NativeFuncId::EncodeUTF8),
+            57 => Some(NativeFuncId::DecodeUTF8),
             _ => None,
         }
     }
@@ -183,6 +201,15 @@ impl NativeFuncId {
             NativeFuncId::Any => 1,
             NativeFuncId::Sum => 1,
             NativeFuncId::AssertEqual => 2,
+            NativeFuncId::Format => 2,
+            NativeFuncId::SplitLimit => 3,
+            NativeFuncId::Repeat => 2,
+            NativeFuncId::Slice => 4,
+            NativeFuncId::Get => 4,
+            NativeFuncId::ObjectHasAll => 2,
+            NativeFuncId::ObjectFieldsAll => 1,
+            NativeFuncId::EncodeUTF8 => 1,
+            NativeFuncId::DecodeUTF8 => 1,
         }
     }
 
@@ -238,6 +265,15 @@ impl NativeFuncId {
             NativeFuncId::Any => "any",
             NativeFuncId::Sum => "sum",
             NativeFuncId::AssertEqual => "assertEqual",
+            NativeFuncId::Format => "format",
+            NativeFuncId::SplitLimit => "splitLimit",
+            NativeFuncId::Repeat => "repeat",
+            NativeFuncId::Slice => "slice",
+            NativeFuncId::Get => "get",
+            NativeFuncId::ObjectHasAll => "objectHasAll",
+            NativeFuncId::ObjectFieldsAll => "objectFieldsAll",
+            NativeFuncId::EncodeUTF8 => "encodeUTF8",
+            NativeFuncId::DecodeUTF8 => "decodeUTF8",
         }
     }
 
@@ -293,6 +329,15 @@ impl NativeFuncId {
             "any" => Some(NativeFuncId::Any),
             "sum" => Some(NativeFuncId::Sum),
             "assertEqual" => Some(NativeFuncId::AssertEqual),
+            "format" => Some(NativeFuncId::Format),
+            "splitLimit" => Some(NativeFuncId::SplitLimit),
+            "repeat" => Some(NativeFuncId::Repeat),
+            "slice" => Some(NativeFuncId::Slice),
+            "get" => Some(NativeFuncId::Get),
+            "objectHasAll" => Some(NativeFuncId::ObjectHasAll),
+            "objectFieldsAll" => Some(NativeFuncId::ObjectFieldsAll),
+            "encodeUTF8" => Some(NativeFuncId::EncodeUTF8),
+            "decodeUTF8" => Some(NativeFuncId::DecodeUTF8),
             _ => None,
         }
     }

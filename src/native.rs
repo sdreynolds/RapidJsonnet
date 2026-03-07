@@ -89,6 +89,37 @@ pub fn call_native(
         NativeFuncId::AssertEqual => {
             std_assert_equal(args[0], args[1], memory_manager, span, source_id)
         }
+        NativeFuncId::Format => std_format(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::SplitLimit => {
+            std_split_limit(args[0], args[1], args[2], memory_manager, span, source_id)
+        }
+        NativeFuncId::Repeat => std_repeat(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Slice => std_slice(
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            memory_manager,
+            span,
+            source_id,
+        ),
+        NativeFuncId::Get => std_get(
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            memory_manager,
+            span,
+            source_id,
+        ),
+        NativeFuncId::ObjectHasAll => {
+            std_object_has_all(args[0], args[1], memory_manager, span, source_id)
+        }
+        NativeFuncId::ObjectFieldsAll => {
+            std_object_fields_all(args[0], memory_manager, span, source_id)
+        }
+        NativeFuncId::EncodeUTF8 => std_encode_utf8(args[0], memory_manager, span, source_id),
+        NativeFuncId::DecodeUTF8 => std_decode_utf8(args[0], memory_manager, span, source_id),
     }
 }
 
@@ -1355,6 +1386,978 @@ fn std_assert_equal(
             ),
             source_id,
         })
+    }
+}
+
+// ─── std.format ───────────────────────────────────────────────────────────────
+
+/// Values supplied to a format string
+pub enum FormatVals {
+    Array(Vec<Value>),
+    Object(Vec<(String, Value)>),
+    Single(Value),
+}
+
+impl FormatVals {
+    fn from_value(val: Value, mm: &MemoryManager) -> Self {
+        match val {
+            Value::Array(a_idx) => {
+                let elems = mm.load_array(a_idx).elements.clone();
+                FormatVals::Array(elems)
+            }
+            Value::Object(o_idx) => {
+                let obj = mm.load_object(o_idx);
+                let pairs: Vec<(String, Value)> = obj
+                    .properties
+                    .iter()
+                    .map(|(k, f)| (mm.load_string(*k).to_string(), f.value))
+                    .collect();
+                FormatVals::Object(pairs)
+            }
+            other => FormatVals::Single(other),
+        }
+    }
+
+    fn get_positional(
+        &self,
+        idx: usize,
+        span: &Range<usize>,
+        source_id: &str,
+    ) -> Result<Value, RuntimeError> {
+        match self {
+            FormatVals::Array(v) => v.get(idx).copied().ok_or_else(|| RuntimeError {
+                span: span.clone(),
+                message: format!(
+                    "std.format: index {} out of range (array has {} elements)",
+                    idx,
+                    v.len()
+                ),
+                source_id: source_id.to_string(),
+            }),
+            FormatVals::Single(v) => {
+                if idx == 0 {
+                    Ok(*v)
+                } else {
+                    Err(RuntimeError {
+                        span: span.clone(),
+                        message: format!("std.format: index {} out of range (single value)", idx),
+                        source_id: source_id.to_string(),
+                    })
+                }
+            }
+            FormatVals::Object(_) => Err(RuntimeError {
+                span: span.clone(),
+                message: "std.format: positional index used with object values".to_string(),
+                source_id: source_id.to_string(),
+            }),
+        }
+    }
+
+    fn get_named(
+        &self,
+        key: &str,
+        span: &Range<usize>,
+        source_id: &str,
+    ) -> Result<Value, RuntimeError> {
+        match self {
+            FormatVals::Object(pairs) => {
+                for (k, v) in pairs {
+                    if k == key {
+                        return Ok(*v);
+                    }
+                }
+                Err(RuntimeError {
+                    span: span.clone(),
+                    message: format!("std.format: key '{}' not found in object", key),
+                    source_id: source_id.to_string(),
+                })
+            }
+            _ => Err(RuntimeError {
+                span: span.clone(),
+                message: "std.format: named arg used but values is not an object".to_string(),
+                source_id: source_id.to_string(),
+            }),
+        }
+    }
+}
+
+fn value_to_format_string(val: Value, mm: &MemoryManager) -> String {
+    match val {
+        Value::String(idx) => mm.load_string(idx).to_string(),
+        Value::Null => "null".to_string(),
+        Value::Boolean(true) => "true".to_string(),
+        Value::Boolean(false) => "false".to_string(),
+        Value::Number(n) => {
+            if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+                format!("{}", n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        _ => "<value>".to_string(),
+    }
+}
+
+fn apply_width_align(s: &str, flags: &str, width: usize) -> String {
+    if width == 0 || s.len() >= width {
+        return s.to_string();
+    }
+    let padding = width - s.len();
+    if flags.contains('-') {
+        format!("{}{}", s, " ".repeat(padding))
+    } else {
+        format!("{}{}", " ".repeat(padding), s)
+    }
+}
+
+fn apply_numeric_format(s: &str, flags: &str, width: usize, zero_pad: bool) -> String {
+    // s may start with '-'
+    let (sign_part, num_part) = if s.starts_with('-') {
+        ("-", &s[1..])
+    } else if flags.contains('+') {
+        ("+", s)
+    } else if flags.contains(' ') {
+        (" ", s)
+    } else {
+        ("", s)
+    };
+
+    let content = format!("{}{}", sign_part, num_part);
+    if width == 0 || content.len() >= width {
+        return content;
+    }
+    let padding = width - content.len();
+    if flags.contains('-') {
+        format!("{}{}", content, " ".repeat(padding))
+    } else if zero_pad && !flags.contains('-') {
+        // zero pad goes after sign
+        format!("{}{}{}", sign_part, "0".repeat(padding), num_part)
+    } else {
+        format!("{}{}", " ".repeat(padding), content)
+    }
+}
+
+/// Core format string implementation
+pub fn format_string(
+    fmt: &str,
+    vals: &FormatVals,
+    mm: &MemoryManager,
+    span: &Range<usize>,
+    source_id: &str,
+) -> Result<String, RuntimeError> {
+    let mut result = String::new();
+    let chars: Vec<char> = fmt.chars().collect();
+    let mut i = 0;
+    let mut pos_idx: usize = 0;
+
+    while i < chars.len() {
+        if chars[i] != '%' {
+            result.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        i += 1; // skip '%'
+        if i >= chars.len() {
+            return Err(RuntimeError {
+                span: span.clone(),
+                message: "std.format: trailing '%' in format string".to_string(),
+                source_id: source_id.to_string(),
+            });
+        }
+
+        // Check for %% (literal percent)
+        if chars[i] == '%' {
+            result.push('%');
+            i += 1;
+            continue;
+        }
+
+        // Check for %(keyname) named argument
+        let mut key_name: Option<String> = None;
+        if chars[i] == '(' {
+            i += 1;
+            let mut key = String::new();
+            while i < chars.len() && chars[i] != ')' {
+                key.push(chars[i]);
+                i += 1;
+            }
+            if i >= chars.len() {
+                return Err(RuntimeError {
+                    span: span.clone(),
+                    message: "std.format: unclosed '(' in format specifier".to_string(),
+                    source_id: source_id.to_string(),
+                });
+            }
+            i += 1; // skip ')'
+            key_name = Some(key);
+        }
+
+        // Parse flags: -, +, 0, space
+        let mut flags = String::new();
+        while i < chars.len() && "-+0 #".contains(chars[i]) {
+            flags.push(chars[i]);
+            i += 1;
+        }
+
+        // Parse width
+        let mut width: usize = 0;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            width = width * 10 + (chars[i] as usize - '0' as usize);
+            i += 1;
+        }
+
+        // Parse .precision
+        let mut precision: Option<usize> = None;
+        if i < chars.len() && chars[i] == '.' {
+            i += 1;
+            let mut p: usize = 0;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                p = p * 10 + (chars[i] as usize - '0' as usize);
+                i += 1;
+            }
+            precision = Some(p);
+        }
+
+        if i >= chars.len() {
+            return Err(RuntimeError {
+                span: span.clone(),
+                message: "std.format: incomplete format specifier".to_string(),
+                source_id: source_id.to_string(),
+            });
+        }
+
+        let conv = chars[i];
+        i += 1;
+
+        // Get the value to format
+        let val = if let Some(ref key) = key_name {
+            vals.get_named(key, span, source_id)?
+        } else {
+            let v = vals.get_positional(pos_idx, span, source_id)?;
+            pos_idx += 1;
+            v
+        };
+
+        let zero_pad = flags.contains('0');
+
+        let formatted = match conv {
+            's' => {
+                let s = value_to_format_string(val, mm);
+                let s = if let Some(p) = precision {
+                    // precision truncates string
+                    s.chars().take(p).collect::<String>()
+                } else {
+                    s
+                };
+                apply_width_align(&s, &flags, width)
+            }
+            'd' | 'i' => {
+                let n = match val {
+                    Value::Number(n) => n,
+                    _ => {
+                        return Err(RuntimeError {
+                            span: span.clone(),
+                            message: format!("std.format: %{} requires a number", conv),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                };
+                let s = format!("{}", n as i64);
+                apply_numeric_format(&s, &flags, width, zero_pad)
+            }
+            'o' => {
+                let n = match val {
+                    Value::Number(n) => n,
+                    _ => {
+                        return Err(RuntimeError {
+                            span: span.clone(),
+                            message: "std.format: %o requires a number".to_string(),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                };
+                let i = n as i64;
+                let s = if i < 0 {
+                    format!("-{:o}", -i)
+                } else {
+                    format!("{:o}", i)
+                };
+                apply_numeric_format(&s, &flags, width, zero_pad)
+            }
+            'x' => {
+                let n = match val {
+                    Value::Number(n) => n,
+                    _ => {
+                        return Err(RuntimeError {
+                            span: span.clone(),
+                            message: "std.format: %x requires a number".to_string(),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                };
+                let s = format!("{:x}", n as i64);
+                apply_numeric_format(&s, &flags, width, zero_pad)
+            }
+            'X' => {
+                let n = match val {
+                    Value::Number(n) => n,
+                    _ => {
+                        return Err(RuntimeError {
+                            span: span.clone(),
+                            message: "std.format: %X requires a number".to_string(),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                };
+                let s = format!("{:X}", n as i64);
+                apply_numeric_format(&s, &flags, width, zero_pad)
+            }
+            'f' => {
+                let n = match val {
+                    Value::Number(n) => n,
+                    _ => {
+                        return Err(RuntimeError {
+                            span: span.clone(),
+                            message: "std.format: %f requires a number".to_string(),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                };
+                let p = precision.unwrap_or(6);
+                let s = format!("{:.prec$}", n, prec = p);
+                apply_numeric_format(&s, &flags, width, zero_pad)
+            }
+            'e' => {
+                let n = match val {
+                    Value::Number(n) => n,
+                    _ => {
+                        return Err(RuntimeError {
+                            span: span.clone(),
+                            message: "std.format: %e requires a number".to_string(),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                };
+                let p = precision.unwrap_or(6);
+                let s = format!("{:.prec$e}", n, prec = p);
+                // Rust uses 'e+2' style; Python/Jsonnet uses 'e+02'
+                let s = normalize_exp_notation(&s, false);
+                apply_numeric_format(&s, &flags, width, zero_pad)
+            }
+            'E' => {
+                let n = match val {
+                    Value::Number(n) => n,
+                    _ => {
+                        return Err(RuntimeError {
+                            span: span.clone(),
+                            message: "std.format: %E requires a number".to_string(),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                };
+                let p = precision.unwrap_or(6);
+                let s = format!("{:.prec$e}", n, prec = p);
+                let s = normalize_exp_notation(&s, true);
+                apply_numeric_format(&s, &flags, width, zero_pad)
+            }
+            'g' | 'G' => {
+                let n = match val {
+                    Value::Number(n) => n,
+                    _ => {
+                        return Err(RuntimeError {
+                            span: span.clone(),
+                            message: format!("std.format: %{} requires a number", conv),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                };
+                let p = precision.unwrap_or(6).max(1);
+                let s = format_g(n, p, conv == 'G');
+                apply_numeric_format(&s, &flags, width, zero_pad)
+            }
+            'c' => {
+                let n = match val {
+                    Value::Number(n) => n as u32,
+                    Value::String(s_idx) => {
+                        let s = mm.load_string(s_idx);
+                        match s.chars().next() {
+                            Some(c) => c as u32,
+                            None => {
+                                return Err(RuntimeError {
+                                    span: span.clone(),
+                                    message: "std.format: %c requires non-empty string or number"
+                                        .to_string(),
+                                    source_id: source_id.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(RuntimeError {
+                            span: span.clone(),
+                            message: "std.format: %c requires a number or string".to_string(),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                };
+                let c = char::from_u32(n).unwrap_or('\u{FFFD}');
+                apply_width_align(&c.to_string(), &flags, width)
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span: span.clone(),
+                    message: format!("std.format: unknown format specifier '%{}'", conv),
+                    source_id: source_id.to_string(),
+                });
+            }
+        };
+
+        result.push_str(&formatted);
+    }
+
+    Ok(result)
+}
+
+/// Normalize Rust's scientific notation to match Python/Jsonnet style (e+02 not e+2)
+fn normalize_exp_notation(s: &str, upper: bool) -> String {
+    let e_char = if upper { 'E' } else { 'e' };
+    if let Some(pos) = s.find('e') {
+        let mantissa = &s[..pos];
+        let exp_part = &s[pos + 1..];
+        // exp_part is like "+2" or "-2" or "2"
+        let (sign, digits) = if exp_part.starts_with('+') {
+            ("+", &exp_part[1..])
+        } else if exp_part.starts_with('-') {
+            ("-", &exp_part[1..])
+        } else {
+            ("+", exp_part)
+        };
+        // Ensure at least 2 digit exponent
+        let exp_num: i32 = digits.parse().unwrap_or(0);
+        format!("{}{}{}{:02}", mantissa, e_char, sign, exp_num)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Format a float using %g/%G semantics
+fn format_g(n: f64, prec: usize, upper: bool) -> String {
+    // Use %e if exponent < -4 or >= prec, otherwise %f
+    // prec is number of significant digits
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    let exp = n.abs().log10().floor() as i32;
+    if exp < -(4 as i32) || exp >= prec as i32 {
+        // scientific notation with prec-1 decimal places
+        let p = if prec > 0 { prec - 1 } else { 0 };
+        let s = format!("{:.prec$e}", n, prec = p);
+        // strip trailing zeros in mantissa
+        let s = normalize_exp_notation(&s, upper);
+        strip_trailing_zeros_e(&s)
+    } else {
+        // fixed notation — prec significant digits
+        let decimal_places = if prec as i32 > exp + 1 {
+            (prec as i32 - exp - 1) as usize
+        } else {
+            0
+        };
+        let s = format!("{:.prec$}", n, prec = decimal_places);
+        // strip trailing zeros after decimal point
+        if s.contains('.') {
+            let s = s.trim_end_matches('0').trim_end_matches('.');
+            s.to_string()
+        } else {
+            s
+        }
+    }
+}
+
+fn strip_trailing_zeros_e(s: &str) -> String {
+    // Find the 'e' or 'E'
+    let e_pos = s.find('e').or_else(|| s.find('E'));
+    if let Some(pos) = e_pos {
+        let mantissa = &s[..pos];
+        let exp_part = &s[pos..];
+        let mantissa = if mantissa.contains('.') {
+            mantissa.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            mantissa
+        };
+        format!("{}{}", mantissa, exp_part)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Public entry point for the % operator in the VM
+pub fn std_format_public(
+    fmt_val: Value,
+    vals_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    std_format(fmt_val, vals_val, memory_manager, span, source_id)
+}
+
+/// std.format(str, vals): Python-style % string formatting
+fn std_format(
+    fmt_val: Value,
+    vals_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let fmt_str = match fmt_val {
+        Value::String(s_idx) => memory_manager.load_string(s_idx).to_string(),
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.format() first argument must be a string".to_string(),
+                source_id,
+            });
+        }
+    };
+
+    let vals = FormatVals::from_value(vals_val, memory_manager);
+    let result = format_string(&fmt_str, &vals, memory_manager, &span, &source_id)?;
+    let alloc = memory_manager.allocate_string(&result);
+    Ok(Value::String(alloc.index))
+}
+
+// ─── std.splitLimit ───────────────────────────────────────────────────────────
+
+/// std.splitLimit(str, c, maxsplits): Like split but at most maxsplits splits
+fn std_split_limit(
+    str_val: Value,
+    c_val: Value,
+    max_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let (s_idx, c_idx, max) = match (str_val, c_val, max_val) {
+        (Value::String(s), Value::String(c), Value::Number(m)) => (s, c, m as i64),
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.splitLimit() expects (string, string, number)".to_string(),
+                source_id,
+            });
+        }
+    };
+    let s = memory_manager.load_string(s_idx).to_string();
+    let c = memory_manager.load_string(c_idx).to_string();
+    let parts: Vec<String> = if max < 0 {
+        s.split(c.as_str()).map(|p| p.to_string()).collect()
+    } else {
+        s.splitn(max as usize + 1, c.as_str())
+            .map(|p| p.to_string())
+            .collect()
+    };
+    let elements: Vec<Value> = parts
+        .iter()
+        .map(|p| {
+            let alloc = memory_manager.allocate_string(p);
+            Value::String(alloc.index)
+        })
+        .collect();
+    let arr_alloc = memory_manager.allocate_array(elements);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+// ─── std.repeat ───────────────────────────────────────────────────────────────
+
+/// std.repeat(what, count): Repeats an array or string count times
+fn std_repeat(
+    what_val: Value,
+    count_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let count = match count_val {
+        Value::Number(n) => {
+            if n < 0.0 || n.fract() != 0.0 {
+                return Err(RuntimeError {
+                    span,
+                    message: format!(
+                        "std.repeat() count must be a non-negative integer, got {}",
+                        n
+                    ),
+                    source_id,
+                });
+            }
+            n as usize
+        }
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.repeat() count must be a number".to_string(),
+                source_id,
+            });
+        }
+    };
+
+    match what_val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).to_string();
+            let result = s.repeat(count);
+            let alloc = memory_manager.allocate_string(&result);
+            Ok(Value::String(alloc.index))
+        }
+        Value::Array(a_idx) => {
+            let elems = memory_manager.load_array(a_idx).elements.clone();
+            let mut result: Vec<Value> = Vec::with_capacity(elems.len() * count);
+            for _ in 0..count {
+                result.extend_from_slice(&elems);
+            }
+            let arr_alloc = memory_manager.allocate_array(result);
+            Ok(Value::Array(arr_alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.repeat() first argument must be a string or array".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.slice ────────────────────────────────────────────────────────────────
+
+/// std.slice(indexable, index, end, step): Python-style slice
+fn std_slice(
+    indexable_val: Value,
+    index_val: Value,
+    end_val: Value,
+    step_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match indexable_val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).to_string();
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len();
+            let (start, end, step) =
+                parse_slice_args(index_val, end_val, step_val, len, &span, &source_id)?;
+            let mut result_chars = Vec::new();
+            let mut i = start;
+            while i < end {
+                result_chars.push(chars[i]);
+                i += step;
+            }
+            let result: String = result_chars.into_iter().collect();
+            let alloc = memory_manager.allocate_string(&result);
+            Ok(Value::String(alloc.index))
+        }
+        Value::Array(a_idx) => {
+            let elems = memory_manager.load_array(a_idx).elements.clone();
+            let len = elems.len();
+            let (start, end, step) =
+                parse_slice_args(index_val, end_val, step_val, len, &span, &source_id)?;
+            let mut result = Vec::new();
+            let mut i = start;
+            while i < end {
+                result.push(elems[i]);
+                i += step;
+            }
+            let arr_alloc = memory_manager.allocate_array(result);
+            Ok(Value::Array(arr_alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.slice() first argument must be a string or array".to_string(),
+            source_id,
+        }),
+    }
+}
+
+fn parse_slice_args(
+    index_val: Value,
+    end_val: Value,
+    step_val: Value,
+    len: usize,
+    span: &Range<usize>,
+    source_id: &str,
+) -> Result<(usize, usize, usize), RuntimeError> {
+    let step = match step_val {
+        Value::Null => 1usize,
+        Value::Number(n) => {
+            if n <= 0.0 || n.fract() != 0.0 {
+                return Err(RuntimeError {
+                    span: span.clone(),
+                    message: format!("std.slice() step must be a positive integer, got {}", n),
+                    source_id: source_id.to_string(),
+                });
+            }
+            n as usize
+        }
+        _ => {
+            return Err(RuntimeError {
+                span: span.clone(),
+                message: "std.slice() step must be a number or null".to_string(),
+                source_id: source_id.to_string(),
+            });
+        }
+    };
+
+    let start = match index_val {
+        Value::Null => 0usize,
+        Value::Number(n) => {
+            let idx = n as i64;
+            if idx < 0 {
+                let adjusted = len as i64 + idx;
+                if adjusted < 0 { 0 } else { adjusted as usize }
+            } else {
+                (idx as usize).min(len)
+            }
+        }
+        _ => {
+            return Err(RuntimeError {
+                span: span.clone(),
+                message: "std.slice() index must be a number or null".to_string(),
+                source_id: source_id.to_string(),
+            });
+        }
+    };
+
+    let end = match end_val {
+        Value::Null => len,
+        Value::Number(n) => {
+            let idx = n as i64;
+            if idx < 0 {
+                let adjusted = len as i64 + idx;
+                if adjusted < 0 { 0 } else { adjusted as usize }
+            } else {
+                (idx as usize).min(len)
+            }
+        }
+        _ => {
+            return Err(RuntimeError {
+                span: span.clone(),
+                message: "std.slice() end must be a number or null".to_string(),
+                source_id: source_id.to_string(),
+            });
+        }
+    };
+
+    Ok((start, end, step))
+}
+
+// ─── std.get ──────────────────────────────────────────────────────────────────
+
+/// std.get(o, f, default=null, inc_hidden=true): Get field from object with default
+fn std_get(
+    o_val: Value,
+    f_val: Value,
+    default_val: Value,
+    inc_hidden_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let o_idx = match o_val {
+        Value::Object(o) => o,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.get() first argument must be an object".to_string(),
+                source_id,
+            });
+        }
+    };
+
+    let field_name = match f_val {
+        Value::String(s_idx) => memory_manager.load_string(s_idx).to_string(),
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.get() second argument must be a string".to_string(),
+                source_id,
+            });
+        }
+    };
+
+    let inc_hidden = match inc_hidden_val {
+        Value::Boolean(b) => b,
+        Value::Null => true,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.get() fourth argument must be a boolean".to_string(),
+                source_id,
+            });
+        }
+    };
+
+    let obj = memory_manager.load_object(o_idx);
+    let found: Option<(Value, chunk::FieldVisibility)> = obj
+        .properties
+        .iter()
+        .find(|(k, _)| memory_manager.load_string(**k) == field_name.as_str())
+        .map(|(_, f)| (f.value, f.visibility));
+
+    match found {
+        Some((val, visibility)) => {
+            if inc_hidden || visibility != chunk::FieldVisibility::Hidden {
+                Ok(val)
+            } else {
+                Ok(default_val)
+            }
+        }
+        None => Ok(default_val),
+    }
+}
+
+// ─── std.objectHasAll ────────────────────────────────────────────────────────
+
+/// std.objectHasAll(o, f): Returns true if object o has field f (including hidden fields)
+fn std_object_has_all(
+    obj_val: Value,
+    field_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (obj_val, field_val) {
+        (Value::Object(o_idx), Value::String(s_idx)) => {
+            let field_name = memory_manager.load_string(s_idx).to_string();
+            let obj = memory_manager.load_object(o_idx);
+            let all_keys: Vec<chunk::StringIndex> = obj.properties.keys().copied().collect();
+            let found = all_keys
+                .iter()
+                .any(|key| memory_manager.load_string(*key) == field_name);
+            Ok(Value::Boolean(found))
+        }
+        (Value::Object(_), _) => Err(RuntimeError {
+            span,
+            message: "std.objectHasAll() second argument must be a string".to_string(),
+            source_id,
+        }),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.objectHasAll() first argument must be an object".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.objectFieldsAll ─────────────────────────────────────────────────────
+
+/// std.objectFieldsAll(o): Returns all field names (including hidden), sorted
+fn std_object_fields_all(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Object(o_idx) => {
+            let obj = memory_manager.load_object(o_idx);
+            let all_keys: Vec<chunk::StringIndex> = obj.properties.keys().copied().collect();
+            let mut names: Vec<String> = all_keys
+                .iter()
+                .map(|key| memory_manager.load_string(*key).to_string())
+                .collect();
+            names.sort();
+            let elements: Vec<Value> = names
+                .iter()
+                .map(|name| {
+                    let alloc = memory_manager.allocate_string(name);
+                    Value::String(alloc.index)
+                })
+                .collect();
+            let arr_alloc = memory_manager.allocate_array(elements);
+            Ok(Value::Array(arr_alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.objectFieldsAll() expected object, but got something else".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.encodeUTF8 ──────────────────────────────────────────────────────────
+
+/// std.encodeUTF8(str): Returns an array of byte values for the UTF-8 encoding of str
+fn std_encode_utf8(
+    str_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let s_idx = match str_val {
+        Value::String(s) => s,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.encodeUTF8() expected string, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let s = memory_manager.load_string(s_idx).to_string();
+    let elements: Vec<Value> = s.bytes().map(|b| Value::Number(b as f64)).collect();
+    let arr_alloc = memory_manager.allocate_array(elements);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+// ─── std.decodeUTF8 ──────────────────────────────────────────────────────────
+
+/// std.decodeUTF8(arr): Decodes an array of byte values as a UTF-8 string
+fn std_decode_utf8(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let a_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.decodeUTF8() expected array, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements: Vec<Value> = memory_manager.load_array(a_idx).elements.clone();
+    let mut bytes: Vec<u8> = Vec::with_capacity(elements.len());
+    for elem in &elements {
+        match elem {
+            Value::Number(n) => {
+                if *n < 0.0 || *n > 255.0 || n.fract() != 0.0 {
+                    return Err(RuntimeError {
+                        span,
+                        message: format!("std.decodeUTF8() byte value out of range: {}", n),
+                        source_id,
+                    });
+                }
+                bytes.push(*n as u8);
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.decodeUTF8() array must contain numbers".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    match std::str::from_utf8(&bytes) {
+        Ok(s) => {
+            let alloc = memory_manager.allocate_string(s);
+            Ok(Value::String(alloc.index))
+        }
+        Err(e) => Err(RuntimeError {
+            span,
+            message: format!("std.decodeUTF8() invalid UTF-8 sequence: {}", e),
+            source_id,
+        }),
     }
 }
 

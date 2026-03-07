@@ -894,17 +894,32 @@ impl VirtualMachine {
                 Opcode::Mod => {
                     let b = self.pop_forced()?;
                     let a = self.pop_forced()?;
-                    let b_num = self.to_number(b)?;
-                    if b_num == 0.0 {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Modulo by zero".to_string(),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                    // If LHS is a string, treat % as string formatting (Python-style)
+                    if matches!(a, Value::String(_)) {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let result = native::std_format_public(
+                            a,
+                            b,
+                            &mut self.memory_manager,
+                            span,
+                            source_id,
+                        )?;
+                        self.push(result)?;
+                        self.advance_pc();
+                    } else {
+                        let b_num = self.to_number(b)?;
+                        if b_num == 0.0 {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Modulo by zero".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                        let result = self.to_number(a)? % b_num;
+                        self.push(Value::Number(result))?;
+                        self.advance_pc();
                     }
-                    let result = self.to_number(a)? % b_num;
-                    self.push(Value::Number(result))?;
-                    self.advance_pc();
                 }
 
                 // Comparison operations
@@ -1755,6 +1770,146 @@ impl VirtualMachine {
                     // Pop arguments and the native function value itself
                     for _ in 0..=arg_count {
                         self.pop()?;
+                    }
+
+                    // Handle std.get: field value may be a thunk closure
+                    if func_id == chunk::NativeFuncId::Get {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let o_val = args[0];
+                        let f_val = args[1];
+                        let default_val = args[2];
+                        let inc_hidden_val = args[3];
+
+                        let o_idx = match o_val {
+                            Value::Object(o) => o,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: "std.get() first argument must be an object"
+                                        .to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+                        let field_name = match f_val {
+                            Value::String(s_idx) => {
+                                self.memory_manager.load_string(s_idx).to_string()
+                            }
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: "std.get() second argument must be a string"
+                                        .to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+                        let inc_hidden = match inc_hidden_val {
+                            Value::Boolean(b) => b,
+                            Value::Null => true,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: "std.get() fourth argument must be a boolean or null"
+                                        .to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+
+                        let obj = self.memory_manager.load_object(o_idx);
+                        let found: Option<(Value, FieldVisibility, Option<ObjectIndex>)> = obj
+                            .properties
+                            .iter()
+                            .find(|(k, _)| {
+                                self.memory_manager.load_string(**k) == field_name.as_str()
+                            })
+                            .map(|(_, f)| (f.value, f.visibility, f.super_obj));
+
+                        let result = match found {
+                            Some((val, visibility, super_obj)) => {
+                                if inc_hidden || visibility != FieldVisibility::Hidden {
+                                    // Force-evaluate thunk if needed
+                                    match val {
+                                        Value::Closure(closure_idx) => {
+                                            let result = self.execute_thunk_sync(
+                                                closure_idx,
+                                                Some(o_idx),
+                                                super_obj,
+                                            )?;
+                                            self.push(result)?;
+                                            continue;
+                                        }
+                                        _ => val,
+                                    }
+                                } else {
+                                    default_val
+                                }
+                            }
+                            None => default_val,
+                        };
+                        self.push(result)?;
+                        continue;
+                    }
+
+                    // Handle std.format: when vals is an object, field values may be thunks.
+                    // Pre-evaluate all object field values before passing to native.
+                    if func_id == chunk::NativeFuncId::Format && args.len() >= 2 {
+                        let vals_val = args[1];
+                        if let Value::Object(o_idx) = vals_val {
+                            let span = self.get_current_span();
+                            let source_id = self.current_chunk().source_id.to_string();
+                            // Collect all (key_string_idx, raw_value, super_obj) pairs
+                            let pairs: Vec<(StringIndex, Value, Option<ObjectIndex>)> = self
+                                .memory_manager
+                                .load_object(o_idx)
+                                .properties
+                                .iter()
+                                .map(|(k, f)| (*k, f.value, f.super_obj))
+                                .collect();
+                            // Evaluate each field
+                            let mut evaluated: Vec<(StringIndex, Value)> =
+                                Vec::with_capacity(pairs.len());
+                            for (k, v, super_obj) in pairs {
+                                let ev = match v {
+                                    Value::Closure(closure_idx) => self.execute_thunk_sync(
+                                        closure_idx,
+                                        Some(o_idx),
+                                        super_obj,
+                                    )?,
+                                    other => other,
+                                };
+                                evaluated.push((k, ev));
+                            }
+                            // Build a new object with evaluated values and pass to format
+                            let mut properties = std::collections::HashMap::new();
+                            for (k, v) in evaluated {
+                                properties.insert(
+                                    k,
+                                    memory_manager::ObjectField {
+                                        value: v,
+                                        super_obj: None,
+                                        visibility: FieldVisibility::Visible,
+                                    },
+                                );
+                            }
+                            let new_obj_alloc = self
+                                .memory_manager
+                                .allocate_object_with_properties(properties);
+                            let new_obj_val = Value::Object(new_obj_alloc.index);
+                            // Now call format with the new object
+                            let new_args = vec![args[0], new_obj_val];
+                            let result = call_native(
+                                func_id,
+                                &new_args,
+                                &mut self.memory_manager,
+                                span,
+                                source_id,
+                            )?;
+                            self.push(result)?;
+                            continue;
+                        }
                     }
 
                     if func_id == chunk::NativeFuncId::MakeArray {
