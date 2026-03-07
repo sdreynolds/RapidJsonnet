@@ -2124,7 +2124,8 @@ impl VirtualMachine {
                     // field values may be thunk closures that need to be force-evaluated.
                     if (func_id == chunk::NativeFuncId::ObjectValues
                         || func_id == chunk::NativeFuncId::ObjectValuesAll
-                        || func_id == chunk::NativeFuncId::ObjectKeysValues)
+                        || func_id == chunk::NativeFuncId::ObjectKeysValues
+                        || func_id == chunk::NativeFuncId::ObjectKeysValuesAll)
                         && !args.is_empty()
                     {
                         if let Value::Object(o_idx) = args[0] {

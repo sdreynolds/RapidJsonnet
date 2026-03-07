@@ -165,6 +165,16 @@ pub fn call_native(
         NativeFuncId::ObjectValuesAll => {
             std_object_values_all(args[0], memory_manager, span, source_id)
         }
+        NativeFuncId::Sin => std_sin(args[0], span, source_id),
+        NativeFuncId::Cos => std_cos(args[0], span, source_id),
+        NativeFuncId::Tan => std_tan(args[0], span, source_id),
+        NativeFuncId::Log2 => std_log2(args[0], span, source_id),
+        NativeFuncId::Log10 => std_log10(args[0], span, source_id),
+        NativeFuncId::Xor => std_xor(args[0], args[1], span, source_id),
+        NativeFuncId::Xnor => std_xnor(args[0], args[1], span, source_id),
+        NativeFuncId::ObjectKeysValuesAll => {
+            std_object_keys_values_all(args[0], memory_manager, span, source_id)
+        }
     }
 }
 
@@ -3298,4 +3308,176 @@ fn std_object_values_all(
             source_id,
         }),
     }
+}
+
+// ─── std.sin ──────────────────────────────────────────────────────────────────
+
+/// std.sin(x): Returns the sine of x (x in radians)
+fn std_sin(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.sin())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.sin() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.cos ──────────────────────────────────────────────────────────────────
+
+/// std.cos(x): Returns the cosine of x (x in radians)
+fn std_cos(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.cos())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.cos() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.tan ──────────────────────────────────────────────────────────────────
+
+/// std.tan(x): Returns the tangent of x (x in radians)
+fn std_tan(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.tan())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.tan() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.log2 ─────────────────────────────────────────────────────────────────
+
+/// std.log2(x): Returns the base-2 logarithm of x
+fn std_log2(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.log2())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.log2() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.log10 ────────────────────────────────────────────────────────────────
+
+/// std.log10(x): Returns the base-10 logarithm of x
+fn std_log10(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.log10())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.log10() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.xor ──────────────────────────────────────────────────────────────────
+
+/// std.xor(a, b): Returns the boolean XOR of a and b
+fn std_xor(
+    a: Value,
+    b: Value,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (a, b) {
+        (Value::Boolean(x), Value::Boolean(y)) => Ok(Value::Boolean(x ^ y)),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.xor() expected two booleans".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.xnor ─────────────────────────────────────────────────────────────────
+
+/// std.xnor(a, b): Returns the boolean XNOR of a and b
+fn std_xnor(
+    a: Value,
+    b: Value,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (a, b) {
+        (Value::Boolean(x), Value::Boolean(y)) => Ok(Value::Boolean(!(x ^ y))),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.xnor() expected two booleans".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.objectKeysValuesAll ──────────────────────────────────────────────────
+
+/// std.objectKeysValuesAll(o): Returns [{key, value}] for all fields (including hidden), sorted by key
+fn std_object_keys_values_all(
+    obj_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let o_idx = match obj_val {
+        Value::Object(o) => o,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.objectKeysValuesAll() expected object, but got something else"
+                    .to_string(),
+                source_id,
+            });
+        }
+    };
+    // Collect all (key_name, value) pairs — no visibility filter
+    let obj = memory_manager.load_object(o_idx);
+    let all_pairs: Vec<(chunk::StringIndex, Value)> = obj
+        .properties
+        .iter()
+        .map(|(key, field)| (*key, field.value))
+        .collect();
+    let mut named_pairs: Vec<(String, Value)> = all_pairs
+        .iter()
+        .map(|(key, val)| (memory_manager.load_string(*key).to_string(), *val))
+        .collect();
+    named_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Intern the field-name strings "key" and "value" once
+    let key_field_name = memory_manager.allocate_string("key").index;
+    let value_field_name = memory_manager.allocate_string("value").index;
+
+    let mut result_elements: Vec<Value> = Vec::with_capacity(named_pairs.len());
+    for (name, val) in named_pairs {
+        let name_str_idx = memory_manager.allocate_string(&name).index;
+        let mut properties = std::collections::HashMap::new();
+        properties.insert(
+            key_field_name,
+            ObjectField {
+                value: Value::String(name_str_idx),
+                super_obj: None,
+                visibility: FieldVisibility::Visible,
+            },
+        );
+        properties.insert(
+            value_field_name,
+            ObjectField {
+                value: val,
+                super_obj: None,
+                visibility: FieldVisibility::Visible,
+            },
+        );
+        let obj_alloc = memory_manager.allocate_object_with_properties(properties);
+        result_elements.push(Value::Object(obj_alloc.index));
+    }
+    let arr_alloc = memory_manager.allocate_array(result_elements);
+    Ok(Value::Array(arr_alloc.index))
 }

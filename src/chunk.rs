@@ -105,6 +105,14 @@ pub enum NativeFuncId {
     IsOdd = 79,
     Contains = 80,
     ObjectValuesAll = 81,
+    Sin = 82,
+    Cos = 83,
+    Tan = 84,
+    Log2 = 85,
+    Log10 = 86,
+    Xor = 87,
+    Xnor = 88,
+    ObjectKeysValuesAll = 89,
 }
 
 impl NativeFuncId {
@@ -193,6 +201,14 @@ impl NativeFuncId {
             79 => Some(NativeFuncId::IsOdd),
             80 => Some(NativeFuncId::Contains),
             81 => Some(NativeFuncId::ObjectValuesAll),
+            82 => Some(NativeFuncId::Sin),
+            83 => Some(NativeFuncId::Cos),
+            84 => Some(NativeFuncId::Tan),
+            85 => Some(NativeFuncId::Log2),
+            86 => Some(NativeFuncId::Log10),
+            87 => Some(NativeFuncId::Xor),
+            88 => Some(NativeFuncId::Xnor),
+            89 => Some(NativeFuncId::ObjectKeysValuesAll),
             _ => None,
         }
     }
@@ -282,6 +298,14 @@ impl NativeFuncId {
             NativeFuncId::IsOdd => 1,
             NativeFuncId::Contains => 2,
             NativeFuncId::ObjectValuesAll => 1,
+            NativeFuncId::Sin => 1,
+            NativeFuncId::Cos => 1,
+            NativeFuncId::Tan => 1,
+            NativeFuncId::Log2 => 1,
+            NativeFuncId::Log10 => 1,
+            NativeFuncId::Xor => 2,
+            NativeFuncId::Xnor => 2,
+            NativeFuncId::ObjectKeysValuesAll => 1,
         }
     }
 
@@ -370,6 +394,14 @@ impl NativeFuncId {
             NativeFuncId::IsOdd => "isOdd",
             NativeFuncId::Contains => "contains",
             NativeFuncId::ObjectValuesAll => "objectValuesAll",
+            NativeFuncId::Sin => "sin",
+            NativeFuncId::Cos => "cos",
+            NativeFuncId::Tan => "tan",
+            NativeFuncId::Log2 => "log2",
+            NativeFuncId::Log10 => "log10",
+            NativeFuncId::Xor => "xor",
+            NativeFuncId::Xnor => "xnor",
+            NativeFuncId::ObjectKeysValuesAll => "objectKeysValuesAll",
         }
     }
 
@@ -458,6 +490,14 @@ impl NativeFuncId {
             "isOdd" => Some(NativeFuncId::IsOdd),
             "contains" => Some(NativeFuncId::Contains),
             "objectValuesAll" => Some(NativeFuncId::ObjectValuesAll),
+            "sin" => Some(NativeFuncId::Sin),
+            "cos" => Some(NativeFuncId::Cos),
+            "tan" => Some(NativeFuncId::Tan),
+            "log2" => Some(NativeFuncId::Log2),
+            "log10" => Some(NativeFuncId::Log10),
+            "xor" => Some(NativeFuncId::Xor),
+            "xnor" => Some(NativeFuncId::Xnor),
+            "objectKeysValuesAll" => Some(NativeFuncId::ObjectKeysValuesAll),
             _ => None,
         }
     }
