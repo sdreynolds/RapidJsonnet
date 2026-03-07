@@ -1,4 +1,4 @@
-use chunk::{NativeFuncId, RuntimeError, Value};
+use chunk::{FieldVisibility, NativeFuncId, RuntimeError, Value};
 use memory_manager::MemoryManager;
 use std::ops::Range;
 
@@ -48,6 +48,17 @@ pub fn call_native(
         NativeFuncId::IsString => std_is_string(args[0]),
         NativeFuncId::IsNull => std_is_null(args[0]),
         NativeFuncId::IsFunction => std_is_function(args[0]),
+        NativeFuncId::ObjectFields => std_object_fields(args[0], memory_manager, span, source_id),
+        NativeFuncId::ObjectHas => {
+            std_object_has(args[0], args[1], memory_manager, span, source_id)
+        }
+        NativeFuncId::ObjectValues => std_object_values(args[0], memory_manager, span, source_id),
+        NativeFuncId::Range => std_range(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::ParseInt => std_parse_int(args[0], memory_manager, span, source_id),
+        NativeFuncId::ParseOctal => std_parse_octal(args[0], memory_manager, span, source_id),
+        NativeFuncId::ParseHex => std_parse_hex(args[0], memory_manager, span, source_id),
+        NativeFuncId::AsciiUpper => std_ascii_upper(args[0], memory_manager, span, source_id),
+        NativeFuncId::AsciiLower => std_ascii_lower(args[0], memory_manager, span, source_id),
     }
 }
 
@@ -355,4 +366,280 @@ fn std_is_function(val: Value) -> Result<Value, RuntimeError> {
         val,
         Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_)
     )))
+}
+
+/// std.objectFields(o): Returns an array of visible field names of o, sorted lexicographically
+fn std_object_fields(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Object(o_idx) => {
+            // Collect visible key indices first (ends the immutable borrow of load_object)
+            let obj = memory_manager.load_object(o_idx);
+            let visible_keys: Vec<chunk::StringIndex> = obj
+                .properties
+                .iter()
+                .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+                .map(|(key, _)| *key)
+                .collect();
+            // Now load the string names
+            let mut names: Vec<String> = visible_keys
+                .iter()
+                .map(|key| memory_manager.load_string(*key).to_string())
+                .collect();
+            names.sort();
+            let elements: Vec<Value> = names
+                .iter()
+                .map(|name| {
+                    let alloc = memory_manager.allocate_string(name);
+                    Value::String(alloc.index)
+                })
+                .collect();
+            let arr_alloc = memory_manager.allocate_array(elements);
+            Ok(Value::Array(arr_alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.objectFields() expected object, but got something else".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.objectHas(o, f): Returns true if object o has a visible field named f
+fn std_object_has(
+    obj_val: Value,
+    field_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (obj_val, field_val) {
+        (Value::Object(o_idx), Value::String(s_idx)) => {
+            // Intern the target field name string index — if the key exists at all
+            // in the string pool we can compare by StringIndex directly, otherwise
+            // it definitely doesn't match any field key.
+            let field_name = memory_manager.load_string(s_idx).to_string();
+            let obj = memory_manager.load_object(o_idx);
+            // Collect visible key indices to avoid holding immutable borrow while
+            // calling load_string again.
+            let visible_keys: Vec<chunk::StringIndex> = obj
+                .properties
+                .iter()
+                .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+                .map(|(key, _)| *key)
+                .collect();
+            let found = visible_keys
+                .iter()
+                .any(|key| memory_manager.load_string(*key) == field_name);
+            Ok(Value::Boolean(found))
+        }
+        (Value::Object(_), _) => Err(RuntimeError {
+            span,
+            message: "std.objectHas() second argument must be a string".to_string(),
+            source_id,
+        }),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.objectHas() first argument must be an object".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.objectValues(o): Returns an array of visible field values of o, sorted by key name
+fn std_object_values(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Object(o_idx) => {
+            // Collect visible (key_index, value) pairs first (ends immutable borrow)
+            let obj = memory_manager.load_object(o_idx);
+            let visible_pairs: Vec<(chunk::StringIndex, Value)> = obj
+                .properties
+                .iter()
+                .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+                .map(|(key, field)| (*key, field.value))
+                .collect();
+            // Load the key names for sorting
+            let mut named_pairs: Vec<(String, Value)> = visible_pairs
+                .iter()
+                .map(|(key, val)| (memory_manager.load_string(*key).to_string(), *val))
+                .collect();
+            named_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            let elements: Vec<Value> = named_pairs.into_iter().map(|(_, v)| v).collect();
+            let arr_alloc = memory_manager.allocate_array(elements);
+            Ok(Value::Array(arr_alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.objectValues() expected object, but got something else".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.range(from, to): Returns an array [from, from+1, ..., to] (inclusive)
+fn std_range(
+    from_val: Value,
+    to_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (from_val, to_val) {
+        (Value::Number(from), Value::Number(to)) => {
+            let from_i = from as i64;
+            let to_i = to as i64;
+            let elements: Vec<Value> = if from_i > to_i {
+                Vec::new()
+            } else {
+                (from_i..=to_i).map(|i| Value::Number(i as f64)).collect()
+            };
+            let arr_alloc = memory_manager.allocate_array(elements);
+            Ok(Value::Array(arr_alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.range() expected two numbers".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.parseInt(str): Parse a decimal integer string
+fn std_parse_int(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).trim().to_string();
+            match s.parse::<i64>() {
+                Ok(n) => Ok(Value::Number(n as f64)),
+                Err(_) => Err(RuntimeError {
+                    span,
+                    message: format!("std.parseInt() failed to parse '{}' as integer", s),
+                    source_id,
+                }),
+            }
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.parseInt() expected string, but got something else".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.parseOctal(str): Parse an octal integer string
+fn std_parse_octal(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).trim().to_string();
+            match i64::from_str_radix(&s, 8) {
+                Ok(n) => Ok(Value::Number(n as f64)),
+                Err(_) => Err(RuntimeError {
+                    span,
+                    message: format!("std.parseOctal() failed to parse '{}' as octal", s),
+                    source_id,
+                }),
+            }
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.parseOctal() expected string, but got something else".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.parseHex(str): Parse a hexadecimal integer string (case-insensitive)
+fn std_parse_hex(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).trim().to_lowercase();
+            match i64::from_str_radix(&s, 16) {
+                Ok(n) => Ok(Value::Number(n as f64)),
+                Err(_) => Err(RuntimeError {
+                    span,
+                    message: format!("std.parseHex() failed to parse '{}' as hex", s),
+                    source_id,
+                }),
+            }
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.parseHex() expected string, but got something else".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.asciiUpper(str): Returns str with all ASCII letters uppercased
+fn std_ascii_upper(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let upper: String = memory_manager
+                .load_string(s_idx)
+                .chars()
+                .map(|c| c.to_ascii_uppercase())
+                .collect();
+            let alloc = memory_manager.allocate_string(&upper);
+            Ok(Value::String(alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.asciiUpper() expected string, but got something else".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.asciiLower(str): Returns str with all ASCII letters lowercased
+fn std_ascii_lower(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let lower: String = memory_manager
+                .load_string(s_idx)
+                .chars()
+                .map(|c| c.to_ascii_lowercase())
+                .collect();
+            let alloc = memory_manager.allocate_string(&lower);
+            Ok(Value::String(alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.asciiLower() expected string, but got something else".to_string(),
+            source_id,
+        }),
+    }
 }

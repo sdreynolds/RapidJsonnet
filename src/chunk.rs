@@ -43,6 +43,15 @@ pub enum NativeFuncId {
     IsString = 17,
     IsNull = 18,
     IsFunction = 19,
+    ObjectFields = 20,
+    ObjectHas = 21,
+    ObjectValues = 22,
+    Range = 23,
+    ParseInt = 24,
+    ParseOctal = 25,
+    ParseHex = 26,
+    AsciiUpper = 27,
+    AsciiLower = 28,
 }
 
 impl NativeFuncId {
@@ -69,6 +78,15 @@ impl NativeFuncId {
             17 => Some(NativeFuncId::IsString),
             18 => Some(NativeFuncId::IsNull),
             19 => Some(NativeFuncId::IsFunction),
+            20 => Some(NativeFuncId::ObjectFields),
+            21 => Some(NativeFuncId::ObjectHas),
+            22 => Some(NativeFuncId::ObjectValues),
+            23 => Some(NativeFuncId::Range),
+            24 => Some(NativeFuncId::ParseInt),
+            25 => Some(NativeFuncId::ParseOctal),
+            26 => Some(NativeFuncId::ParseHex),
+            27 => Some(NativeFuncId::AsciiUpper),
+            28 => Some(NativeFuncId::AsciiLower),
             _ => None,
         }
     }
@@ -96,6 +114,15 @@ impl NativeFuncId {
             NativeFuncId::IsString => 1,
             NativeFuncId::IsNull => 1,
             NativeFuncId::IsFunction => 1,
+            NativeFuncId::ObjectFields => 1,
+            NativeFuncId::ObjectHas => 2,
+            NativeFuncId::ObjectValues => 1,
+            NativeFuncId::Range => 2,
+            NativeFuncId::ParseInt => 1,
+            NativeFuncId::ParseOctal => 1,
+            NativeFuncId::ParseHex => 1,
+            NativeFuncId::AsciiUpper => 1,
+            NativeFuncId::AsciiLower => 1,
         }
     }
 
@@ -122,6 +149,15 @@ impl NativeFuncId {
             NativeFuncId::IsString => "isString",
             NativeFuncId::IsNull => "isNull",
             NativeFuncId::IsFunction => "isFunction",
+            NativeFuncId::ObjectFields => "objectFields",
+            NativeFuncId::ObjectHas => "objectHas",
+            NativeFuncId::ObjectValues => "objectValues",
+            NativeFuncId::Range => "range",
+            NativeFuncId::ParseInt => "parseInt",
+            NativeFuncId::ParseOctal => "parseOctal",
+            NativeFuncId::ParseHex => "parseHex",
+            NativeFuncId::AsciiUpper => "asciiUpper",
+            NativeFuncId::AsciiLower => "asciiLower",
         }
     }
 
@@ -148,6 +184,15 @@ impl NativeFuncId {
             "isString" => Some(NativeFuncId::IsString),
             "isNull" => Some(NativeFuncId::IsNull),
             "isFunction" => Some(NativeFuncId::IsFunction),
+            "objectFields" => Some(NativeFuncId::ObjectFields),
+            "objectHas" => Some(NativeFuncId::ObjectHas),
+            "objectValues" => Some(NativeFuncId::ObjectValues),
+            "range" => Some(NativeFuncId::Range),
+            "parseInt" => Some(NativeFuncId::ParseInt),
+            "parseOctal" => Some(NativeFuncId::ParseOctal),
+            "parseHex" => Some(NativeFuncId::ParseHex),
+            "asciiUpper" => Some(NativeFuncId::AsciiUpper),
+            "asciiLower" => Some(NativeFuncId::AsciiLower),
             _ => None,
         }
     }
