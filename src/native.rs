@@ -175,6 +175,18 @@ pub fn call_native(
         NativeFuncId::ObjectKeysValuesAll => {
             std_object_keys_values_all(args[0], memory_manager, span, source_id)
         }
+        NativeFuncId::Asin => std_asin(args[0], span, source_id),
+        NativeFuncId::Acos => std_acos(args[0], span, source_id),
+        NativeFuncId::Atan => std_atan(args[0], span, source_id),
+        NativeFuncId::Atan2 => std_atan2(args[0], args[1], span, source_id),
+        NativeFuncId::IsInteger => std_is_integer(args[0], span, source_id),
+        NativeFuncId::IsDecimal => std_is_decimal(args[0], span, source_id),
+        NativeFuncId::ObjectRemoveKey => {
+            std_object_remove_key(args[0], args[1], memory_manager, span, source_id)
+        }
+        NativeFuncId::FlattenDeepArray => {
+            std_flatten_deep_array(args[0], memory_manager, span, source_id)
+        }
     }
 }
 
@@ -3480,4 +3492,188 @@ fn std_object_keys_values_all(
     }
     let arr_alloc = memory_manager.allocate_array(result_elements);
     Ok(Value::Array(arr_alloc.index))
+}
+
+// ─── std.asin ─────────────────────────────────────────────────────────────────
+
+/// std.asin(x): Returns the arcsine of x in radians
+fn std_asin(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.asin())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.asin() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.acos ─────────────────────────────────────────────────────────────────
+
+/// std.acos(x): Returns the arccosine of x in radians
+fn std_acos(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.acos())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.acos() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.atan ─────────────────────────────────────────────────────────────────
+
+/// std.atan(x): Returns the arctangent of x in radians
+fn std_atan(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.atan())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.atan() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.atan2 ────────────────────────────────────────────────────────────────
+
+/// std.atan2(y, x): Returns the two-argument arctangent of y/x in radians
+fn std_atan2(
+    y: Value,
+    x: Value,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (y, x) {
+        (Value::Number(yv), Value::Number(xv)) => Ok(Value::Number(yv.atan2(xv))),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.atan2() expected two numbers".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.isInteger ────────────────────────────────────────────────────────────
+
+/// std.isInteger(x): Returns true if x has no fractional part
+fn std_is_integer(
+    val: Value,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Boolean(n.fract() == 0.0)),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.isInteger() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.isDecimal ────────────────────────────────────────────────────────────
+
+/// std.isDecimal(x): Returns true if x has a fractional part
+fn std_is_decimal(
+    val: Value,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Boolean(n.fract() != 0.0)),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.isDecimal() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.objectRemoveKey ──────────────────────────────────────────────────────
+
+/// std.objectRemoveKey(obj, key): Returns a new object with the named key removed
+fn std_object_remove_key(
+    obj_val: Value,
+    key_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let o_idx = match obj_val {
+        Value::Object(o) => o,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.objectRemoveKey() expected object as first argument".to_string(),
+                source_id,
+            });
+        }
+    };
+    let target_key = match key_val {
+        Value::String(s_idx) => memory_manager.load_string(s_idx).to_string(),
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.objectRemoveKey() expected string as second argument".to_string(),
+                source_id,
+            });
+        }
+    };
+    // Collect all (StringIndex, ObjectField) pairs from the source object
+    let all_pairs: Vec<(chunk::StringIndex, ObjectField)> = memory_manager
+        .load_object(o_idx)
+        .properties
+        .iter()
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
+    // Filter out the entry whose key name matches target_key
+    let mut new_properties = std::collections::HashMap::new();
+    for (key_idx, field) in all_pairs {
+        let key_name = memory_manager.load_string(key_idx).to_string();
+        if key_name != target_key {
+            new_properties.insert(key_idx, field);
+        }
+    }
+    let obj_alloc = memory_manager.allocate_object_with_properties(new_properties);
+    Ok(Value::Object(obj_alloc.index))
+}
+
+// ─── std.flattenDeepArray ─────────────────────────────────────────────────────
+
+/// Recursive helper: pushes all non-array values into `out`, recursing into arrays
+fn flatten_deep(val: Value, out: &mut Vec<Value>, mm: &MemoryManager) {
+    match val {
+        Value::Array(a_idx) => {
+            let elements = mm.load_array(a_idx).elements.clone();
+            for elem in elements {
+                flatten_deep(elem, out, mm);
+            }
+        }
+        other => out.push(other),
+    }
+}
+
+/// std.flattenDeepArray(arr): Recursively flattens all nested arrays into a single flat array
+fn std_flatten_deep_array(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match arr_val {
+        Value::Array(_) => {
+            // Collect with immutable borrow first, then allocate
+            let mut result = Vec::new();
+            flatten_deep(arr_val, &mut result, memory_manager);
+            let arr_alloc = memory_manager.allocate_array(result);
+            Ok(Value::Array(arr_alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.flattenDeepArray() expected array".to_string(),
+            source_id,
+        }),
+    }
 }

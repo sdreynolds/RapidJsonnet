@@ -113,6 +113,14 @@ pub enum NativeFuncId {
     Xor = 87,
     Xnor = 88,
     ObjectKeysValuesAll = 89,
+    Asin = 90,
+    Acos = 91,
+    Atan = 92,
+    Atan2 = 93,
+    IsInteger = 94,
+    IsDecimal = 95,
+    ObjectRemoveKey = 96,
+    FlattenDeepArray = 97,
 }
 
 impl NativeFuncId {
@@ -209,6 +217,14 @@ impl NativeFuncId {
             87 => Some(NativeFuncId::Xor),
             88 => Some(NativeFuncId::Xnor),
             89 => Some(NativeFuncId::ObjectKeysValuesAll),
+            90 => Some(NativeFuncId::Asin),
+            91 => Some(NativeFuncId::Acos),
+            92 => Some(NativeFuncId::Atan),
+            93 => Some(NativeFuncId::Atan2),
+            94 => Some(NativeFuncId::IsInteger),
+            95 => Some(NativeFuncId::IsDecimal),
+            96 => Some(NativeFuncId::ObjectRemoveKey),
+            97 => Some(NativeFuncId::FlattenDeepArray),
             _ => None,
         }
     }
@@ -306,6 +322,14 @@ impl NativeFuncId {
             NativeFuncId::Xor => 2,
             NativeFuncId::Xnor => 2,
             NativeFuncId::ObjectKeysValuesAll => 1,
+            NativeFuncId::Asin => 1,
+            NativeFuncId::Acos => 1,
+            NativeFuncId::Atan => 1,
+            NativeFuncId::Atan2 => 2,
+            NativeFuncId::IsInteger => 1,
+            NativeFuncId::IsDecimal => 1,
+            NativeFuncId::ObjectRemoveKey => 2,
+            NativeFuncId::FlattenDeepArray => 1,
         }
     }
 
@@ -402,6 +426,14 @@ impl NativeFuncId {
             NativeFuncId::Xor => "xor",
             NativeFuncId::Xnor => "xnor",
             NativeFuncId::ObjectKeysValuesAll => "objectKeysValuesAll",
+            NativeFuncId::Asin => "asin",
+            NativeFuncId::Acos => "acos",
+            NativeFuncId::Atan => "atan",
+            NativeFuncId::Atan2 => "atan2",
+            NativeFuncId::IsInteger => "isInteger",
+            NativeFuncId::IsDecimal => "isDecimal",
+            NativeFuncId::ObjectRemoveKey => "objectRemoveKey",
+            NativeFuncId::FlattenDeepArray => "flattenDeepArray",
         }
     }
 
@@ -498,6 +530,14 @@ impl NativeFuncId {
             "xor" => Some(NativeFuncId::Xor),
             "xnor" => Some(NativeFuncId::Xnor),
             "objectKeysValuesAll" => Some(NativeFuncId::ObjectKeysValuesAll),
+            "asin" => Some(NativeFuncId::Asin),
+            "acos" => Some(NativeFuncId::Acos),
+            "atan" => Some(NativeFuncId::Atan),
+            "atan2" => Some(NativeFuncId::Atan2),
+            "isInteger" => Some(NativeFuncId::IsInteger),
+            "isDecimal" => Some(NativeFuncId::IsDecimal),
+            "objectRemoveKey" => Some(NativeFuncId::ObjectRemoveKey),
+            "flattenDeepArray" => Some(NativeFuncId::FlattenDeepArray),
             _ => None,
         }
     }
