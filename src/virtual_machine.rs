@@ -2120,6 +2120,72 @@ impl VirtualMachine {
                         continue;
                     }
 
+                    // Handle std.objectValues / std.objectValuesAll / std.objectKeysValues:
+                    // field values may be thunk closures that need to be force-evaluated.
+                    if (func_id == chunk::NativeFuncId::ObjectValues
+                        || func_id == chunk::NativeFuncId::ObjectValuesAll
+                        || func_id == chunk::NativeFuncId::ObjectKeysValues)
+                        && !args.is_empty()
+                    {
+                        if let Value::Object(o_idx) = args[0] {
+                            let span = self.get_current_span();
+                            let source_id = self.current_chunk().source_id.to_string();
+                            // Collect all (key, raw_value, super_obj, visibility) tuples
+                            let field_data: Vec<(
+                                chunk::StringIndex,
+                                Value,
+                                Option<ObjectIndex>,
+                                FieldVisibility,
+                            )> = self
+                                .memory_manager
+                                .load_object(o_idx)
+                                .properties
+                                .iter()
+                                .map(|(k, f)| (*k, f.value, f.super_obj, f.visibility))
+                                .collect();
+                            // Evaluate each field's thunk
+                            let mut evaluated: Vec<(chunk::StringIndex, Value, FieldVisibility)> =
+                                Vec::with_capacity(field_data.len());
+                            for (k, v, super_obj, vis) in field_data {
+                                let ev = match v {
+                                    Value::Closure(closure_idx) => self.execute_thunk_sync(
+                                        closure_idx,
+                                        Some(o_idx),
+                                        super_obj,
+                                    )?,
+                                    other => other,
+                                };
+                                evaluated.push((k, ev, vis));
+                            }
+                            // Rebuild the object with evaluated values
+                            let mut properties = std::collections::HashMap::new();
+                            for (k, v, vis) in evaluated {
+                                properties.insert(
+                                    k,
+                                    memory_manager::ObjectField {
+                                        value: v,
+                                        super_obj: None,
+                                        visibility: vis,
+                                    },
+                                );
+                            }
+                            let new_obj_alloc = self
+                                .memory_manager
+                                .allocate_object_with_properties(properties);
+                            let new_obj_val = Value::Object(new_obj_alloc.index);
+                            let new_args = vec![new_obj_val];
+                            let result = call_native(
+                                func_id,
+                                &new_args,
+                                &mut self.memory_manager,
+                                span,
+                                source_id,
+                            )?;
+                            self.push(result)?;
+                            continue;
+                        }
+                    }
+
                     // Call native function
                     let span = self.get_current_span();
                     let source_id = self.current_chunk().source_id.to_string();

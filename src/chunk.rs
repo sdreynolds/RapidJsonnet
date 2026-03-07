@@ -97,6 +97,14 @@ pub enum NativeFuncId {
     EscapeStringXml = 71,
     EscapeStringBash = 72,
     ParseFloat = 73,
+    Pow = 74,
+    Sqrt = 75,
+    Exp = 76,
+    Log = 77,
+    IsEven = 78,
+    IsOdd = 79,
+    Contains = 80,
+    ObjectValuesAll = 81,
 }
 
 impl NativeFuncId {
@@ -177,6 +185,14 @@ impl NativeFuncId {
             71 => Some(NativeFuncId::EscapeStringXml),
             72 => Some(NativeFuncId::EscapeStringBash),
             73 => Some(NativeFuncId::ParseFloat),
+            74 => Some(NativeFuncId::Pow),
+            75 => Some(NativeFuncId::Sqrt),
+            76 => Some(NativeFuncId::Exp),
+            77 => Some(NativeFuncId::Log),
+            78 => Some(NativeFuncId::IsEven),
+            79 => Some(NativeFuncId::IsOdd),
+            80 => Some(NativeFuncId::Contains),
+            81 => Some(NativeFuncId::ObjectValuesAll),
             _ => None,
         }
     }
@@ -258,6 +274,14 @@ impl NativeFuncId {
             NativeFuncId::EscapeStringXml => 1,
             NativeFuncId::EscapeStringBash => 1,
             NativeFuncId::ParseFloat => 1,
+            NativeFuncId::Pow => 2,
+            NativeFuncId::Sqrt => 1,
+            NativeFuncId::Exp => 1,
+            NativeFuncId::Log => 1,
+            NativeFuncId::IsEven => 1,
+            NativeFuncId::IsOdd => 1,
+            NativeFuncId::Contains => 2,
+            NativeFuncId::ObjectValuesAll => 1,
         }
     }
 
@@ -338,6 +362,14 @@ impl NativeFuncId {
             NativeFuncId::EscapeStringXml => "escapeStringXml",
             NativeFuncId::EscapeStringBash => "escapeStringBash",
             NativeFuncId::ParseFloat => "parseFloat",
+            NativeFuncId::Pow => "pow",
+            NativeFuncId::Sqrt => "sqrt",
+            NativeFuncId::Exp => "exp",
+            NativeFuncId::Log => "log",
+            NativeFuncId::IsEven => "isEven",
+            NativeFuncId::IsOdd => "isOdd",
+            NativeFuncId::Contains => "contains",
+            NativeFuncId::ObjectValuesAll => "objectValuesAll",
         }
     }
 
@@ -418,6 +450,14 @@ impl NativeFuncId {
             "escapeStringXml" => Some(NativeFuncId::EscapeStringXml),
             "escapeStringBash" => Some(NativeFuncId::EscapeStringBash),
             "parseFloat" => Some(NativeFuncId::ParseFloat),
+            "pow" => Some(NativeFuncId::Pow),
+            "sqrt" => Some(NativeFuncId::Sqrt),
+            "exp" => Some(NativeFuncId::Exp),
+            "log" => Some(NativeFuncId::Log),
+            "isEven" => Some(NativeFuncId::IsEven),
+            "isOdd" => Some(NativeFuncId::IsOdd),
+            "contains" => Some(NativeFuncId::Contains),
+            "objectValuesAll" => Some(NativeFuncId::ObjectValuesAll),
             _ => None,
         }
     }

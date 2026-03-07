@@ -155,6 +155,16 @@ pub fn call_native(
             std_escape_string_bash(args[0], memory_manager, span, source_id)
         }
         NativeFuncId::ParseFloat => std_parse_float(args[0], memory_manager, span, source_id),
+        NativeFuncId::Pow => std_pow(args[0], args[1], span, source_id),
+        NativeFuncId::Sqrt => std_sqrt(args[0], span, source_id),
+        NativeFuncId::Exp => std_exp(args[0], span, source_id),
+        NativeFuncId::Log => std_log(args[0], span, source_id),
+        NativeFuncId::IsEven => std_is_even(args[0], span, source_id),
+        NativeFuncId::IsOdd => std_is_odd(args[0], span, source_id),
+        NativeFuncId::Contains => std_contains(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::ObjectValuesAll => {
+            std_object_values_all(args[0], memory_manager, span, source_id)
+        }
     }
 }
 
@@ -3133,6 +3143,158 @@ fn std_parse_float(
         _ => Err(RuntimeError {
             span,
             message: "std.parseFloat: argument must be a string".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.pow ──────────────────────────────────────────────────────────────────
+
+/// std.pow(x, n): Returns x raised to the power n
+fn std_pow(
+    x: Value,
+    n: Value,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (x, n) {
+        (Value::Number(xv), Value::Number(nv)) => Ok(Value::Number(xv.powf(nv))),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.pow() expected two numbers".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.sqrt ─────────────────────────────────────────────────────────────────
+
+/// std.sqrt(x): Returns the square root of x
+fn std_sqrt(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.sqrt())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.sqrt() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.exp ──────────────────────────────────────────────────────────────────
+
+/// std.exp(x): Returns e raised to the power x
+fn std_exp(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.exp())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.exp() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.log ──────────────────────────────────────────────────────────────────
+
+/// std.log(x): Returns the natural logarithm of x
+fn std_log(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n.ln())),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.log() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.isEven ───────────────────────────────────────────────────────────────
+
+/// std.isEven(x): Returns true if the integral part of x is even
+fn std_is_even(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Boolean(n.trunc() % 2.0 == 0.0)),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.isEven() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.isOdd ────────────────────────────────────────────────────────────────
+
+/// std.isOdd(x): Returns true if the integral part of x is odd
+fn std_is_odd(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Boolean(n.trunc() % 2.0 != 0.0)),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.isOdd() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+// ─── std.contains ─────────────────────────────────────────────────────────────
+
+/// std.contains(arr, elem): Returns true if arr contains elem
+fn std_contains(
+    arr_val: Value,
+    elem: Value,
+    memory_manager: &MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.contains() first argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements = memory_manager.load_array(arr_idx).elements.clone();
+    let found = elements
+        .iter()
+        .any(|v| values_equal(*v, elem, memory_manager));
+    Ok(Value::Boolean(found))
+}
+
+// ─── std.objectValuesAll ──────────────────────────────────────────────────────
+
+/// std.objectValuesAll(o): Returns an array of all field values (including hidden), sorted by key
+fn std_object_values_all(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Object(o_idx) => {
+            // Collect all (key_index, value) pairs (no visibility filter)
+            let obj = memory_manager.load_object(o_idx);
+            let all_pairs: Vec<(chunk::StringIndex, Value)> = obj
+                .properties
+                .iter()
+                .map(|(key, field)| (*key, field.value))
+                .collect();
+            // Load key names for sorting
+            let mut named_pairs: Vec<(String, Value)> = all_pairs
+                .iter()
+                .map(|(key, val)| (memory_manager.load_string(*key).to_string(), *val))
+                .collect();
+            named_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            let elements: Vec<Value> = named_pairs.into_iter().map(|(_, v)| v).collect();
+            let arr_alloc = memory_manager.allocate_array(elements);
+            Ok(Value::Array(arr_alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.objectValuesAll() expected object, but got something else".to_string(),
             source_id,
         }),
     }
