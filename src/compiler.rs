@@ -1066,7 +1066,21 @@ impl<'a> Compiler<'a> {
                         // Check if we are accessing a native function on 'std'
                         if let Some(ExpressionType::StdNamespace) = self.type_stack.last() {
                             self.type_stack.pop();
-                            if let Some(id) = chunk::NativeFuncId::from_name(name) {
+
+                            // Special handling for std.thisFile
+                            if name == "thisFile" {
+                                let allocation_result =
+                                    memory_manager.allocate_string(&self.compiling_chunk.source_id);
+                                if allocation_result.should_garbage_collect {
+                                    self.run_garbage_collect(
+                                        memory_manager,
+                                        &[Value::String(allocation_result.index)],
+                                    );
+                                }
+                                self.emit_string_constant(allocation_result.index)?;
+                                self.push_type(ExpressionType::String);
+                                return Ok(());
+                            } else if let Some(id) = chunk::NativeFuncId::from_name(name) {
                                 // Instead of runtime property access, load the native function ID as a value
                                 let const_idx = self
                                     .compiling_chunk
