@@ -59,6 +59,18 @@ pub fn call_native(
         NativeFuncId::ParseHex => std_parse_hex(args[0], memory_manager, span, source_id),
         NativeFuncId::AsciiUpper => std_ascii_upper(args[0], memory_manager, span, source_id),
         NativeFuncId::AsciiLower => std_ascii_lower(args[0], memory_manager, span, source_id),
+        NativeFuncId::Substr => {
+            std_substr(args[0], args[1], args[2], memory_manager, span, source_id)
+        }
+        NativeFuncId::Split => std_split(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Join => std_join(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Lines => std_lines(args[0], memory_manager, span, source_id),
+        NativeFuncId::StringChars => std_string_chars(args[0], memory_manager, span, source_id),
+        NativeFuncId::FlattenArrays => std_flatten_arrays(args[0], memory_manager, span, source_id),
+        NativeFuncId::Reverse => std_reverse(args[0], memory_manager, span, source_id),
+        NativeFuncId::Member => std_member(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Count => std_count(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Find => std_find(args[0], args[1], memory_manager, span, source_id),
     }
 }
 
@@ -642,4 +654,399 @@ fn std_ascii_lower(
             source_id,
         }),
     }
+}
+
+/// Helper: compare two Values for equality, loading string contents when needed
+fn values_equal(a: Value, b: Value, mm: &MemoryManager) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Boolean(x), Value::Boolean(y)) => x == y,
+        (Value::Number(x), Value::Number(y)) => x == y,
+        (Value::String(x), Value::String(y)) => mm.load_string(x) == mm.load_string(y),
+        _ => a == b,
+    }
+}
+
+/// std.substr(str, from, len): Returns a substring of str starting at from with length len
+fn std_substr(
+    str_val: Value,
+    from_val: Value,
+    len_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let (s_idx, from_n, len_n) = match (str_val, from_val, len_val) {
+        (Value::String(s), Value::Number(f), Value::Number(l)) => (s, f, l),
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.substr() expects (string, number, number)".to_string(),
+                source_id,
+            });
+        }
+    };
+    if from_n < 0.0 || from_n.fract() != 0.0 {
+        return Err(RuntimeError {
+            span,
+            message: format!(
+                "std.substr() 'from' must be a non-negative integer, got {}",
+                from_n
+            ),
+            source_id,
+        });
+    }
+    if len_n < 0.0 || len_n.fract() != 0.0 {
+        return Err(RuntimeError {
+            span,
+            message: format!(
+                "std.substr() 'len' must be a non-negative integer, got {}",
+                len_n
+            ),
+            source_id,
+        });
+    }
+    let from = from_n as usize;
+    let len = len_n as usize;
+    let chars: Vec<char> = memory_manager.load_string(s_idx).chars().collect();
+    let end = (from + len).min(chars.len());
+    let result: String = chars[from.min(chars.len())..end].iter().collect();
+    let alloc = memory_manager.allocate_string(&result);
+    Ok(Value::String(alloc.index))
+}
+
+/// std.split(str, c): Splits str on all occurrences of c, returning an array of strings
+fn std_split(
+    str_val: Value,
+    c_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let (s_idx, c_idx) = match (str_val, c_val) {
+        (Value::String(s), Value::String(c)) => (s, c),
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.split() expects (string, string)".to_string(),
+                source_id,
+            });
+        }
+    };
+    let s = memory_manager.load_string(s_idx).to_string();
+    let c = memory_manager.load_string(c_idx).to_string();
+    let parts: Vec<String> = s.split(c.as_str()).map(|p| p.to_string()).collect();
+    let elements: Vec<Value> = parts
+        .iter()
+        .map(|p| {
+            let alloc = memory_manager.allocate_string(p);
+            Value::String(alloc.index)
+        })
+        .collect();
+    let arr_alloc = memory_manager.allocate_array(elements);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+/// std.join(sep, arr): Joins an array of strings with sep, or interleaves sep array between sub-arrays
+fn std_join(
+    sep_val: Value,
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.join() second argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+
+    match sep_val {
+        Value::String(sep_idx) => {
+            // String mode: join array of strings with separator
+            let sep = memory_manager.load_string(sep_idx).to_string();
+            let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+            let mut parts: Vec<String> = Vec::with_capacity(elements.len());
+            for elem in &elements {
+                match elem {
+                    Value::String(s_idx) => {
+                        parts.push(memory_manager.load_string(*s_idx).to_string());
+                    }
+                    _ => {
+                        return Err(RuntimeError {
+                            span,
+                            message: "std.join() with string separator requires array of strings"
+                                .to_string(),
+                            source_id,
+                        });
+                    }
+                }
+            }
+            let result = parts.join(&sep);
+            let alloc = memory_manager.allocate_string(&result);
+            Ok(Value::String(alloc.index))
+        }
+        Value::Array(sep_arr_idx) => {
+            // Array mode: interleave sep array between sub-arrays
+            let sep_elements: Vec<Value> = memory_manager.load_array(sep_arr_idx).elements.clone();
+            let outer_elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+            let mut result: Vec<Value> = Vec::new();
+            for (i, elem) in outer_elements.iter().enumerate() {
+                match elem {
+                    Value::Array(sub_idx) => {
+                        let sub_elements: Vec<Value> =
+                            memory_manager.load_array(*sub_idx).elements.clone();
+                        result.extend(sub_elements);
+                        if i + 1 < outer_elements.len() {
+                            result.extend(sep_elements.clone());
+                        }
+                    }
+                    _ => {
+                        return Err(RuntimeError {
+                            span,
+                            message: "std.join() with array separator requires array of arrays"
+                                .to_string(),
+                            source_id,
+                        });
+                    }
+                }
+            }
+            let arr_alloc = memory_manager.allocate_array(result);
+            Ok(Value::Array(arr_alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.join() first argument must be a string or array".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.lines(arr): Concatenates an array of strings, each followed by a newline
+fn std_lines(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.lines() expected array, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    let mut result = String::new();
+    for elem in &elements {
+        match elem {
+            Value::String(s_idx) => {
+                result.push_str(memory_manager.load_string(*s_idx));
+                result.push('\n');
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.lines() expected array of strings".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    let alloc = memory_manager.allocate_string(&result);
+    Ok(Value::String(alloc.index))
+}
+
+/// std.stringChars(str): Returns an array of single-character strings
+fn std_string_chars(
+    str_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let s_idx = match str_val {
+        Value::String(s) => s,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.stringChars() expected string, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let chars: Vec<char> = memory_manager.load_string(s_idx).chars().collect();
+    let elements: Vec<Value> = chars
+        .iter()
+        .map(|c| {
+            let s = c.to_string();
+            let alloc = memory_manager.allocate_string(&s);
+            Value::String(alloc.index)
+        })
+        .collect();
+    let arr_alloc = memory_manager.allocate_array(elements);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+/// std.flattenArrays(arr): Flattens one level of nested arrays into a single array
+fn std_flatten_arrays(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.flattenArrays() expected array, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let outer: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    let mut result: Vec<Value> = Vec::new();
+    for elem in &outer {
+        match elem {
+            Value::Array(sub_idx) => {
+                let sub: Vec<Value> = memory_manager.load_array(*sub_idx).elements.clone();
+                result.extend(sub);
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.flattenArrays() expected array of arrays".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    let arr_alloc = memory_manager.allocate_array(result);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+/// std.reverse(arr): Returns a new array with elements in reverse order
+fn std_reverse(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.reverse() expected array, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let mut elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    elements.reverse();
+    let arr_alloc = memory_manager.allocate_array(elements);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+/// std.member(arr, x): Returns true if x is in arr (array) or x is a substring of arr (string)
+fn std_member(
+    arr_val: Value,
+    x_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match arr_val {
+        Value::Array(arr_idx) => {
+            let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+            let found = elements
+                .iter()
+                .any(|elem| values_equal(*elem, x_val, memory_manager));
+            Ok(Value::Boolean(found))
+        }
+        Value::String(s_idx) => {
+            let needle_idx = match x_val {
+                Value::String(n) => n,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.member() with string haystack requires string needle"
+                            .to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let haystack = memory_manager.load_string(s_idx).to_string();
+            let needle = memory_manager.load_string(needle_idx).to_string();
+            Ok(Value::Boolean(haystack.contains(needle.as_str())))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.member() first argument must be an array or string".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.count(arr, x): Returns the number of elements in arr equal to x
+fn std_count(
+    arr_val: Value,
+    x_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.count() expected array as first argument".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    let count = elements
+        .iter()
+        .filter(|elem| values_equal(**elem, x_val, memory_manager))
+        .count();
+    Ok(Value::Number(count as f64))
+}
+
+/// std.find(value, arr): Returns array of indices where arr[i] == value
+fn std_find(
+    value_val: Value,
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.find() expected array as second argument".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    let indices: Vec<Value> = elements
+        .iter()
+        .enumerate()
+        .filter(|(_, elem)| values_equal(**elem, value_val, memory_manager))
+        .map(|(i, _)| Value::Number(i as f64))
+        .collect();
+    let arr_alloc = memory_manager.allocate_array(indices);
+    Ok(Value::Array(arr_alloc.index))
 }

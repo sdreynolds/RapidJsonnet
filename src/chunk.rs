@@ -52,6 +52,16 @@ pub enum NativeFuncId {
     ParseHex = 26,
     AsciiUpper = 27,
     AsciiLower = 28,
+    Substr = 29,
+    Split = 30,
+    Join = 31,
+    Lines = 32,
+    StringChars = 33,
+    FlattenArrays = 34,
+    Reverse = 35,
+    Member = 36,
+    Count = 37,
+    Find = 38,
 }
 
 impl NativeFuncId {
@@ -87,6 +97,16 @@ impl NativeFuncId {
             26 => Some(NativeFuncId::ParseHex),
             27 => Some(NativeFuncId::AsciiUpper),
             28 => Some(NativeFuncId::AsciiLower),
+            29 => Some(NativeFuncId::Substr),
+            30 => Some(NativeFuncId::Split),
+            31 => Some(NativeFuncId::Join),
+            32 => Some(NativeFuncId::Lines),
+            33 => Some(NativeFuncId::StringChars),
+            34 => Some(NativeFuncId::FlattenArrays),
+            35 => Some(NativeFuncId::Reverse),
+            36 => Some(NativeFuncId::Member),
+            37 => Some(NativeFuncId::Count),
+            38 => Some(NativeFuncId::Find),
             _ => None,
         }
     }
@@ -123,6 +143,16 @@ impl NativeFuncId {
             NativeFuncId::ParseHex => 1,
             NativeFuncId::AsciiUpper => 1,
             NativeFuncId::AsciiLower => 1,
+            NativeFuncId::Substr => 3,
+            NativeFuncId::Split => 2,
+            NativeFuncId::Join => 2,
+            NativeFuncId::Lines => 1,
+            NativeFuncId::StringChars => 1,
+            NativeFuncId::FlattenArrays => 1,
+            NativeFuncId::Reverse => 1,
+            NativeFuncId::Member => 2,
+            NativeFuncId::Count => 2,
+            NativeFuncId::Find => 2,
         }
     }
 
@@ -158,6 +188,16 @@ impl NativeFuncId {
             NativeFuncId::ParseHex => "parseHex",
             NativeFuncId::AsciiUpper => "asciiUpper",
             NativeFuncId::AsciiLower => "asciiLower",
+            NativeFuncId::Substr => "substr",
+            NativeFuncId::Split => "split",
+            NativeFuncId::Join => "join",
+            NativeFuncId::Lines => "lines",
+            NativeFuncId::StringChars => "stringChars",
+            NativeFuncId::FlattenArrays => "flattenArrays",
+            NativeFuncId::Reverse => "reverse",
+            NativeFuncId::Member => "member",
+            NativeFuncId::Count => "count",
+            NativeFuncId::Find => "find",
         }
     }
 
@@ -193,6 +233,16 @@ impl NativeFuncId {
             "parseHex" => Some(NativeFuncId::ParseHex),
             "asciiUpper" => Some(NativeFuncId::AsciiUpper),
             "asciiLower" => Some(NativeFuncId::AsciiLower),
+            "substr" => Some(NativeFuncId::Substr),
+            "split" => Some(NativeFuncId::Split),
+            "join" => Some(NativeFuncId::Join),
+            "lines" => Some(NativeFuncId::Lines),
+            "stringChars" => Some(NativeFuncId::StringChars),
+            "flattenArrays" => Some(NativeFuncId::FlattenArrays),
+            "reverse" => Some(NativeFuncId::Reverse),
+            "member" => Some(NativeFuncId::Member),
+            "count" => Some(NativeFuncId::Count),
+            "find" => Some(NativeFuncId::Find),
             _ => None,
         }
     }
