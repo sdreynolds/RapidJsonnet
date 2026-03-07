@@ -212,6 +212,19 @@ pub fn call_native(
             message: format!("std.{} must be handled by the VM", id.name()),
             source_id,
         }),
+        NativeFuncId::Map
+        | NativeFuncId::Filter
+        | NativeFuncId::Foldl
+        | NativeFuncId::FlatMap
+        | NativeFuncId::MapWithIndex
+        | NativeFuncId::ParseJson => Err(RuntimeError {
+            span,
+            message: format!("std.{} must be handled by the VM", id.name()),
+            source_id,
+        }),
+        NativeFuncId::MergePatch => {
+            std_merge_patch(args[0], args[1], memory_manager, span, source_id)
+        }
     }
 }
 
@@ -532,7 +545,7 @@ fn std_object_fields(
         Value::Object(o_idx) => {
             // Collect visible key indices first (ends the immutable borrow of load_object)
             let obj = memory_manager.load_object(o_idx);
-            let visible_keys: Vec<chunk::StringIndex> = obj
+            let visible_keys: Vec<StringIndex> = obj
                 .properties
                 .iter()
                 .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
@@ -579,7 +592,7 @@ fn std_object_has(
             let obj = memory_manager.load_object(o_idx);
             // Collect visible key indices to avoid holding immutable borrow while
             // calling load_string again.
-            let visible_keys: Vec<chunk::StringIndex> = obj
+            let visible_keys: Vec<StringIndex> = obj
                 .properties
                 .iter()
                 .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
@@ -614,7 +627,7 @@ fn std_object_values(
         Value::Object(o_idx) => {
             // Collect visible (key_index, value) pairs first (ends immutable borrow)
             let obj = memory_manager.load_object(o_idx);
-            let visible_pairs: Vec<(chunk::StringIndex, Value)> = obj
+            let visible_pairs: Vec<(StringIndex, Value)> = obj
                 .properties
                 .iter()
                 .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
@@ -818,7 +831,7 @@ pub fn values_equal(a: Value, b: Value, mm: &MemoryManager) -> bool {
             // Collect visible (key_string, value) pairs from each object, sorted by key name
             let get_visible = |obj_idx| -> Vec<(String, Value)> {
                 let obj = mm.load_object(obj_idx);
-                let visible: Vec<(chunk::StringIndex, Value)> = obj
+                let visible: Vec<(StringIndex, Value)> = obj
                     .properties
                     .iter()
                     .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
@@ -2354,7 +2367,7 @@ fn std_object_has_all(
         (Value::Object(o_idx), Value::String(s_idx)) => {
             let field_name = memory_manager.load_string(s_idx).to_string();
             let obj = memory_manager.load_object(o_idx);
-            let all_keys: Vec<chunk::StringIndex> = obj.properties.keys().copied().collect();
+            let all_keys: Vec<StringIndex> = obj.properties.keys().copied().collect();
             let found = all_keys
                 .iter()
                 .any(|key| memory_manager.load_string(*key) == field_name);
@@ -2385,7 +2398,7 @@ fn std_object_fields_all(
     match val {
         Value::Object(o_idx) => {
             let obj = memory_manager.load_object(o_idx);
-            let all_keys: Vec<chunk::StringIndex> = obj.properties.keys().copied().collect();
+            let all_keys: Vec<StringIndex> = obj.properties.keys().copied().collect();
             let mut names: Vec<String> = all_keys
                 .iter()
                 .map(|key| memory_manager.load_string(*key).to_string())
@@ -2795,7 +2808,7 @@ fn std_object_keys_values(
     };
     // Collect visible (key_name, value) pairs
     let obj = memory_manager.load_object(o_idx);
-    let visible_pairs: Vec<(chunk::StringIndex, Value)> = obj
+    let visible_pairs: Vec<(StringIndex, Value)> = obj
         .properties
         .iter()
         .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
@@ -3324,7 +3337,7 @@ fn std_object_values_all(
         Value::Object(o_idx) => {
             // Collect all (key_index, value) pairs (no visibility filter)
             let obj = memory_manager.load_object(o_idx);
-            let all_pairs: Vec<(chunk::StringIndex, Value)> = obj
+            let all_pairs: Vec<(StringIndex, Value)> = obj
                 .properties
                 .iter()
                 .map(|(key, field)| (*key, field.value))
@@ -3477,7 +3490,7 @@ fn std_object_keys_values_all(
     };
     // Collect all (key_name, value) pairs — no visibility filter
     let obj = memory_manager.load_object(o_idx);
-    let all_pairs: Vec<(chunk::StringIndex, Value)> = obj
+    let all_pairs: Vec<(StringIndex, Value)> = obj
         .properties
         .iter()
         .map(|(key, field)| (*key, field.value))
@@ -3647,7 +3660,7 @@ fn std_object_remove_key(
         }
     };
     // Collect all (StringIndex, ObjectField) pairs from the source object
-    let all_pairs: Vec<(chunk::StringIndex, ObjectField)> = memory_manager
+    let all_pairs: Vec<(StringIndex, ObjectField)> = memory_manager
         .load_object(o_idx)
         .properties
         .iter()
@@ -4059,4 +4072,58 @@ fn std_deep_join(
             source_id,
         }),
     }
+}
+
+/// std.mergePatch(target, patch): RFC 7396 deep object merge
+fn std_merge_patch(
+    target: Value,
+    patch: Value,
+    mm: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    // If patch is not an object, patch replaces target completely
+    let patch_idx = match patch {
+        Value::Object(o) => o,
+        _ => return Ok(patch),
+    };
+    // patch is an object — collect its properties
+    let patch_props: Vec<(StringIndex, ObjectField)> = {
+        let obj = mm.load_object(patch_idx);
+        obj.properties
+            .iter()
+            .map(|(k, f)| (*k, f.clone()))
+            .collect()
+    };
+    // Build base from target if it's an object, otherwise start empty
+    let mut result: std::collections::HashMap<StringIndex, ObjectField> = match target {
+        Value::Object(t_idx) => {
+            let obj = mm.load_object(t_idx);
+            obj.properties
+                .iter()
+                .map(|(k, f)| (*k, f.clone()))
+                .collect()
+        }
+        _ => std::collections::HashMap::new(),
+    };
+    // Apply patch
+    for (key, field) in patch_props {
+        if field.value == Value::Null {
+            result.remove(&key);
+        } else {
+            let existing = result.get(&key).map(|f| f.value).unwrap_or(Value::Null);
+            let merged =
+                std_merge_patch(existing, field.value, mm, span.clone(), source_id.clone())?;
+            result.insert(
+                key,
+                ObjectField {
+                    value: merged,
+                    super_obj: field.super_obj,
+                    visibility: field.visibility,
+                },
+            );
+        }
+    }
+    let alloc = mm.allocate_object_with_properties(result);
+    Ok(Value::Object(alloc.index))
 }

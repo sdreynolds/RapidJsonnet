@@ -249,6 +249,35 @@ impl VirtualMachine {
         }
     }
 
+    /// Call a Value (Closure or NativeFunction) with two arguments and return its result.
+    fn call_value_with_two_args(
+        &mut self,
+        func: Value,
+        arg1: Value,
+        arg2: Value,
+    ) -> Result<Value, RuntimeError> {
+        match func {
+            Value::Closure(closure_index) => {
+                self.push(func)?;
+                self.push(arg1)?;
+                self.push(arg2)?;
+                let target_frame_count = self.frame_count;
+                self.call_closure(closure_index, 2, None, None)?;
+                self.interpret_until(target_frame_count)
+            }
+            Value::NativeFunction(id) => {
+                let span = self.get_current_span();
+                let source_id = self.current_chunk().source_id.to_string();
+                call_native(id, &[arg1, arg2], &mut self.memory_manager, span, source_id)
+            }
+            _ => Err(RuntimeError {
+                span: self.get_current_span(),
+                message: "expected function as callback".to_string(),
+                source_id: self.current_chunk().source_id.to_string(),
+            }),
+        }
+    }
+
     /// Call a closure with the given number of arguments and optional object context.
     /// Stack layout: [..., closure, arg0, arg1, ..., argN]
     /// The closure stays on the stack and becomes slot 0 of the new frame.
@@ -2262,6 +2291,310 @@ impl VirtualMachine {
                         continue;
                     }
 
+                    // Handle std.map
+                    if func_id == chunk::NativeFuncId::Map {
+                        let func_val = args[0];
+                        let arr_val = args[1];
+                        let arr_idx = match arr_val {
+                            Value::Array(a) => a,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "std.map: second argument must be an array"
+                                        .to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let elements = self.memory_manager.load_array(arr_idx).elements.clone();
+                        let mut results = Vec::with_capacity(elements.len());
+                        for &elem in &elements {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&elements);
+                            roots.extend_from_slice(&results);
+                            roots.push(func_val);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let result = self.call_value_with_one_arg(func_val, elem);
+                            self.memory_manager.pop_external_roots();
+                            results.push(result?);
+                        }
+                        let alloc = self.memory_manager.allocate_array(results);
+                        self.push(Value::Array(alloc.index))?;
+                        continue;
+                    }
+
+                    // Handle std.filter
+                    if func_id == chunk::NativeFuncId::Filter {
+                        let func_val = args[0];
+                        let arr_val = args[1];
+                        let arr_idx = match arr_val {
+                            Value::Array(a) => a,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "std.filter: second argument must be an array"
+                                        .to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let elements = self.memory_manager.load_array(arr_idx).elements.clone();
+                        let mut results = Vec::new();
+                        for &elem in &elements {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&elements);
+                            roots.extend_from_slice(&results);
+                            roots.push(func_val);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let result = self.call_value_with_one_arg(func_val, elem);
+                            self.memory_manager.pop_external_roots();
+                            match result? {
+                                Value::Boolean(true) => results.push(elem),
+                                Value::Boolean(false) => {}
+                                other => {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "std.filter: function must return boolean, got {:?}",
+                                            other
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        let alloc = self.memory_manager.allocate_array(results);
+                        self.push(Value::Array(alloc.index))?;
+                        continue;
+                    }
+
+                    // Handle std.foldl
+                    if func_id == chunk::NativeFuncId::Foldl {
+                        let func_val = args[0];
+                        let arr_val = args[1];
+                        let mut acc = args[2];
+                        let arr_idx = match arr_val {
+                            Value::Array(a) => a,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "std.foldl: second argument must be an array"
+                                        .to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let elements = self.memory_manager.load_array(arr_idx).elements.clone();
+                        for &elem in &elements {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&elements);
+                            roots.push(func_val);
+                            roots.push(acc);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let result = self.call_value_with_two_args(func_val, acc, elem);
+                            self.memory_manager.pop_external_roots();
+                            acc = result?;
+                        }
+                        self.push(acc)?;
+                        continue;
+                    }
+
+                    // Handle std.flatMap
+                    if func_id == chunk::NativeFuncId::FlatMap {
+                        let func_val = args[0];
+                        match args[1] {
+                            Value::Array(arr_idx) => {
+                                let elements =
+                                    self.memory_manager.load_array(arr_idx).elements.clone();
+                                let mut results = Vec::new();
+                                for &elem in &elements {
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&elements);
+                                    roots.extend_from_slice(&results);
+                                    roots.push(func_val);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let sub = self.call_value_with_one_arg(func_val, elem);
+                                    self.memory_manager.pop_external_roots();
+                                    match sub? {
+                                        Value::Array(sub_idx) => {
+                                            let sub_elems = self
+                                                .memory_manager
+                                                .load_array(sub_idx)
+                                                .elements
+                                                .clone();
+                                            results.extend(sub_elems);
+                                        }
+                                        _ => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message:
+                                                    "std.flatMap: function must return array for array input"
+                                                        .to_string(),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                                let alloc = self.memory_manager.allocate_array(results);
+                                self.push(Value::Array(alloc.index))?;
+                            }
+                            Value::String(s_idx) => {
+                                let s = self.memory_manager.load_string(s_idx).to_string();
+                                let chars: Vec<Value> = s
+                                    .chars()
+                                    .map(|c| {
+                                        let alloc =
+                                            self.memory_manager.allocate_string(&c.to_string());
+                                        Value::String(alloc.index)
+                                    })
+                                    .collect();
+                                let mut out = String::new();
+                                for &char_val in &chars {
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&chars);
+                                    roots.push(func_val);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let result = self.call_value_with_one_arg(func_val, char_val);
+                                    self.memory_manager.pop_external_roots();
+                                    match result? {
+                                        Value::String(rs) => {
+                                            out.push_str(self.memory_manager.load_string(rs))
+                                        }
+                                        _ => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message:
+                                                    "std.flatMap: function must return string for string input"
+                                                        .to_string(),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                                let alloc = self.memory_manager.allocate_string(&out);
+                                self.push(Value::String(alloc.index))?;
+                            }
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "std.flatMap: second argument must be array or string"
+                                        .to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Handle std.mapWithIndex
+                    if func_id == chunk::NativeFuncId::MapWithIndex {
+                        let func_val = args[0];
+                        let arr_idx = match args[1] {
+                            Value::Array(a) => a,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "std.mapWithIndex: second argument must be an array"
+                                        .to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let elements = self.memory_manager.load_array(arr_idx).elements.clone();
+                        let mut results = Vec::with_capacity(elements.len());
+                        for (i, &elem) in elements.iter().enumerate() {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&elements);
+                            roots.extend_from_slice(&results);
+                            roots.push(func_val);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let result = self.call_value_with_two_args(
+                                func_val,
+                                Value::Number(i as f64),
+                                elem,
+                            );
+                            self.memory_manager.pop_external_roots();
+                            results.push(result?);
+                        }
+                        let alloc = self.memory_manager.allocate_array(results);
+                        self.push(Value::Array(alloc.index))?;
+                        continue;
+                    }
+
+                    // Handle std.parseJson
+                    if func_id == chunk::NativeFuncId::ParseJson {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let s_idx = match args[0] {
+                            Value::String(s) => s,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: "std.parseJson: argument must be a string".to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+                        let s = self.memory_manager.load_string(s_idx).to_string();
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(&s).map_err(|e| RuntimeError {
+                                span: span.clone(),
+                                message: format!("std.parseJson: {}", e),
+                                source_id: source_id.clone(),
+                            })?;
+                        let result = self.json_to_jsonnet_value(&parsed)?;
+                        self.push(result)?;
+                        continue;
+                    }
+
                     // Call native function
                     let span = self.get_current_span();
                     let source_id = self.current_chunk().source_id.to_string();
@@ -2947,6 +3280,44 @@ impl VirtualMachine {
             })
         } else {
             Ok(n as i64)
+        }
+    }
+
+    /// Convert a serde_json::Value to a Jsonnet Value
+    fn json_to_jsonnet_value(&mut self, val: &serde_json::Value) -> Result<Value, RuntimeError> {
+        match val {
+            serde_json::Value::Null => Ok(Value::Null),
+            serde_json::Value::Bool(b) => Ok(Value::Boolean(*b)),
+            serde_json::Value::Number(n) => Ok(Value::Number(n.as_f64().unwrap_or(f64::NAN))),
+            serde_json::Value::String(s) => {
+                let alloc = self.memory_manager.allocate_string(s);
+                Ok(Value::String(alloc.index))
+            }
+            serde_json::Value::Array(arr) => {
+                let mut elements = Vec::with_capacity(arr.len());
+                for item in arr {
+                    elements.push(self.json_to_jsonnet_value(item)?);
+                }
+                let alloc = self.memory_manager.allocate_array(elements);
+                Ok(Value::Array(alloc.index))
+            }
+            serde_json::Value::Object(map) => {
+                let mut props = std::collections::HashMap::new();
+                for (k, v) in map {
+                    let key_idx = self.memory_manager.allocate_string(k).index;
+                    let val = self.json_to_jsonnet_value(v)?;
+                    props.insert(
+                        key_idx,
+                        memory_manager::ObjectField {
+                            value: val,
+                            super_obj: None,
+                            visibility: chunk::FieldVisibility::Visible,
+                        },
+                    );
+                }
+                let alloc = self.memory_manager.allocate_object_with_properties(props);
+                Ok(Value::Object(alloc.index))
+            }
         }
     }
 

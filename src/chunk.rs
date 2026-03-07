@@ -136,6 +136,13 @@ pub enum NativeFuncId {
     MinArray = 110,
     MaxArray = 111,
     DeepJoin = 112,
+    Map = 113,
+    Filter = 114,
+    Foldl = 115,
+    FlatMap = 116,
+    MergePatch = 117,
+    ParseJson = 118,
+    MapWithIndex = 119,
 }
 
 impl NativeFuncId {
@@ -255,6 +262,13 @@ impl NativeFuncId {
             110 => Some(NativeFuncId::MinArray),
             111 => Some(NativeFuncId::MaxArray),
             112 => Some(NativeFuncId::DeepJoin),
+            113 => Some(NativeFuncId::Map),
+            114 => Some(NativeFuncId::Filter),
+            115 => Some(NativeFuncId::Foldl),
+            116 => Some(NativeFuncId::FlatMap),
+            117 => Some(NativeFuncId::MergePatch),
+            118 => Some(NativeFuncId::ParseJson),
+            119 => Some(NativeFuncId::MapWithIndex),
             _ => None,
         }
     }
@@ -375,6 +389,13 @@ impl NativeFuncId {
             NativeFuncId::MinArray => 1,
             NativeFuncId::MaxArray => 1,
             NativeFuncId::DeepJoin => 1,
+            NativeFuncId::Map => 2,
+            NativeFuncId::Filter => 2,
+            NativeFuncId::Foldl => 3,
+            NativeFuncId::FlatMap => 2,
+            NativeFuncId::MergePatch => 2,
+            NativeFuncId::ParseJson => 1,
+            NativeFuncId::MapWithIndex => 2,
         }
     }
 
@@ -494,6 +515,13 @@ impl NativeFuncId {
             NativeFuncId::MinArray => "minArray",
             NativeFuncId::MaxArray => "maxArray",
             NativeFuncId::DeepJoin => "deepJoin",
+            NativeFuncId::Map => "map",
+            NativeFuncId::Filter => "filter",
+            NativeFuncId::Foldl => "foldl",
+            NativeFuncId::FlatMap => "flatMap",
+            NativeFuncId::MergePatch => "mergePatch",
+            NativeFuncId::ParseJson => "parseJson",
+            NativeFuncId::MapWithIndex => "mapWithIndex",
         }
     }
 
@@ -614,6 +642,13 @@ impl NativeFuncId {
             "minArray" => Some(NativeFuncId::MinArray),
             "maxArray" => Some(NativeFuncId::MaxArray),
             "deepJoin" => Some(NativeFuncId::DeepJoin),
+            "map" => Some(NativeFuncId::Map),
+            "filter" => Some(NativeFuncId::Filter),
+            "foldl" => Some(NativeFuncId::Foldl),
+            "flatMap" => Some(NativeFuncId::FlatMap),
+            "mergePatch" => Some(NativeFuncId::MergePatch),
+            "parseJson" => Some(NativeFuncId::ParseJson),
+            "mapWithIndex" => Some(NativeFuncId::MapWithIndex),
             _ => None,
         }
     }
