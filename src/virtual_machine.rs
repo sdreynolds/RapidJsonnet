@@ -7,7 +7,7 @@ use memory_manager::{MemoryManager, ObjectField};
 use scanner;
 use std::ops::Range;
 
-use native::call_native;
+use native::{self, call_native};
 
 /// Maximum number of nested function calls
 const MAX_FRAMES: usize = 256;
@@ -224,6 +224,29 @@ impl VirtualMachine {
         let target_frame_count = self.frame_count;
         self.call_closure(closure_index, 2, self_obj, super_obj)?;
         self.interpret_until(target_frame_count)
+    }
+
+    /// Call a Value (Closure or NativeFunction) with a single argument and return its result.
+    fn call_value_with_one_arg(&mut self, func: Value, arg: Value) -> Result<Value, RuntimeError> {
+        match func {
+            Value::Closure(closure_index) => {
+                self.push(func)?;
+                self.push(arg)?;
+                let target_frame_count = self.frame_count;
+                self.call_closure(closure_index, 1, None, None)?;
+                self.interpret_until(target_frame_count)
+            }
+            Value::NativeFunction(id) => {
+                let span = self.get_current_span();
+                let source_id = self.current_chunk().source_id.to_string();
+                call_native(id, &[arg], &mut self.memory_manager, span, source_id)
+            }
+            _ => Err(RuntimeError {
+                span: self.get_current_span(),
+                message: format!("keyF argument must be a function, got {:?}", func),
+                source_id: self.current_chunk().source_id.to_string(),
+            }),
+        }
     }
 
     /// Call a closure with the given number of arguments and optional object context.
@@ -1992,6 +2015,108 @@ impl VirtualMachine {
                             self.run_garbage_collection();
                         }
 
+                        continue;
+                    }
+
+                    // Handle std.sort with keyF
+                    if func_id == chunk::NativeFuncId::Sort && args.len() == 2 {
+                        let arr_val = args[0];
+                        let key_f = args[1];
+                        let arr_idx = match arr_val {
+                            Value::Array(a) => a,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "std.sort() expected array as first argument"
+                                        .to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let elements: Vec<Value> =
+                            self.memory_manager.load_array(arr_idx).elements.clone();
+
+                        // Compute keys for each element by calling keyF
+                        let mut keys: Vec<Value> = Vec::with_capacity(elements.len());
+                        for &elem in &elements {
+                            // Root accumulated data before each call to protect from GC
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&elements);
+                            roots.extend_from_slice(&keys);
+                            roots.push(key_f);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let key = self.call_value_with_one_arg(key_f, elem);
+                            self.memory_manager.pop_external_roots();
+                            keys.push(key?);
+                        }
+
+                        // Sort elements by their computed keys
+                        let mut indexed: Vec<usize> = (0..elements.len()).collect();
+                        let mm = &self.memory_manager;
+                        indexed.sort_by(|&a, &b| native::compare_values(keys[a], keys[b], mm));
+                        let sorted: Vec<Value> = indexed.iter().map(|&i| elements[i]).collect();
+                        let arr_alloc = self.memory_manager.allocate_array(sorted);
+                        self.push(Value::Array(arr_alloc.index))?;
+                        continue;
+                    }
+
+                    // Handle std.uniq with keyF
+                    if func_id == chunk::NativeFuncId::Uniq && args.len() == 2 {
+                        let arr_val = args[0];
+                        let key_f = args[1];
+                        let arr_idx = match arr_val {
+                            Value::Array(a) => a,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "std.uniq() expected array as first argument"
+                                        .to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let elements: Vec<Value> =
+                            self.memory_manager.load_array(arr_idx).elements.clone();
+
+                        let mut result: Vec<Value> = Vec::new();
+                        let mut last_key: Option<Value> = None;
+                        for &elem in &elements {
+                            // Root accumulated data before each call to protect from GC
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&elements);
+                            roots.extend_from_slice(&result);
+                            if let Some(lk) = last_key {
+                                roots.push(lk);
+                            }
+                            roots.push(key_f);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let key = self.call_value_with_one_arg(key_f, elem);
+                            self.memory_manager.pop_external_roots();
+                            let key = key?;
+                            if let Some(lk) = last_key {
+                                if native::values_equal(lk, key, &self.memory_manager) {
+                                    continue;
+                                }
+                            }
+                            last_key = Some(key);
+                            result.push(elem);
+                        }
+                        let arr_alloc = self.memory_manager.allocate_array(result);
+                        self.push(Value::Array(arr_alloc.index))?;
                         continue;
                     }
 

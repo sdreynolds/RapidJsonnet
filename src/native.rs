@@ -727,7 +727,7 @@ fn std_ascii_lower(
 }
 
 /// Helper: compare two Values for equality, loading string contents when needed
-fn values_equal(a: Value, b: Value, mm: &MemoryManager) -> bool {
+pub fn values_equal(a: Value, b: Value, mm: &MemoryManager) -> bool {
     match (a, b) {
         (Value::Null, Value::Null) => true,
         (Value::Boolean(x), Value::Boolean(y)) => x == y,
@@ -2421,7 +2421,7 @@ fn std_decode_utf8(
 // ─── std.sort ────────────────────────────────────────────────────────────────
 
 /// Compute a sort key for a value: (type_ord, numeric, string)
-fn value_sort_key(val: Value, mm: &MemoryManager) -> (u8, f64, String) {
+pub fn value_sort_key(val: Value, mm: &MemoryManager) -> (u8, f64, String) {
     match val {
         Value::Null => (0, 0.0, String::new()),
         Value::Boolean(false) => (1, 0.0, String::new()),
@@ -2432,6 +2432,15 @@ fn value_sort_key(val: Value, mm: &MemoryManager) -> (u8, f64, String) {
         Value::Object(_) => (6, 0.0, String::new()),
         _ => (7, 0.0, String::new()),
     }
+}
+
+/// Compare two Values using sort-key ordering
+pub fn compare_values(a: Value, b: Value, mm: &MemoryManager) -> std::cmp::Ordering {
+    let ka = value_sort_key(a, mm);
+    let kb = value_sort_key(b, mm);
+    ka.0.cmp(&kb.0)
+        .then_with(|| ka.1.partial_cmp(&kb.1).unwrap_or(std::cmp::Ordering::Equal))
+        .then_with(|| ka.2.cmp(&kb.2))
 }
 
 /// std.sort(arr): Returns a sorted copy of arr using total type ordering
