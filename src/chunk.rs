@@ -81,6 +81,16 @@ pub enum NativeFuncId {
     ObjectFieldsAll = 55,
     EncodeUTF8 = 56,
     DecodeUTF8 = 57,
+    Sort = 58,
+    Uniq = 59,
+    SplitLimitR = 60,
+    StripChars = 61,
+    LstripChars = 62,
+    RstripChars = 63,
+    Trim = 64,
+    ObjectKeysValues = 65,
+    Avg = 66,
+    Remove = 67,
 }
 
 impl NativeFuncId {
@@ -145,6 +155,16 @@ impl NativeFuncId {
             55 => Some(NativeFuncId::ObjectFieldsAll),
             56 => Some(NativeFuncId::EncodeUTF8),
             57 => Some(NativeFuncId::DecodeUTF8),
+            58 => Some(NativeFuncId::Sort),
+            59 => Some(NativeFuncId::Uniq),
+            60 => Some(NativeFuncId::SplitLimitR),
+            61 => Some(NativeFuncId::StripChars),
+            62 => Some(NativeFuncId::LstripChars),
+            63 => Some(NativeFuncId::RstripChars),
+            64 => Some(NativeFuncId::Trim),
+            65 => Some(NativeFuncId::ObjectKeysValues),
+            66 => Some(NativeFuncId::Avg),
+            67 => Some(NativeFuncId::Remove),
             _ => None,
         }
     }
@@ -210,6 +230,16 @@ impl NativeFuncId {
             NativeFuncId::ObjectFieldsAll => 1,
             NativeFuncId::EncodeUTF8 => 1,
             NativeFuncId::DecodeUTF8 => 1,
+            NativeFuncId::Sort => 1,
+            NativeFuncId::Uniq => 1,
+            NativeFuncId::SplitLimitR => 3,
+            NativeFuncId::StripChars => 2,
+            NativeFuncId::LstripChars => 2,
+            NativeFuncId::RstripChars => 2,
+            NativeFuncId::Trim => 1,
+            NativeFuncId::ObjectKeysValues => 1,
+            NativeFuncId::Avg => 1,
+            NativeFuncId::Remove => 2,
         }
     }
 
@@ -274,6 +304,16 @@ impl NativeFuncId {
             NativeFuncId::ObjectFieldsAll => "objectFieldsAll",
             NativeFuncId::EncodeUTF8 => "encodeUTF8",
             NativeFuncId::DecodeUTF8 => "decodeUTF8",
+            NativeFuncId::Sort => "sort",
+            NativeFuncId::Uniq => "uniq",
+            NativeFuncId::SplitLimitR => "splitLimitR",
+            NativeFuncId::StripChars => "stripChars",
+            NativeFuncId::LstripChars => "lstripChars",
+            NativeFuncId::RstripChars => "rstripChars",
+            NativeFuncId::Trim => "trim",
+            NativeFuncId::ObjectKeysValues => "objectKeysValues",
+            NativeFuncId::Avg => "avg",
+            NativeFuncId::Remove => "remove",
         }
     }
 
@@ -338,6 +378,16 @@ impl NativeFuncId {
             "objectFieldsAll" => Some(NativeFuncId::ObjectFieldsAll),
             "encodeUTF8" => Some(NativeFuncId::EncodeUTF8),
             "decodeUTF8" => Some(NativeFuncId::DecodeUTF8),
+            "sort" => Some(NativeFuncId::Sort),
+            "uniq" => Some(NativeFuncId::Uniq),
+            "splitLimitR" => Some(NativeFuncId::SplitLimitR),
+            "stripChars" => Some(NativeFuncId::StripChars),
+            "lstripChars" => Some(NativeFuncId::LstripChars),
+            "rstripChars" => Some(NativeFuncId::RstripChars),
+            "trim" => Some(NativeFuncId::Trim),
+            "objectKeysValues" => Some(NativeFuncId::ObjectKeysValues),
+            "avg" => Some(NativeFuncId::Avg),
+            "remove" => Some(NativeFuncId::Remove),
             _ => None,
         }
     }

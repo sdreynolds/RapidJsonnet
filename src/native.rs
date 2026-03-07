@@ -1,5 +1,6 @@
 use chunk::{FieldVisibility, NativeFuncId, RuntimeError, Value};
-use memory_manager::MemoryManager;
+use memory_manager::{MemoryManager, ObjectField};
+use std::collections::HashSet;
 use std::ops::Range;
 
 /// Dispatches a native function call
@@ -120,6 +121,26 @@ pub fn call_native(
         }
         NativeFuncId::EncodeUTF8 => std_encode_utf8(args[0], memory_manager, span, source_id),
         NativeFuncId::DecodeUTF8 => std_decode_utf8(args[0], memory_manager, span, source_id),
+        NativeFuncId::Sort => std_sort(args[0], memory_manager, span, source_id),
+        NativeFuncId::Uniq => std_uniq(args[0], memory_manager, span, source_id),
+        NativeFuncId::SplitLimitR => {
+            std_split_limit_r(args[0], args[1], args[2], memory_manager, span, source_id)
+        }
+        NativeFuncId::StripChars => {
+            std_strip_chars(args[0], args[1], memory_manager, span, source_id)
+        }
+        NativeFuncId::LstripChars => {
+            std_lstrip_chars(args[0], args[1], memory_manager, span, source_id)
+        }
+        NativeFuncId::RstripChars => {
+            std_rstrip_chars(args[0], args[1], memory_manager, span, source_id)
+        }
+        NativeFuncId::Trim => std_trim(args[0], memory_manager, span, source_id),
+        NativeFuncId::ObjectKeysValues => {
+            std_object_keys_values(args[0], memory_manager, span, source_id)
+        }
+        NativeFuncId::Avg => std_avg(args[0], memory_manager, span, source_id),
+        NativeFuncId::Remove => std_remove(args[0], args[1], memory_manager, span, source_id),
     }
 }
 
@@ -712,7 +733,43 @@ fn values_equal(a: Value, b: Value, mm: &MemoryManager) -> bool {
         (Value::Boolean(x), Value::Boolean(y)) => x == y,
         (Value::Number(x), Value::Number(y)) => x == y,
         (Value::String(x), Value::String(y)) => mm.load_string(x) == mm.load_string(y),
-        _ => a == b,
+        (Value::Array(x), Value::Array(y)) => {
+            let ax = mm.load_array(x).elements.clone();
+            let ay = mm.load_array(y).elements.clone();
+            if ax.len() != ay.len() {
+                return false;
+            }
+            ax.iter()
+                .zip(ay.iter())
+                .all(|(a, b)| values_equal(*a, *b, mm))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            // Collect visible (key_string, value) pairs from each object, sorted by key name
+            let get_visible = |obj_idx| -> Vec<(String, Value)> {
+                let obj = mm.load_object(obj_idx);
+                let visible: Vec<(chunk::StringIndex, Value)> = obj
+                    .properties
+                    .iter()
+                    .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+                    .map(|(k, field)| (*k, field.value))
+                    .collect();
+                let mut named: Vec<(String, Value)> = visible
+                    .into_iter()
+                    .map(|(k, v)| (mm.load_string(k).to_string(), v))
+                    .collect();
+                named.sort_by(|a, b| a.0.cmp(&b.0));
+                named
+            };
+            let ox = get_visible(x);
+            let oy = get_visible(y);
+            if ox.len() != oy.len() {
+                return false;
+            }
+            ox.iter()
+                .zip(oy.iter())
+                .all(|((ka, va), (kb, vb))| ka == kb && values_equal(*va, *vb, mm))
+        }
+        _ => false,
     }
 }
 
@@ -2359,6 +2416,425 @@ fn std_decode_utf8(
             source_id,
         }),
     }
+}
+
+// ─── std.sort ────────────────────────────────────────────────────────────────
+
+/// Compute a sort key for a value: (type_ord, numeric, string)
+fn value_sort_key(val: Value, mm: &MemoryManager) -> (u8, f64, String) {
+    match val {
+        Value::Null => (0, 0.0, String::new()),
+        Value::Boolean(false) => (1, 0.0, String::new()),
+        Value::Boolean(true) => (2, 0.0, String::new()),
+        Value::Number(n) => (3, n, String::new()),
+        Value::String(s) => (4, 0.0, mm.load_string(s).to_string()),
+        Value::Array(_) => (5, 0.0, String::new()),
+        Value::Object(_) => (6, 0.0, String::new()),
+        _ => (7, 0.0, String::new()),
+    }
+}
+
+/// std.sort(arr): Returns a sorted copy of arr using total type ordering
+fn std_sort(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.sort() expected array, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let mut elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    // Pre-compute sort keys to avoid repeated mm borrows during sort
+    let keys: Vec<(u8, f64, String)> = elements
+        .iter()
+        .map(|v| value_sort_key(*v, memory_manager))
+        .collect();
+    let mut indexed: Vec<(usize, &(u8, f64, String))> = keys.iter().enumerate().collect();
+    indexed.sort_by(|(_, a), (_, b)| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    let sorted: Vec<Value> = indexed.iter().map(|(i, _)| elements[*i]).collect();
+    elements = sorted;
+    let arr_alloc = memory_manager.allocate_array(elements);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+// ─── std.uniq ────────────────────────────────────────────────────────────────
+
+/// std.uniq(arr): Removes consecutive duplicates from arr
+fn std_uniq(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.uniq() expected array, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    let mut result: Vec<Value> = Vec::new();
+    for elem in elements {
+        if let Some(last) = result.last() {
+            if values_equal(*last, elem, memory_manager) {
+                continue;
+            }
+        }
+        result.push(elem);
+    }
+    let arr_alloc = memory_manager.allocate_array(result);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+// ─── std.splitLimitR ─────────────────────────────────────────────────────────
+
+/// std.splitLimitR(str, c, maxsplits): Like splitLimit but splits from the right
+fn std_split_limit_r(
+    str_val: Value,
+    c_val: Value,
+    max_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let (s_idx, c_idx, max) = match (str_val, c_val, max_val) {
+        (Value::String(s), Value::String(c), Value::Number(m)) => (s, c, m as i64),
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.splitLimitR() expects (string, string, number)".to_string(),
+                source_id,
+            });
+        }
+    };
+    let s = memory_manager.load_string(s_idx).to_string();
+    let c = memory_manager.load_string(c_idx).to_string();
+    let parts: Vec<String> = if max < 0 {
+        s.split(c.as_str()).map(|p| p.to_string()).collect()
+    } else {
+        // rsplitn splits from the right and returns in reverse order
+        let mut rev_parts: Vec<String> = s
+            .rsplitn(max as usize + 1, c.as_str())
+            .map(|p| p.to_string())
+            .collect();
+        rev_parts.reverse();
+        rev_parts
+    };
+    let elements: Vec<Value> = parts
+        .iter()
+        .map(|p| {
+            let alloc = memory_manager.allocate_string(p);
+            Value::String(alloc.index)
+        })
+        .collect();
+    let arr_alloc = memory_manager.allocate_array(elements);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+// ─── std.stripChars / lstripChars / rstripChars / trim ───────────────────────
+
+/// std.stripChars(str, chars): Strip chars from both ends of str
+fn std_strip_chars(
+    str_val: Value,
+    chars_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let (s_idx, c_idx) = match (str_val, chars_val) {
+        (Value::String(s), Value::String(c)) => (s, c),
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.stripChars() expects (string, string)".to_string(),
+                source_id,
+            });
+        }
+    };
+    let s = memory_manager.load_string(s_idx).to_string();
+    let chars_str = memory_manager.load_string(c_idx).to_string();
+    let char_set: HashSet<char> = chars_str.chars().collect();
+    let chars: Vec<char> = s.chars().collect();
+    let start = chars
+        .iter()
+        .position(|c| !char_set.contains(c))
+        .unwrap_or(chars.len());
+    let end = chars
+        .iter()
+        .rposition(|c| !char_set.contains(c))
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let result: String = if start <= end {
+        chars[start..end].iter().collect()
+    } else {
+        String::new()
+    };
+    let alloc = memory_manager.allocate_string(&result);
+    Ok(Value::String(alloc.index))
+}
+
+/// std.lstripChars(str, chars): Strip chars from the left end of str
+fn std_lstrip_chars(
+    str_val: Value,
+    chars_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let (s_idx, c_idx) = match (str_val, chars_val) {
+        (Value::String(s), Value::String(c)) => (s, c),
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.lstripChars() expects (string, string)".to_string(),
+                source_id,
+            });
+        }
+    };
+    let s = memory_manager.load_string(s_idx).to_string();
+    let chars_str = memory_manager.load_string(c_idx).to_string();
+    let char_set: HashSet<char> = chars_str.chars().collect();
+    let chars: Vec<char> = s.chars().collect();
+    let start = chars
+        .iter()
+        .position(|c| !char_set.contains(c))
+        .unwrap_or(chars.len());
+    let result: String = chars[start..].iter().collect();
+    let alloc = memory_manager.allocate_string(&result);
+    Ok(Value::String(alloc.index))
+}
+
+/// std.rstripChars(str, chars): Strip chars from the right end of str
+fn std_rstrip_chars(
+    str_val: Value,
+    chars_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let (s_idx, c_idx) = match (str_val, chars_val) {
+        (Value::String(s), Value::String(c)) => (s, c),
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.rstripChars() expects (string, string)".to_string(),
+                source_id,
+            });
+        }
+    };
+    let s = memory_manager.load_string(s_idx).to_string();
+    let chars_str = memory_manager.load_string(c_idx).to_string();
+    let char_set: HashSet<char> = chars_str.chars().collect();
+    let chars: Vec<char> = s.chars().collect();
+    let end = chars
+        .iter()
+        .rposition(|c| !char_set.contains(c))
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let result: String = chars[..end].iter().collect();
+    let alloc = memory_manager.allocate_string(&result);
+    Ok(Value::String(alloc.index))
+}
+
+/// std.trim(str): Strip ASCII whitespace from both ends of str
+fn std_trim(
+    str_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let s_idx = match str_val {
+        Value::String(s) => s,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.trim() expected string, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let s = memory_manager.load_string(s_idx).to_string();
+    let whitespace: HashSet<char> = [' ', '\t', '\n', '\r', '\x0B', '\x0C']
+        .iter()
+        .copied()
+        .collect();
+    let chars: Vec<char> = s.chars().collect();
+    let start = chars
+        .iter()
+        .position(|c| !whitespace.contains(c))
+        .unwrap_or(chars.len());
+    let end = chars
+        .iter()
+        .rposition(|c| !whitespace.contains(c))
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let result: String = if start <= end {
+        chars[start..end].iter().collect()
+    } else {
+        String::new()
+    };
+    let alloc = memory_manager.allocate_string(&result);
+    Ok(Value::String(alloc.index))
+}
+
+// ─── std.objectKeysValues ────────────────────────────────────────────────────
+
+/// std.objectKeysValues(o): Returns [{key, value}] for each visible field, sorted by key
+fn std_object_keys_values(
+    obj_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let o_idx = match obj_val {
+        Value::Object(o) => o,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.objectKeysValues() expected object, but got something else"
+                    .to_string(),
+                source_id,
+            });
+        }
+    };
+    // Collect visible (key_name, value) pairs
+    let obj = memory_manager.load_object(o_idx);
+    let visible_pairs: Vec<(chunk::StringIndex, Value)> = obj
+        .properties
+        .iter()
+        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+        .map(|(key, field)| (*key, field.value))
+        .collect();
+    let mut named_pairs: Vec<(String, Value)> = visible_pairs
+        .iter()
+        .map(|(key, val)| (memory_manager.load_string(*key).to_string(), *val))
+        .collect();
+    named_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Intern the field-name strings "key" and "value" once
+    let key_field_name = memory_manager.allocate_string("key").index;
+    let value_field_name = memory_manager.allocate_string("value").index;
+
+    let mut result_elements: Vec<Value> = Vec::with_capacity(named_pairs.len());
+    for (name, val) in named_pairs {
+        let name_str_idx = memory_manager.allocate_string(&name).index;
+        let mut properties = std::collections::HashMap::new();
+        properties.insert(
+            key_field_name,
+            ObjectField {
+                value: Value::String(name_str_idx),
+                super_obj: None,
+                visibility: FieldVisibility::Visible,
+            },
+        );
+        properties.insert(
+            value_field_name,
+            ObjectField {
+                value: val,
+                super_obj: None,
+                visibility: FieldVisibility::Visible,
+            },
+        );
+        let obj_alloc = memory_manager.allocate_object_with_properties(properties);
+        result_elements.push(Value::Object(obj_alloc.index));
+    }
+    let arr_alloc = memory_manager.allocate_array(result_elements);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+// ─── std.avg ──────────────────────────────────────────────────────────────────
+
+/// std.avg(arr): Returns the average of all numbers in arr
+fn std_avg(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.avg() expected array, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    if elements.is_empty() {
+        return Err(RuntimeError {
+            span,
+            message: "std.avg() array must be non-empty".to_string(),
+            source_id,
+        });
+    }
+    let mut total = 0.0f64;
+    for elem in &elements {
+        match elem {
+            Value::Number(n) => total += n,
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.avg() expected array of numbers".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    Ok(Value::Number(total / elements.len() as f64))
+}
+
+// ─── std.remove ───────────────────────────────────────────────────────────────
+
+/// std.remove(arr, elem): Returns arr with the first occurrence of elem removed
+fn std_remove(
+    arr_val: Value,
+    elem_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.remove() first argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    let first_match = elements
+        .iter()
+        .position(|v| values_equal(*v, elem_val, memory_manager));
+    let result: Vec<Value> = match first_match {
+        None => elements,
+        Some(idx) => {
+            let mut v = elements;
+            v.remove(idx);
+            v
+        }
+    };
+    let arr_alloc = memory_manager.allocate_array(result);
+    Ok(Value::Array(arr_alloc.index))
 }
 
 /// Format a value as a human-readable string for error messages (no allocation into mm)
