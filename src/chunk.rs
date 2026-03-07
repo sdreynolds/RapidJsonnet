@@ -62,6 +62,16 @@ pub enum NativeFuncId {
     Member = 36,
     Count = 37,
     Find = 38,
+    Clamp = 39,
+    StartsWith = 40,
+    EndsWith = 41,
+    FindSubstr = 42,
+    StrReplace = 43,
+    IsEmpty = 44,
+    All = 45,
+    Any = 46,
+    Sum = 47,
+    AssertEqual = 48,
 }
 
 impl NativeFuncId {
@@ -107,6 +117,16 @@ impl NativeFuncId {
             36 => Some(NativeFuncId::Member),
             37 => Some(NativeFuncId::Count),
             38 => Some(NativeFuncId::Find),
+            39 => Some(NativeFuncId::Clamp),
+            40 => Some(NativeFuncId::StartsWith),
+            41 => Some(NativeFuncId::EndsWith),
+            42 => Some(NativeFuncId::FindSubstr),
+            43 => Some(NativeFuncId::StrReplace),
+            44 => Some(NativeFuncId::IsEmpty),
+            45 => Some(NativeFuncId::All),
+            46 => Some(NativeFuncId::Any),
+            47 => Some(NativeFuncId::Sum),
+            48 => Some(NativeFuncId::AssertEqual),
             _ => None,
         }
     }
@@ -153,6 +173,16 @@ impl NativeFuncId {
             NativeFuncId::Member => 2,
             NativeFuncId::Count => 2,
             NativeFuncId::Find => 2,
+            NativeFuncId::Clamp => 3,
+            NativeFuncId::StartsWith => 2,
+            NativeFuncId::EndsWith => 2,
+            NativeFuncId::FindSubstr => 2,
+            NativeFuncId::StrReplace => 3,
+            NativeFuncId::IsEmpty => 1,
+            NativeFuncId::All => 1,
+            NativeFuncId::Any => 1,
+            NativeFuncId::Sum => 1,
+            NativeFuncId::AssertEqual => 2,
         }
     }
 
@@ -198,6 +228,16 @@ impl NativeFuncId {
             NativeFuncId::Member => "member",
             NativeFuncId::Count => "count",
             NativeFuncId::Find => "find",
+            NativeFuncId::Clamp => "clamp",
+            NativeFuncId::StartsWith => "startsWith",
+            NativeFuncId::EndsWith => "endsWith",
+            NativeFuncId::FindSubstr => "findSubstr",
+            NativeFuncId::StrReplace => "strReplace",
+            NativeFuncId::IsEmpty => "isEmpty",
+            NativeFuncId::All => "all",
+            NativeFuncId::Any => "any",
+            NativeFuncId::Sum => "sum",
+            NativeFuncId::AssertEqual => "assertEqual",
         }
     }
 
@@ -243,6 +283,16 @@ impl NativeFuncId {
             "member" => Some(NativeFuncId::Member),
             "count" => Some(NativeFuncId::Count),
             "find" => Some(NativeFuncId::Find),
+            "clamp" => Some(NativeFuncId::Clamp),
+            "startsWith" => Some(NativeFuncId::StartsWith),
+            "endsWith" => Some(NativeFuncId::EndsWith),
+            "findSubstr" => Some(NativeFuncId::FindSubstr),
+            "strReplace" => Some(NativeFuncId::StrReplace),
+            "isEmpty" => Some(NativeFuncId::IsEmpty),
+            "all" => Some(NativeFuncId::All),
+            "any" => Some(NativeFuncId::Any),
+            "sum" => Some(NativeFuncId::Sum),
+            "assertEqual" => Some(NativeFuncId::AssertEqual),
             _ => None,
         }
     }

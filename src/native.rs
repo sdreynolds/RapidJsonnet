@@ -71,6 +71,24 @@ pub fn call_native(
         NativeFuncId::Member => std_member(args[0], args[1], memory_manager, span, source_id),
         NativeFuncId::Count => std_count(args[0], args[1], memory_manager, span, source_id),
         NativeFuncId::Find => std_find(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Clamp => std_clamp(args[0], args[1], args[2], span, source_id),
+        NativeFuncId::StartsWith => {
+            std_starts_with(args[0], args[1], memory_manager, span, source_id)
+        }
+        NativeFuncId::EndsWith => std_ends_with(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::FindSubstr => {
+            std_find_substr(args[0], args[1], memory_manager, span, source_id)
+        }
+        NativeFuncId::StrReplace => {
+            std_str_replace(args[0], args[1], args[2], memory_manager, span, source_id)
+        }
+        NativeFuncId::IsEmpty => std_is_empty(args[0], memory_manager, span, source_id),
+        NativeFuncId::All => std_all(args[0], memory_manager, span, source_id),
+        NativeFuncId::Any => std_any(args[0], memory_manager, span, source_id),
+        NativeFuncId::Sum => std_sum(args[0], memory_manager, span, source_id),
+        NativeFuncId::AssertEqual => {
+            std_assert_equal(args[0], args[1], memory_manager, span, source_id)
+        }
     }
 }
 
@@ -1049,4 +1067,315 @@ fn std_find(
         .collect();
     let arr_alloc = memory_manager.allocate_array(indices);
     Ok(Value::Array(arr_alloc.index))
+}
+
+/// std.clamp(x, minVal, maxVal): Clamps x to the range [minVal, maxVal]
+fn std_clamp(
+    x_val: Value,
+    min_val: Value,
+    max_val: Value,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (x_val, min_val, max_val) {
+        (Value::Number(x), Value::Number(lo), Value::Number(hi)) => {
+            Ok(Value::Number(x.max(lo).min(hi)))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.clamp() expected three numbers".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.startsWith(a, b): Returns true if string a starts with string b
+fn std_starts_with(
+    a_val: Value,
+    b_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (a_val, b_val) {
+        (Value::String(a_idx), Value::String(b_idx)) => {
+            let a = memory_manager.load_string(a_idx).to_string();
+            let b = memory_manager.load_string(b_idx).to_string();
+            Ok(Value::Boolean(a.starts_with(b.as_str())))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.startsWith() expected two strings".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.endsWith(a, b): Returns true if string a ends with string b
+fn std_ends_with(
+    a_val: Value,
+    b_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (a_val, b_val) {
+        (Value::String(a_idx), Value::String(b_idx)) => {
+            let a = memory_manager.load_string(a_idx).to_string();
+            let b = memory_manager.load_string(b_idx).to_string();
+            Ok(Value::Boolean(a.ends_with(b.as_str())))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.endsWith() expected two strings".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.findSubstr(pat, str): Returns array of codepoint indices of non-overlapping occurrences of pat in str
+fn std_find_substr(
+    pat_val: Value,
+    str_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (pat_val, str_val) {
+        (Value::String(pat_idx), Value::String(str_idx)) => {
+            let pat = memory_manager.load_string(pat_idx).to_string();
+            let s = memory_manager.load_string(str_idx).to_string();
+
+            let indices: Vec<Value> = if pat.is_empty() {
+                // Empty pattern matches every codepoint position (0..=len_in_chars)
+                let char_count = s.chars().count();
+                (0..=char_count).map(|i| Value::Number(i as f64)).collect()
+            } else {
+                // Collect chars for codepoint-indexed sliding window scan
+                let s_chars: Vec<char> = s.chars().collect();
+                let pat_chars: Vec<char> = pat.chars().collect();
+                let pat_len = pat_chars.len();
+                let s_len = s_chars.len();
+                let mut result: Vec<Value> = Vec::new();
+                let mut i = 0usize;
+                while i + pat_len <= s_len {
+                    if s_chars[i..i + pat_len] == pat_chars[..] {
+                        result.push(Value::Number(i as f64));
+                        i += pat_len; // non-overlapping: advance past match
+                    } else {
+                        i += 1;
+                    }
+                }
+                result
+            };
+
+            let arr_alloc = memory_manager.allocate_array(indices);
+            Ok(Value::Array(arr_alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.findSubstr() expected two strings".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.strReplace(str, from, to): Replaces all non-overlapping occurrences of from with to in str
+fn std_str_replace(
+    str_val: Value,
+    from_val: Value,
+    to_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (str_val, from_val, to_val) {
+        (Value::String(str_idx), Value::String(from_idx), Value::String(to_idx)) => {
+            let s = memory_manager.load_string(str_idx).to_string();
+            let from = memory_manager.load_string(from_idx).to_string();
+            let to = memory_manager.load_string(to_idx).to_string();
+            let result = s.replace(from.as_str(), to.as_str());
+            let alloc = memory_manager.allocate_string(&result);
+            Ok(Value::String(alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.strReplace() expected three strings".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.isEmpty(str): Returns true if the string is empty
+fn std_is_empty(
+    str_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match str_val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx);
+            Ok(Value::Boolean(s.is_empty()))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.isEmpty() expected string, but got something else".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.all(arr): Returns true if all elements of arr are true
+fn std_all(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.all() expected array, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    for elem in &elements {
+        match elem {
+            Value::Boolean(b) => {
+                if !b {
+                    return Ok(Value::Boolean(false));
+                }
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.all() expected array of booleans".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    Ok(Value::Boolean(true))
+}
+
+/// std.any(arr): Returns true if any element of arr is true
+fn std_any(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.any() expected array, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    for elem in &elements {
+        match elem {
+            Value::Boolean(b) => {
+                if *b {
+                    return Ok(Value::Boolean(true));
+                }
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.any() expected array of booleans".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    Ok(Value::Boolean(false))
+}
+
+/// std.sum(arr): Returns the sum of all numbers in arr
+fn std_sum(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.sum() expected array, but got something else".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+    let mut total = 0.0f64;
+    for elem in &elements {
+        match elem {
+            Value::Number(n) => total += n,
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.sum() expected array of numbers".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    Ok(Value::Number(total))
+}
+
+/// std.assertEqual(a, b): Returns true if a equals b, otherwise errors
+fn std_assert_equal(
+    a_val: Value,
+    b_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    if values_equal(a_val, b_val, memory_manager) {
+        Ok(Value::Boolean(true))
+    } else {
+        let a_display = display_value(a_val, memory_manager);
+        let b_display = display_value(b_val, memory_manager);
+        Err(RuntimeError {
+            span,
+            message: format!(
+                "Assertion failed: {} was not equal to {}",
+                a_display, b_display
+            ),
+            source_id,
+        })
+    }
+}
+
+/// Format a value as a human-readable string for error messages (no allocation into mm)
+fn display_value(val: Value, memory_manager: &MemoryManager) -> String {
+    match val {
+        Value::Null => "null".to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Number(n) => {
+            if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+                format!("{}", n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        Value::String(idx) => format!("\"{}\"", memory_manager.load_string(idx)),
+        Value::Array(_) => "<array>".to_string(),
+        Value::Object(_) => "<object>".to_string(),
+        Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) => {
+            "<function>".to_string()
+        }
+        _ => "<value>".to_string(),
+    }
 }
