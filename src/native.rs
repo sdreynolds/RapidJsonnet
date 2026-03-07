@@ -141,6 +141,20 @@ pub fn call_native(
         }
         NativeFuncId::Avg => std_avg(args[0], memory_manager, span, source_id),
         NativeFuncId::Remove => std_remove(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Base64 => std_base64(args[0], memory_manager, span, source_id),
+        NativeFuncId::Base64DecodeBytes => {
+            std_base64_decode_bytes(args[0], memory_manager, span, source_id)
+        }
+        NativeFuncId::EscapeStringJson => {
+            std_escape_string_json(args[0], memory_manager, span, source_id)
+        }
+        NativeFuncId::EscapeStringXml => {
+            std_escape_string_xml(args[0], memory_manager, span, source_id)
+        }
+        NativeFuncId::EscapeStringBash => {
+            std_escape_string_bash(args[0], memory_manager, span, source_id)
+        }
+        NativeFuncId::ParseFloat => std_parse_float(args[0], memory_manager, span, source_id),
     }
 }
 
@@ -2865,5 +2879,261 @@ fn display_value(val: Value, memory_manager: &MemoryManager) -> String {
             "<function>".to_string()
         }
         _ => "<value>".to_string(),
+    }
+}
+
+/// Pure Rust base64 encoder
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let combined = (b0 << 16) | (b1 << 8) | b2;
+        result.push(ALPHABET[((combined >> 18) & 0x3F) as usize] as char);
+        result.push(ALPHABET[((combined >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(ALPHABET[((combined >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(ALPHABET[(combined & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
+}
+
+/// Pure Rust base64 decoder
+fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let s = s.trim_end_matches('=');
+    let mut bits = 0u32;
+    let mut bit_count = 0u32;
+    let mut out = Vec::new();
+    for ch in s.chars() {
+        let val = ALPHABET
+            .iter()
+            .position(|&c| c == ch as u8)
+            .ok_or_else(|| format!("invalid base64 character: {}", ch))? as u32;
+        bits = (bits << 6) | val;
+        bit_count += 6;
+        if bit_count >= 8 {
+            bit_count -= 8;
+            out.push(((bits >> bit_count) & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// std.base64(input): encode string or array of bytes to base64 string
+fn std_base64(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let bytes: Vec<u8> = match val {
+        Value::String(s_idx) => memory_manager.load_string(s_idx).as_bytes().to_vec(),
+        Value::Array(a_idx) => {
+            let elements = memory_manager.load_array(a_idx).elements.clone();
+            let mut bytes = Vec::with_capacity(elements.len());
+            for elem in &elements {
+                match elem {
+                    Value::Number(n) => {
+                        let n = *n;
+                        if n < 0.0 || n > 255.0 || n.fract() != 0.0 {
+                            return Err(RuntimeError {
+                                span,
+                                message: format!(
+                                    "std.base64: array element must be a byte (0-255), got {}",
+                                    n
+                                ),
+                                source_id,
+                            });
+                        }
+                        bytes.push(n as u8);
+                    }
+                    _ => {
+                        return Err(RuntimeError {
+                            span,
+                            message: "std.base64: array elements must be numbers".to_string(),
+                            source_id,
+                        });
+                    }
+                }
+            }
+            bytes
+        }
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.base64: argument must be a string or array of bytes".to_string(),
+                source_id,
+            });
+        }
+    };
+    let encoded = base64_encode(&bytes);
+    let alloc = memory_manager.allocate_string(&encoded);
+    Ok(Value::String(alloc.index))
+}
+
+/// std.base64DecodeBytes(str): decode base64 string to array of numbers 0-255
+fn std_base64_decode_bytes(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).to_string();
+            match base64_decode(&s) {
+                Ok(bytes) => {
+                    let elements: Vec<Value> =
+                        bytes.iter().map(|&b| Value::Number(b as f64)).collect();
+                    let arr_alloc = memory_manager.allocate_array(elements);
+                    Ok(Value::Array(arr_alloc.index))
+                }
+                Err(e) => Err(RuntimeError {
+                    span,
+                    message: format!("std.base64DecodeBytes: {}", e),
+                    source_id,
+                }),
+            }
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.base64DecodeBytes: argument must be a string".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.escapeStringJson(str): escape string for JSON embedding with surrounding quotes
+fn std_escape_string_json(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).to_string();
+            let mut out = String::from("\"");
+            for ch in s.chars() {
+                match ch {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if (c as u32) < 0x20 => {
+                        out.push_str(&format!("\\u{:04x}", c as u32));
+                    }
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            let alloc = memory_manager.allocate_string(&out);
+            Ok(Value::String(alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.escapeStringJson: argument must be a string".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.escapeStringXml(str): escape <>&"' for XML/HTML
+fn std_escape_string_xml(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).to_string();
+            let mut out = String::new();
+            for ch in s.chars() {
+                match ch {
+                    '&' => out.push_str("&amp;"),
+                    '<' => out.push_str("&lt;"),
+                    '>' => out.push_str("&gt;"),
+                    '"' => out.push_str("&quot;"),
+                    '\'' => out.push_str("&apos;"),
+                    c => out.push(c),
+                }
+            }
+            let alloc = memory_manager.allocate_string(&out);
+            Ok(Value::String(alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.escapeStringXml: argument must be a string".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.escapeStringBash(str): wrap in single quotes, escape internal ' as '"'"'
+fn std_escape_string_bash(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).to_string();
+            let mut out = String::from("'");
+            for ch in s.chars() {
+                if ch == '\'' {
+                    out.push_str("'\"'\"'");
+                } else {
+                    out.push(ch);
+                }
+            }
+            out.push('\'');
+            let alloc = memory_manager.allocate_string(&out);
+            Ok(Value::String(alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.escapeStringBash: argument must be a string".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.parseFloat(str): parse string to float
+fn std_parse_float(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).to_string();
+            match s.parse::<f64>() {
+                Ok(n) => Ok(Value::Number(n)),
+                Err(_) => Err(RuntimeError {
+                    span,
+                    message: format!("std.parseFloat: could not parse {:?}", s),
+                    source_id,
+                }),
+            }
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.parseFloat: argument must be a string".to_string(),
+            source_id,
+        }),
     }
 }

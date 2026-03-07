@@ -91,6 +91,12 @@ pub enum NativeFuncId {
     ObjectKeysValues = 65,
     Avg = 66,
     Remove = 67,
+    Base64 = 68,
+    Base64DecodeBytes = 69,
+    EscapeStringJson = 70,
+    EscapeStringXml = 71,
+    EscapeStringBash = 72,
+    ParseFloat = 73,
 }
 
 impl NativeFuncId {
@@ -165,6 +171,12 @@ impl NativeFuncId {
             65 => Some(NativeFuncId::ObjectKeysValues),
             66 => Some(NativeFuncId::Avg),
             67 => Some(NativeFuncId::Remove),
+            68 => Some(NativeFuncId::Base64),
+            69 => Some(NativeFuncId::Base64DecodeBytes),
+            70 => Some(NativeFuncId::EscapeStringJson),
+            71 => Some(NativeFuncId::EscapeStringXml),
+            72 => Some(NativeFuncId::EscapeStringBash),
+            73 => Some(NativeFuncId::ParseFloat),
             _ => None,
         }
     }
@@ -240,6 +252,12 @@ impl NativeFuncId {
             NativeFuncId::ObjectKeysValues => 1,
             NativeFuncId::Avg => 1,
             NativeFuncId::Remove => 2,
+            NativeFuncId::Base64 => 1,
+            NativeFuncId::Base64DecodeBytes => 1,
+            NativeFuncId::EscapeStringJson => 1,
+            NativeFuncId::EscapeStringXml => 1,
+            NativeFuncId::EscapeStringBash => 1,
+            NativeFuncId::ParseFloat => 1,
         }
     }
 
@@ -314,6 +332,12 @@ impl NativeFuncId {
             NativeFuncId::ObjectKeysValues => "objectKeysValues",
             NativeFuncId::Avg => "avg",
             NativeFuncId::Remove => "remove",
+            NativeFuncId::Base64 => "base64",
+            NativeFuncId::Base64DecodeBytes => "base64DecodeBytes",
+            NativeFuncId::EscapeStringJson => "escapeStringJson",
+            NativeFuncId::EscapeStringXml => "escapeStringXml",
+            NativeFuncId::EscapeStringBash => "escapeStringBash",
+            NativeFuncId::ParseFloat => "parseFloat",
         }
     }
 
@@ -388,6 +412,12 @@ impl NativeFuncId {
             "objectKeysValues" => Some(NativeFuncId::ObjectKeysValues),
             "avg" => Some(NativeFuncId::Avg),
             "remove" => Some(NativeFuncId::Remove),
+            "base64" => Some(NativeFuncId::Base64),
+            "base64DecodeBytes" => Some(NativeFuncId::Base64DecodeBytes),
+            "escapeStringJson" => Some(NativeFuncId::EscapeStringJson),
+            "escapeStringXml" => Some(NativeFuncId::EscapeStringXml),
+            "escapeStringBash" => Some(NativeFuncId::EscapeStringBash),
+            "parseFloat" => Some(NativeFuncId::ParseFloat),
             _ => None,
         }
     }
