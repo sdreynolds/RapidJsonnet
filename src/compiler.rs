@@ -1080,6 +1080,10 @@ impl<'a> Compiler<'a> {
                                 self.emit_string_constant(allocation_result.index)?;
                                 self.push_type(ExpressionType::String);
                                 return Ok(());
+                            } else if name == "pi" {
+                                self.emit_constant(std::f64::consts::PI)?;
+                                self.push_type(ExpressionType::Number);
+                                return Ok(());
                             } else if let Some(id) = chunk::NativeFuncId::from_name(name) {
                                 // Instead of runtime property access, load the native function ID as a value
                                 let const_idx = self

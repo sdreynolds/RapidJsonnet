@@ -121,6 +121,13 @@ pub enum NativeFuncId {
     IsDecimal = 95,
     ObjectRemoveKey = 96,
     FlattenDeepArray = 97,
+    Deg2Rad = 98,
+    Rad2Deg = 99,
+    Hypot = 100,
+    RemoveAt = 101,
+    EscapeStringDollars = 102,
+    EqualsIgnoreCase = 103,
+    Trace = 104,
 }
 
 impl NativeFuncId {
@@ -225,6 +232,13 @@ impl NativeFuncId {
             95 => Some(NativeFuncId::IsDecimal),
             96 => Some(NativeFuncId::ObjectRemoveKey),
             97 => Some(NativeFuncId::FlattenDeepArray),
+            98 => Some(NativeFuncId::Deg2Rad),
+            99 => Some(NativeFuncId::Rad2Deg),
+            100 => Some(NativeFuncId::Hypot),
+            101 => Some(NativeFuncId::RemoveAt),
+            102 => Some(NativeFuncId::EscapeStringDollars),
+            103 => Some(NativeFuncId::EqualsIgnoreCase),
+            104 => Some(NativeFuncId::Trace),
             _ => None,
         }
     }
@@ -330,6 +344,13 @@ impl NativeFuncId {
             NativeFuncId::IsDecimal => 1,
             NativeFuncId::ObjectRemoveKey => 2,
             NativeFuncId::FlattenDeepArray => 1,
+            NativeFuncId::Deg2Rad => 1,
+            NativeFuncId::Rad2Deg => 1,
+            NativeFuncId::Hypot => 2,
+            NativeFuncId::RemoveAt => 2,
+            NativeFuncId::EscapeStringDollars => 1,
+            NativeFuncId::EqualsIgnoreCase => 2,
+            NativeFuncId::Trace => 2,
         }
     }
 
@@ -434,6 +455,13 @@ impl NativeFuncId {
             NativeFuncId::IsDecimal => "isDecimal",
             NativeFuncId::ObjectRemoveKey => "objectRemoveKey",
             NativeFuncId::FlattenDeepArray => "flattenDeepArray",
+            NativeFuncId::Deg2Rad => "deg2rad",
+            NativeFuncId::Rad2Deg => "rad2deg",
+            NativeFuncId::Hypot => "hypot",
+            NativeFuncId::RemoveAt => "removeAt",
+            NativeFuncId::EscapeStringDollars => "escapeStringDollars",
+            NativeFuncId::EqualsIgnoreCase => "equalsIgnoreCase",
+            NativeFuncId::Trace => "trace",
         }
     }
 
@@ -538,6 +566,14 @@ impl NativeFuncId {
             "isDecimal" => Some(NativeFuncId::IsDecimal),
             "objectRemoveKey" => Some(NativeFuncId::ObjectRemoveKey),
             "flattenDeepArray" => Some(NativeFuncId::FlattenDeepArray),
+            "deg2rad" => Some(NativeFuncId::Deg2Rad),
+            "rad2deg" => Some(NativeFuncId::Rad2Deg),
+            "hypot" => Some(NativeFuncId::Hypot),
+            "removeAt" => Some(NativeFuncId::RemoveAt),
+            "escapeStringPython" => Some(NativeFuncId::EscapeStringJson),
+            "escapeStringDollars" => Some(NativeFuncId::EscapeStringDollars),
+            "equalsIgnoreCase" => Some(NativeFuncId::EqualsIgnoreCase),
+            "trace" => Some(NativeFuncId::Trace),
             _ => None,
         }
     }

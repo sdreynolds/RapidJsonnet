@@ -187,6 +187,17 @@ pub fn call_native(
         NativeFuncId::FlattenDeepArray => {
             std_flatten_deep_array(args[0], memory_manager, span, source_id)
         }
+        NativeFuncId::Deg2Rad => std_deg2rad(args[0], span, source_id),
+        NativeFuncId::Rad2Deg => std_rad2deg(args[0], span, source_id),
+        NativeFuncId::Hypot => std_hypot(args[0], args[1], span, source_id),
+        NativeFuncId::RemoveAt => std_remove_at(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::EscapeStringDollars => {
+            std_escape_string_dollars(args[0], memory_manager, span, source_id)
+        }
+        NativeFuncId::EqualsIgnoreCase => {
+            std_equals_ignore_case(args[0], args[1], memory_manager, span, source_id)
+        }
+        NativeFuncId::Trace => std_trace(args[0], args[1], memory_manager, span, source_id),
     }
 }
 
@@ -3673,6 +3684,151 @@ fn std_flatten_deep_array(
         _ => Err(RuntimeError {
             span,
             message: "std.flattenDeepArray() expected array".to_string(),
+            source_id,
+        }),
+    }
+}
+
+fn std_deg2rad(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n * std::f64::consts::PI / 180.0)),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.deg2rad() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+fn std_rad2deg(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Number(n) => Ok(Value::Number(n * 180.0 / std::f64::consts::PI)),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.rad2deg() expected number".to_string(),
+            source_id,
+        }),
+    }
+}
+
+fn std_hypot(
+    a: Value,
+    b: Value,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (a, b) {
+        (Value::Number(av), Value::Number(bv)) => Ok(Value::Number(av.hypot(bv))),
+        _ => Err(RuntimeError {
+            span,
+            message: "std.hypot() expected two numbers".to_string(),
+            source_id,
+        }),
+    }
+}
+
+fn std_remove_at(
+    arr_val: Value,
+    idx_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(a) => a,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.removeAt() first argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+    let idx = match idx_val {
+        Value::Number(n) if n.fract() == 0.0 => n as i64,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.removeAt() second argument must be an integer".to_string(),
+                source_id,
+            });
+        }
+    };
+    let mut elements = memory_manager.load_array(arr_idx).elements.clone();
+    let len = elements.len() as i64;
+    if idx < 0 || idx >= len {
+        return Err(RuntimeError {
+            span,
+            source_id,
+            message: format!(
+                "std.removeAt() index {} out of bounds for array of length {}",
+                idx, len
+            ),
+        });
+    }
+    elements.remove(idx as usize);
+    let arr_alloc = memory_manager.allocate_array(elements);
+    Ok(Value::Array(arr_alloc.index))
+}
+
+fn std_escape_string_dollars(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).to_string();
+            let out = s.replace('$', "$$");
+            let alloc = memory_manager.allocate_string(&out);
+            Ok(Value::String(alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.escapeStringDollars() expected string".to_string(),
+            source_id,
+        }),
+    }
+}
+
+fn std_equals_ignore_case(
+    a: Value,
+    b: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match (a, b) {
+        (Value::String(a_idx), Value::String(b_idx)) => {
+            let sa = memory_manager.load_string(a_idx).to_string();
+            let sb = memory_manager.load_string(b_idx).to_string();
+            Ok(Value::Boolean(sa.eq_ignore_ascii_case(&sb)))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.equalsIgnoreCase() expected two strings".to_string(),
+            source_id,
+        }),
+    }
+}
+
+fn std_trace(
+    str_val: Value,
+    rest_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match str_val {
+        Value::String(s_idx) => {
+            let msg = memory_manager.load_string(s_idx).to_string();
+            eprintln!("TRACE: {} {}", source_id, msg);
+            Ok(rest_val)
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.trace() first argument must be a string".to_string(),
             source_id,
         }),
     }
