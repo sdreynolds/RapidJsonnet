@@ -1,4 +1,4 @@
-use chunk::{FieldVisibility, NativeFuncId, RuntimeError, Value};
+use chunk::{FieldVisibility, NativeFuncId, ObjectIndex, RuntimeError, StringIndex, Value};
 use memory_manager::{MemoryManager, ObjectField};
 use std::collections::HashSet;
 use std::ops::Range;
@@ -198,6 +198,20 @@ pub fn call_native(
             std_equals_ignore_case(args[0], args[1], memory_manager, span, source_id)
         }
         NativeFuncId::Trace => std_trace(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Base64Decode => {
+            std_base64_decode_string(args[0], memory_manager, span, source_id)
+        }
+        NativeFuncId::Prune => std_prune(args[0], memory_manager, span, source_id),
+        NativeFuncId::MinArray => std_min_array(args[0], memory_manager, span, source_id),
+        NativeFuncId::MaxArray => std_max_array(args[0], memory_manager, span, source_id),
+        NativeFuncId::DeepJoin => std_deep_join(args[0], memory_manager, span, source_id),
+        NativeFuncId::ManifestJsonEx
+        | NativeFuncId::ManifestJson
+        | NativeFuncId::ManifestJsonMinified => Err(RuntimeError {
+            span,
+            message: format!("std.{} must be handled by the VM", id.name()),
+            source_id,
+        }),
     }
 }
 
@@ -3829,6 +3843,219 @@ fn std_trace(
         _ => Err(RuntimeError {
             span,
             message: "std.trace() first argument must be a string".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.base64Decode(str): decode base64 to naive string (byte→char cast)
+fn std_base64_decode_string(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(s_idx) => {
+            let s = memory_manager.load_string(s_idx).to_string();
+            match base64_decode(&s) {
+                Ok(bytes) => {
+                    let decoded: String = bytes.iter().map(|&b| b as char).collect();
+                    let alloc = memory_manager.allocate_string(&decoded);
+                    Ok(Value::String(alloc.index))
+                }
+                Err(e) => Err(RuntimeError {
+                    span,
+                    message: format!("std.base64Decode: {}", e),
+                    source_id,
+                }),
+            }
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.base64Decode: argument must be a string".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// Helper: is a value "prunable" (null, empty array, or empty object)?
+fn is_prunable(val: &Value, memory_manager: &MemoryManager) -> bool {
+    match val {
+        Value::Null => true,
+        Value::Array(a_idx) => memory_manager.load_array(*a_idx).elements.is_empty(),
+        Value::Object(o_idx) => {
+            let obj = memory_manager.load_object(*o_idx);
+            // Check if all visible fields are prunable (i.e., no visible fields remain after prune)
+            obj.properties
+                .values()
+                .filter(|f| f.visibility != FieldVisibility::Hidden)
+                .count()
+                == 0
+        }
+        _ => false,
+    }
+}
+
+/// Recursively prune a value: remove nulls, empty arrays, empty objects
+fn prune_val(val: Value, memory_manager: &mut MemoryManager) -> Value {
+    match val {
+        Value::Array(a_idx) => {
+            let elements = memory_manager.load_array(a_idx).elements.clone();
+            let pruned: Vec<Value> = elements
+                .into_iter()
+                .filter_map(|elem| {
+                    let pruned_elem = prune_val(elem, memory_manager);
+                    if is_prunable(&pruned_elem, memory_manager) {
+                        None
+                    } else {
+                        Some(pruned_elem)
+                    }
+                })
+                .collect();
+            let alloc = memory_manager.allocate_array(pruned);
+            Value::Array(alloc.index)
+        }
+        Value::Object(o_idx) => {
+            // Collect visible fields first
+            let field_data: Vec<(StringIndex, Value, Option<ObjectIndex>, FieldVisibility)> = {
+                let obj = memory_manager.load_object(o_idx);
+                obj.properties
+                    .iter()
+                    .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                    .map(|(k, f)| (*k, f.value, f.super_obj, f.visibility))
+                    .collect()
+            };
+            let mut new_props = std::collections::HashMap::new();
+            for (k, v, super_obj, vis) in field_data {
+                let pruned_v = prune_val(v, memory_manager);
+                if !is_prunable(&pruned_v, memory_manager) {
+                    new_props.insert(
+                        k,
+                        ObjectField {
+                            value: pruned_v,
+                            super_obj,
+                            visibility: vis,
+                        },
+                    );
+                }
+            }
+            let alloc = memory_manager.allocate_object_with_properties(new_props);
+            Value::Object(alloc.index)
+        }
+        other => other,
+    }
+}
+
+/// std.prune(a): recursively remove null/empty arrays/empty objects
+fn std_prune(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    _span: Range<usize>,
+    _source_id: String,
+) -> Result<Value, RuntimeError> {
+    Ok(prune_val(val, memory_manager))
+}
+
+/// std.minArray(arr): return the minimum element
+fn std_min_array(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Array(a_idx) => {
+            let elements = memory_manager.load_array(a_idx).elements.clone();
+            if elements.is_empty() {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.minArray: array must not be empty".to_string(),
+                    source_id,
+                });
+            }
+            let mut min = elements[0];
+            for elem in elements.into_iter().skip(1) {
+                if compare_values(elem, min, memory_manager) == std::cmp::Ordering::Less {
+                    min = elem;
+                }
+            }
+            Ok(min)
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.minArray: argument must be an array".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// std.maxArray(arr): return the maximum element
+fn std_max_array(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::Array(a_idx) => {
+            let elements = memory_manager.load_array(a_idx).elements.clone();
+            if elements.is_empty() {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.maxArray: array must not be empty".to_string(),
+                    source_id,
+                });
+            }
+            let mut max = elements[0];
+            for elem in elements.into_iter().skip(1) {
+                if compare_values(elem, max, memory_manager) == std::cmp::Ordering::Greater {
+                    max = elem;
+                }
+            }
+            Ok(max)
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.maxArray: argument must be an array".to_string(),
+            source_id,
+        }),
+    }
+}
+
+/// Helper: recursively collect strings from nested arrays into a buffer
+fn deep_join_append(val: Value, buf: &mut String, memory_manager: &MemoryManager) {
+    match val {
+        Value::String(s_idx) => {
+            buf.push_str(memory_manager.load_string(s_idx));
+        }
+        Value::Array(a_idx) => {
+            let elements = memory_manager.load_array(a_idx).elements.clone();
+            for elem in elements {
+                deep_join_append(elem, buf, memory_manager);
+            }
+        }
+        _ => {} // ignore other types
+    }
+}
+
+/// std.deepJoin(arr): recursively concatenate strings in nested arrays
+fn std_deep_join(
+    val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    match val {
+        Value::String(_) | Value::Array(_) => {
+            let mut buf = String::new();
+            deep_join_append(val, &mut buf, memory_manager);
+            let alloc = memory_manager.allocate_string(&buf);
+            Ok(Value::String(alloc.index))
+        }
+        _ => Err(RuntimeError {
+            span,
+            message: "std.deepJoin: argument must be a string or array".to_string(),
             source_id,
         }),
     }

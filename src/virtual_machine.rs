@@ -2187,6 +2187,81 @@ impl VirtualMachine {
                         }
                     }
 
+                    // Handle manifestJson* variants in the VM
+                    if matches!(
+                        func_id,
+                        chunk::NativeFuncId::ManifestJson
+                            | chunk::NativeFuncId::ManifestJsonMinified
+                            | chunk::NativeFuncId::ManifestJsonEx
+                    ) {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let (indent, newline, kvs) = match func_id {
+                            chunk::NativeFuncId::ManifestJson => {
+                                ("   ".to_string(), "\n".to_string(), ": ".to_string())
+                            }
+                            chunk::NativeFuncId::ManifestJsonMinified => {
+                                ("".to_string(), "".to_string(), ":".to_string())
+                            }
+                            chunk::NativeFuncId::ManifestJsonEx => {
+                                let i = match args[1] {
+                                    Value::String(s_idx) => {
+                                        self.memory_manager.load_string(s_idx).to_string()
+                                    }
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message: "std.manifestJsonEx: indent must be a string"
+                                                .to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let n = match args[2] {
+                                    Value::String(s_idx) => {
+                                        self.memory_manager.load_string(s_idx).to_string()
+                                    }
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message: "std.manifestJsonEx: newline must be a string"
+                                                .to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let k =
+                                    match args[3] {
+                                        Value::String(s_idx) => {
+                                            self.memory_manager.load_string(s_idx).to_string()
+                                        }
+                                        _ => return Err(RuntimeError {
+                                            span,
+                                            message:
+                                                "std.manifestJsonEx: key_val_sep must be a string"
+                                                    .to_string(),
+                                            source_id,
+                                        }),
+                                    };
+                                (i, n, k)
+                            }
+                            _ => unreachable!(),
+                        };
+                        let value = args[0];
+                        let json = self.manifest_json_value(
+                            value,
+                            &indent,
+                            &newline,
+                            &kvs,
+                            0,
+                            span.clone(),
+                            &source_id,
+                        )?;
+                        let idx = self.memory_manager.allocate_string(&json);
+                        self.push(Value::String(idx.index))?;
+                        continue;
+                    }
+
                     // Call native function
                     let span = self.get_current_span();
                     let source_id = self.current_chunk().source_id.to_string();
@@ -2872,6 +2947,184 @@ impl VirtualMachine {
             })
         } else {
             Ok(n as i64)
+        }
+    }
+
+    /// Serialize a Value to a JSON string with configurable formatting
+    fn manifest_json_value(
+        &mut self,
+        value: Value,
+        indent: &str,
+        newline: &str,
+        key_val_sep: &str,
+        depth: usize,
+        span: Range<usize>,
+        source_id: &str,
+    ) -> Result<String, RuntimeError> {
+        // Force closures/imports
+        let value = self.force_value(value)?;
+        let value = match value {
+            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            other => other,
+        };
+
+        match value {
+            Value::Null => Ok("null".to_string()),
+            Value::Boolean(true) => Ok("true".to_string()),
+            Value::Boolean(false) => Ok("false".to_string()),
+            Value::Number(n) => {
+                if n.is_nan() {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.manifestJson: cannot serialize NaN".to_string(),
+                        source_id: source_id.to_string(),
+                    });
+                }
+                if n.is_infinite() {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.manifestJson: cannot serialize Infinite".to_string(),
+                        source_id: source_id.to_string(),
+                    });
+                }
+                if n.fract() == 0.0 && n.abs() < 1e15 {
+                    Ok(format!("{}", n as i64))
+                } else {
+                    Ok(format!("{}", n))
+                }
+            }
+            Value::String(s_idx) => {
+                let s = self.memory_manager.load_string(s_idx).to_string();
+                let mut out = String::from("\"");
+                for ch in s.chars() {
+                    match ch {
+                        '"' => out.push_str("\\\""),
+                        '\\' => out.push_str("\\\\"),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        c if (c as u32) < 0x20 => {
+                            out.push_str(&format!("\\u{:04x}", c as u32));
+                        }
+                        c => out.push(c),
+                    }
+                }
+                out.push('"');
+                Ok(out)
+            }
+            Value::Array(a_idx) => {
+                let elements = self.memory_manager.load_array(a_idx).elements.clone();
+                if elements.is_empty() {
+                    return Ok("[ ]".to_string());
+                }
+                let item_indent = indent.repeat(depth + 1);
+                let close_indent = indent.repeat(depth);
+                let mut items = Vec::with_capacity(elements.len());
+                for elem in elements {
+                    let s = self.manifest_json_value(
+                        elem,
+                        indent,
+                        newline,
+                        key_val_sep,
+                        depth + 1,
+                        span.clone(),
+                        source_id,
+                    )?;
+                    items.push(format!("{}{}", item_indent, s));
+                }
+                Ok(format!(
+                    "[{}{}{}{}]",
+                    newline,
+                    items.join(&format!(",{}", newline)),
+                    newline,
+                    close_indent,
+                ))
+            }
+            Value::Object(o_idx) => {
+                // Collect visible fields
+                let field_data: Vec<(StringIndex, Value, Option<ObjectIndex>)> = {
+                    let obj = self.memory_manager.load_object(o_idx);
+                    let mut fields: Vec<(StringIndex, Value, Option<ObjectIndex>)> = obj
+                        .properties
+                        .iter()
+                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                        .map(|(k, f)| (*k, f.value, f.super_obj))
+                        .collect();
+                    // Sort by field name
+                    fields.sort_by(|(ka, _, _), (kb, _, _)| {
+                        let sa = obj.properties.get(ka).map(|_| {
+                            // We need to sort by key string; collect key strings separately
+                            *ka
+                        });
+                        let _ = sa;
+                        ka.cmp(kb)
+                    });
+                    fields
+                };
+
+                // Sort fields by string name
+                let mut sorted_fields: Vec<(String, Value, Option<ObjectIndex>)> = field_data
+                    .into_iter()
+                    .map(|(k, v, so)| (self.memory_manager.load_string(k).to_string(), v, so))
+                    .collect();
+                sorted_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+
+                if sorted_fields.is_empty() {
+                    return Ok("{ }".to_string());
+                }
+
+                let item_indent = indent.repeat(depth + 1);
+                let close_indent = indent.repeat(depth);
+                let mut pairs = Vec::with_capacity(sorted_fields.len());
+                for (key_str, field_val, super_obj) in sorted_fields {
+                    // Force field value (thunk)
+                    let forced_val = match field_val {
+                        Value::Closure(c) => self.execute_thunk_sync(c, Some(o_idx), super_obj)?,
+                        other => other,
+                    };
+                    let val_s = self.manifest_json_value(
+                        forced_val,
+                        indent,
+                        newline,
+                        key_val_sep,
+                        depth + 1,
+                        span.clone(),
+                        source_id,
+                    )?;
+                    // JSON-escape the key
+                    let mut key_out = String::from("\"");
+                    for ch in key_str.chars() {
+                        match ch {
+                            '"' => key_out.push_str("\\\""),
+                            '\\' => key_out.push_str("\\\\"),
+                            '\n' => key_out.push_str("\\n"),
+                            '\r' => key_out.push_str("\\r"),
+                            '\t' => key_out.push_str("\\t"),
+                            c if (c as u32) < 0x20 => {
+                                key_out.push_str(&format!("\\u{:04x}", c as u32));
+                            }
+                            c => key_out.push(c),
+                        }
+                    }
+                    key_out.push('"');
+                    pairs.push(format!(
+                        "{}{}{}{}",
+                        item_indent, key_out, key_val_sep, val_s
+                    ));
+                }
+                Ok(format!(
+                    "{{{}{}{}{}}}",
+                    newline,
+                    pairs.join(&format!(",{}", newline)),
+                    newline,
+                    close_indent,
+                ))
+            }
+            _ => Err(RuntimeError {
+                span,
+                message: "std.manifestJson: cannot manifest function".to_string(),
+                source_id: source_id.to_string(),
+            }),
         }
     }
 }

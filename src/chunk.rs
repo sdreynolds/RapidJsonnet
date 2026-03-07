@@ -128,6 +128,14 @@ pub enum NativeFuncId {
     EscapeStringDollars = 102,
     EqualsIgnoreCase = 103,
     Trace = 104,
+    Base64Decode = 105,
+    ManifestJsonEx = 106,
+    ManifestJson = 107,
+    ManifestJsonMinified = 108,
+    Prune = 109,
+    MinArray = 110,
+    MaxArray = 111,
+    DeepJoin = 112,
 }
 
 impl NativeFuncId {
@@ -239,6 +247,14 @@ impl NativeFuncId {
             102 => Some(NativeFuncId::EscapeStringDollars),
             103 => Some(NativeFuncId::EqualsIgnoreCase),
             104 => Some(NativeFuncId::Trace),
+            105 => Some(NativeFuncId::Base64Decode),
+            106 => Some(NativeFuncId::ManifestJsonEx),
+            107 => Some(NativeFuncId::ManifestJson),
+            108 => Some(NativeFuncId::ManifestJsonMinified),
+            109 => Some(NativeFuncId::Prune),
+            110 => Some(NativeFuncId::MinArray),
+            111 => Some(NativeFuncId::MaxArray),
+            112 => Some(NativeFuncId::DeepJoin),
             _ => None,
         }
     }
@@ -351,6 +367,14 @@ impl NativeFuncId {
             NativeFuncId::EscapeStringDollars => 1,
             NativeFuncId::EqualsIgnoreCase => 2,
             NativeFuncId::Trace => 2,
+            NativeFuncId::Base64Decode => 1,
+            NativeFuncId::ManifestJsonEx => 4,
+            NativeFuncId::ManifestJson => 1,
+            NativeFuncId::ManifestJsonMinified => 1,
+            NativeFuncId::Prune => 1,
+            NativeFuncId::MinArray => 1,
+            NativeFuncId::MaxArray => 1,
+            NativeFuncId::DeepJoin => 1,
         }
     }
 
@@ -462,6 +486,14 @@ impl NativeFuncId {
             NativeFuncId::EscapeStringDollars => "escapeStringDollars",
             NativeFuncId::EqualsIgnoreCase => "equalsIgnoreCase",
             NativeFuncId::Trace => "trace",
+            NativeFuncId::Base64Decode => "base64Decode",
+            NativeFuncId::ManifestJsonEx => "manifestJsonEx",
+            NativeFuncId::ManifestJson => "manifestJson",
+            NativeFuncId::ManifestJsonMinified => "manifestJsonMinified",
+            NativeFuncId::Prune => "prune",
+            NativeFuncId::MinArray => "minArray",
+            NativeFuncId::MaxArray => "maxArray",
+            NativeFuncId::DeepJoin => "deepJoin",
         }
     }
 
@@ -574,6 +606,14 @@ impl NativeFuncId {
             "escapeStringDollars" => Some(NativeFuncId::EscapeStringDollars),
             "equalsIgnoreCase" => Some(NativeFuncId::EqualsIgnoreCase),
             "trace" => Some(NativeFuncId::Trace),
+            "base64Decode" => Some(NativeFuncId::Base64Decode),
+            "manifestJsonEx" => Some(NativeFuncId::ManifestJsonEx),
+            "manifestJson" => Some(NativeFuncId::ManifestJson),
+            "manifestJsonMinified" => Some(NativeFuncId::ManifestJsonMinified),
+            "prune" => Some(NativeFuncId::Prune),
+            "minArray" => Some(NativeFuncId::MinArray),
+            "maxArray" => Some(NativeFuncId::MaxArray),
+            "deepJoin" => Some(NativeFuncId::DeepJoin),
             _ => None,
         }
     }
