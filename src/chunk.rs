@@ -167,6 +167,13 @@ pub enum NativeFuncId {
     Sha512 = 141,
     Sha3 = 142,
     ExtVar = 143,
+    GroupBy = 144,
+    MapKeys = 145,
+    FilterObject = 146,
+    Gcd = 147,
+    Lcm = 148,
+    Indent = 149,
+    ObjectFlatten = 150,
 }
 
 impl NativeFuncId {
@@ -317,6 +324,13 @@ impl NativeFuncId {
             141 => Some(NativeFuncId::Sha512),
             142 => Some(NativeFuncId::Sha3),
             143 => Some(NativeFuncId::ExtVar),
+            144 => Some(NativeFuncId::GroupBy),
+            145 => Some(NativeFuncId::MapKeys),
+            146 => Some(NativeFuncId::FilterObject),
+            147 => Some(NativeFuncId::Gcd),
+            148 => Some(NativeFuncId::Lcm),
+            149 => Some(NativeFuncId::Indent),
+            150 => Some(NativeFuncId::ObjectFlatten),
             _ => None,
         }
     }
@@ -468,6 +482,13 @@ impl NativeFuncId {
             NativeFuncId::Sha512 => 1,
             NativeFuncId::Sha3 => 1,
             NativeFuncId::ExtVar => 1,
+            NativeFuncId::GroupBy => 2,
+            NativeFuncId::MapKeys => 2,
+            NativeFuncId::FilterObject => 2,
+            NativeFuncId::Gcd => 2,
+            NativeFuncId::Lcm => 2,
+            NativeFuncId::Indent => 2,
+            NativeFuncId::ObjectFlatten => 2,
         }
     }
 
@@ -618,6 +639,13 @@ impl NativeFuncId {
             NativeFuncId::Sha512 => "sha512",
             NativeFuncId::Sha3 => "sha3",
             NativeFuncId::ExtVar => "extVar",
+            NativeFuncId::GroupBy => "groupBy",
+            NativeFuncId::MapKeys => "mapKeys",
+            NativeFuncId::FilterObject => "filterObject",
+            NativeFuncId::Gcd => "gcd",
+            NativeFuncId::Lcm => "lcm",
+            NativeFuncId::Indent => "indent",
+            NativeFuncId::ObjectFlatten => "objectFlatten",
         }
     }
 
@@ -769,6 +797,13 @@ impl NativeFuncId {
             "sha512" => Some(NativeFuncId::Sha512),
             "sha3" => Some(NativeFuncId::Sha3),
             "extVar" => Some(NativeFuncId::ExtVar),
+            "groupBy" => Some(NativeFuncId::GroupBy),
+            "mapKeys" => Some(NativeFuncId::MapKeys),
+            "filterObject" => Some(NativeFuncId::FilterObject),
+            "gcd" => Some(NativeFuncId::Gcd),
+            "lcm" => Some(NativeFuncId::Lcm),
+            "indent" => Some(NativeFuncId::Indent),
+            "objectFlatten" => Some(NativeFuncId::ObjectFlatten),
             _ => None,
         }
     }

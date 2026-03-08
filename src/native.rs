@@ -296,11 +296,123 @@ pub fn call_native(
         | NativeFuncId::ParseJson
         | NativeFuncId::Foldr
         | NativeFuncId::MapWithKey
-        | NativeFuncId::FilterMap => Err(RuntimeError {
+        | NativeFuncId::FilterMap
+        | NativeFuncId::GroupBy
+        | NativeFuncId::MapKeys
+        | NativeFuncId::FilterObject
+        | NativeFuncId::ObjectFlatten => Err(RuntimeError {
             span,
             message: format!("std.{} must be handled by the VM", id.name()),
             source_id,
         }),
+        NativeFuncId::Gcd => {
+            let a = match args[0] {
+                Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as u64,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.gcd: expected non-negative integer".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let b = match args[1] {
+                Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as u64,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.gcd: expected non-negative integer".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            fn gcd(mut x: u64, mut y: u64) -> u64 {
+                while y != 0 {
+                    let t = y;
+                    y = x % y;
+                    x = t;
+                }
+                x
+            }
+            Ok(Value::Number(gcd(a, b) as f64))
+        }
+        NativeFuncId::Lcm => {
+            let a = match args[0] {
+                Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as u64,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.lcm: expected non-negative integer".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let b = match args[1] {
+                Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as u64,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.lcm: expected non-negative integer".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            fn gcd(mut x: u64, mut y: u64) -> u64 {
+                while y != 0 {
+                    let t = y;
+                    y = x % y;
+                    x = t;
+                }
+                x
+            }
+            let g = gcd(a, b);
+            let result = if g == 0 { 0u64 } else { a / g * b };
+            Ok(Value::Number(result as f64))
+        }
+        NativeFuncId::Indent => {
+            let s = match args[0] {
+                Value::String(idx) => memory_manager.load_string(idx).to_string(),
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.indent: first argument must be a string".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let prefix = match args[1] {
+                Value::String(idx) => memory_manager.load_string(idx).to_string(),
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.indent: second argument must be a string".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            if s.is_empty() {
+                let interned = memory_manager.allocate_string("");
+                return Ok(Value::String(interned.index));
+            }
+            let trailing_newline = s.ends_with('\n');
+            let content = if trailing_newline {
+                &s[..s.len() - 1]
+            } else {
+                &s[..]
+            };
+            let indented: String = content
+                .split('\n')
+                .map(|line| format!("{}{}", prefix, line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let result = if trailing_newline {
+                indented + "\n"
+            } else {
+                indented
+            };
+            let interned = memory_manager.allocate_string(&result);
+            Ok(Value::String(interned.index))
+        }
         NativeFuncId::SetInter => {
             let a_val = args[0];
             let b_val = args[1];

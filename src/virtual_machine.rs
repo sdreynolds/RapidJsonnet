@@ -3572,6 +3572,319 @@ impl VirtualMachine {
                         continue;
                     }
 
+                    // Handle std.groupBy
+                    if func_id == chunk::NativeFuncId::GroupBy {
+                        let arr_val = args[0];
+                        let key_f = args[1];
+                        let arr_idx = match arr_val {
+                            Value::Array(i) => i,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "std.groupBy: expected array, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let elements: Vec<Value> =
+                            self.memory_manager.load_array(arr_idx).elements.clone();
+                        let mut group_order: Vec<String> = Vec::new();
+                        let mut groups: std::collections::HashMap<String, Vec<Value>> =
+                            std::collections::HashMap::new();
+                        for &elem in &elements {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&elements);
+                            roots.push(key_f);
+                            for group_elems in groups.values() {
+                                roots.extend_from_slice(group_elems);
+                            }
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let key_val = self.call_value_with_one_arg(key_f, elem);
+                            self.memory_manager.pop_external_roots();
+                            let key_val = key_val?;
+                            let key_str = match key_val {
+                                Value::String(idx) => {
+                                    self.memory_manager.load_string(idx).to_string()
+                                }
+                                other => {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "std.groupBy: keyF must return string, got {}",
+                                            other.type_name()
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            };
+                            if !groups.contains_key(&key_str) {
+                                group_order.push(key_str.clone());
+                                groups.insert(key_str.clone(), Vec::new());
+                            }
+                            groups.get_mut(&key_str).unwrap().push(elem);
+                        }
+                        let mut properties: std::collections::HashMap<
+                            chunk::StringIndex,
+                            memory_manager::ObjectField,
+                        > = std::collections::HashMap::new();
+                        for key_str in &group_order {
+                            let group_elems = groups.remove(key_str).unwrap_or_default();
+                            let arr_alloc = self.memory_manager.allocate_array(group_elems);
+                            let k_alloc = self.memory_manager.allocate_string(key_str);
+                            properties.insert(
+                                k_alloc.index,
+                                memory_manager::ObjectField {
+                                    value: Value::Array(arr_alloc.index),
+                                    super_obj: None,
+                                    visibility: FieldVisibility::Visible,
+                                },
+                            );
+                        }
+                        let obj_alloc = self
+                            .memory_manager
+                            .allocate_object_with_properties(properties);
+                        self.push(Value::Object(obj_alloc.index))?;
+                        continue;
+                    }
+
+                    // Handle std.mapKeys
+                    if func_id == chunk::NativeFuncId::MapKeys {
+                        let func_val = args[0];
+                        let obj_val = args[1];
+                        let o_idx = match obj_val {
+                            Value::Object(i) => i,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "std.mapKeys: expected object, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = {
+                            let obj = self.memory_manager.load_object(o_idx);
+                            obj.properties
+                                .iter()
+                                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                                .map(|(k, f)| (*k, f.value, f.visibility))
+                                .collect()
+                        };
+                        let mut new_properties: std::collections::HashMap<
+                            chunk::StringIndex,
+                            memory_manager::ObjectField,
+                        > = std::collections::HashMap::new();
+                        for (k_idx, raw_val, vis) in &field_data {
+                            let k_idx = *k_idx;
+                            let raw_val = *raw_val;
+                            let vis = *vis;
+                            let evaled_val = match raw_val {
+                                Value::Closure(closure_idx) => {
+                                    self.execute_thunk_sync(closure_idx, Some(o_idx), None)?
+                                }
+                                other => other,
+                            };
+                            let key_str = self.memory_manager.load_string(k_idx).to_string();
+                            let key_alloc = self.memory_manager.allocate_string(&key_str);
+                            let key_val = Value::String(key_alloc.index);
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.push(func_val);
+                            roots.push(evaled_val);
+                            roots.push(key_val);
+                            for f in new_properties.values() {
+                                roots.push(f.value);
+                            }
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let new_key_val = self.call_value_with_one_arg(func_val, key_val);
+                            self.memory_manager.pop_external_roots();
+                            let new_key_val = new_key_val?;
+                            let new_key_str = match new_key_val {
+                                Value::String(idx) => {
+                                    self.memory_manager.load_string(idx).to_string()
+                                }
+                                other => {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "std.mapKeys: func must return string, got {}",
+                                            other.type_name()
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            };
+                            let new_k_alloc = self.memory_manager.allocate_string(&new_key_str);
+                            new_properties.insert(
+                                new_k_alloc.index,
+                                memory_manager::ObjectField {
+                                    value: evaled_val,
+                                    super_obj: None,
+                                    visibility: vis,
+                                },
+                            );
+                        }
+                        let alloc = self
+                            .memory_manager
+                            .allocate_object_with_properties(new_properties);
+                        self.push(Value::Object(alloc.index))?;
+                        continue;
+                    }
+
+                    // Handle std.filterObject
+                    if func_id == chunk::NativeFuncId::FilterObject {
+                        let func_val = args[0];
+                        let obj_val = args[1];
+                        let o_idx = match obj_val {
+                            Value::Object(i) => i,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "std.filterObject: expected object, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = {
+                            let obj = self.memory_manager.load_object(o_idx);
+                            obj.properties
+                                .iter()
+                                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                                .map(|(k, f)| (*k, f.value, f.visibility))
+                                .collect()
+                        };
+                        let mut kept_properties: std::collections::HashMap<
+                            chunk::StringIndex,
+                            memory_manager::ObjectField,
+                        > = std::collections::HashMap::new();
+                        for (k_idx, raw_val, vis) in &field_data {
+                            let k_idx = *k_idx;
+                            let raw_val = *raw_val;
+                            let vis = *vis;
+                            let evaled_val = match raw_val {
+                                Value::Closure(closure_idx) => {
+                                    self.execute_thunk_sync(closure_idx, Some(o_idx), None)?
+                                }
+                                other => other,
+                            };
+                            let key_str = self.memory_manager.load_string(k_idx).to_string();
+                            let key_alloc = self.memory_manager.allocate_string(&key_str);
+                            let key_val = Value::String(key_alloc.index);
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.push(func_val);
+                            roots.push(evaled_val);
+                            roots.push(key_val);
+                            for f in kept_properties.values() {
+                                roots.push(f.value);
+                            }
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let keep = self.call_value_with_two_args(func_val, key_val, evaled_val);
+                            self.memory_manager.pop_external_roots();
+                            match keep? {
+                                Value::Boolean(true) => {
+                                    kept_properties.insert(
+                                        k_idx,
+                                        memory_manager::ObjectField {
+                                            value: evaled_val,
+                                            super_obj: None,
+                                            visibility: vis,
+                                        },
+                                    );
+                                }
+                                Value::Boolean(false) => {}
+                                other => {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "std.filterObject: func must return bool, got {}",
+                                            other.type_name()
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        let alloc = self
+                            .memory_manager
+                            .allocate_object_with_properties(kept_properties);
+                        self.push(Value::Object(alloc.index))?;
+                        continue;
+                    }
+
+                    // Handle std.objectFlatten
+                    if func_id == chunk::NativeFuncId::ObjectFlatten {
+                        let obj_val = args[0];
+                        let sep_val = args[1];
+                        let sep = match sep_val {
+                            Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "std.objectFlatten: sep must be string, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let mut flat_fields: Vec<(String, Value)> = Vec::new();
+                        self.flatten_object_recursive(
+                            obj_val,
+                            &sep,
+                            String::new(),
+                            &mut flat_fields,
+                        )?;
+                        let mut properties: std::collections::HashMap<
+                            chunk::StringIndex,
+                            memory_manager::ObjectField,
+                        > = std::collections::HashMap::new();
+                        for (k_str, v) in flat_fields {
+                            let k_alloc = self.memory_manager.allocate_string(&k_str);
+                            properties.insert(
+                                k_alloc.index,
+                                memory_manager::ObjectField {
+                                    value: v,
+                                    super_obj: None,
+                                    visibility: FieldVisibility::Visible,
+                                },
+                            );
+                        }
+                        let obj_alloc = self
+                            .memory_manager
+                            .allocate_object_with_properties(properties);
+                        self.push(Value::Object(obj_alloc.index))?;
+                        continue;
+                    }
+
                     // Call native function
                     let span = self.get_current_span();
                     let source_id = self.current_chunk().source_id.to_string();
@@ -4617,6 +4930,335 @@ impl VirtualMachine {
                                 continue;
                             }
 
+                            // Handle std.groupBy
+                            if id == chunk::NativeFuncId::GroupBy {
+                                let arr_val = args[0];
+                                let key_f = args[1];
+                                let arr_idx = match arr_val {
+                                    Value::Array(i) => i,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "std.groupBy: expected array, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let elements: Vec<Value> =
+                                    self.memory_manager.load_array(arr_idx).elements.clone();
+                                let mut group_order: Vec<String> = Vec::new();
+                                let mut groups: std::collections::HashMap<String, Vec<Value>> =
+                                    std::collections::HashMap::new();
+                                for &elem in &elements {
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&elements);
+                                    roots.push(key_f);
+                                    for group_elems in groups.values() {
+                                        roots.extend_from_slice(group_elems);
+                                    }
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let key_val = self.call_value_with_one_arg(key_f, elem);
+                                    self.memory_manager.pop_external_roots();
+                                    let key_val = key_val?;
+                                    let key_str = match key_val {
+                                        Value::String(idx) => {
+                                            self.memory_manager.load_string(idx).to_string()
+                                        }
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.groupBy: keyF must return string, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    if !groups.contains_key(&key_str) {
+                                        group_order.push(key_str.clone());
+                                        groups.insert(key_str.clone(), Vec::new());
+                                    }
+                                    groups.get_mut(&key_str).unwrap().push(elem);
+                                }
+                                let mut properties: std::collections::HashMap<
+                                    chunk::StringIndex,
+                                    memory_manager::ObjectField,
+                                > = std::collections::HashMap::new();
+                                for key_str in &group_order {
+                                    let group_elems = groups.remove(key_str).unwrap_or_default();
+                                    let arr_alloc = self.memory_manager.allocate_array(group_elems);
+                                    let k_alloc = self.memory_manager.allocate_string(key_str);
+                                    properties.insert(
+                                        k_alloc.index,
+                                        memory_manager::ObjectField {
+                                            value: Value::Array(arr_alloc.index),
+                                            super_obj: None,
+                                            visibility: FieldVisibility::Visible,
+                                        },
+                                    );
+                                }
+                                let obj_alloc = self
+                                    .memory_manager
+                                    .allocate_object_with_properties(properties);
+                                self.push(Value::Object(obj_alloc.index))?;
+                                continue;
+                            }
+
+                            // Handle std.mapKeys
+                            if id == chunk::NativeFuncId::MapKeys {
+                                let func_val = args[0];
+                                let obj_val = args[1];
+                                let o_idx = match obj_val {
+                                    Value::Object(i) => i,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "std.mapKeys: expected object, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = {
+                                    let obj = self.memory_manager.load_object(o_idx);
+                                    obj.properties
+                                        .iter()
+                                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                                        .map(|(k, f)| (*k, f.value, f.visibility))
+                                        .collect()
+                                };
+                                let mut new_properties: std::collections::HashMap<
+                                    chunk::StringIndex,
+                                    memory_manager::ObjectField,
+                                > = std::collections::HashMap::new();
+                                for (k_idx, raw_val, vis) in &field_data {
+                                    let k_idx = *k_idx;
+                                    let raw_val = *raw_val;
+                                    let vis = *vis;
+                                    let evaled_val = match raw_val {
+                                        Value::Closure(closure_idx) => {
+                                            self.execute_thunk_sync(closure_idx, Some(o_idx), None)?
+                                        }
+                                        other => other,
+                                    };
+                                    let key_str =
+                                        self.memory_manager.load_string(k_idx).to_string();
+                                    let key_alloc = self.memory_manager.allocate_string(&key_str);
+                                    let key_val = Value::String(key_alloc.index);
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.push(func_val);
+                                    roots.push(evaled_val);
+                                    roots.push(key_val);
+                                    for f in new_properties.values() {
+                                        roots.push(f.value);
+                                    }
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let new_key_val =
+                                        self.call_value_with_one_arg(func_val, key_val);
+                                    self.memory_manager.pop_external_roots();
+                                    let new_key_val = new_key_val?;
+                                    let new_key_str = match new_key_val {
+                                        Value::String(idx) => {
+                                            self.memory_manager.load_string(idx).to_string()
+                                        }
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.mapKeys: func must return string, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let new_k_alloc =
+                                        self.memory_manager.allocate_string(&new_key_str);
+                                    new_properties.insert(
+                                        new_k_alloc.index,
+                                        memory_manager::ObjectField {
+                                            value: evaled_val,
+                                            super_obj: None,
+                                            visibility: vis,
+                                        },
+                                    );
+                                }
+                                let alloc = self
+                                    .memory_manager
+                                    .allocate_object_with_properties(new_properties);
+                                self.push(Value::Object(alloc.index))?;
+                                continue;
+                            }
+
+                            // Handle std.filterObject
+                            if id == chunk::NativeFuncId::FilterObject {
+                                let func_val = args[0];
+                                let obj_val = args[1];
+                                let o_idx = match obj_val {
+                                    Value::Object(i) => i,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "std.filterObject: expected object, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = {
+                                    let obj = self.memory_manager.load_object(o_idx);
+                                    obj.properties
+                                        .iter()
+                                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                                        .map(|(k, f)| (*k, f.value, f.visibility))
+                                        .collect()
+                                };
+                                let mut kept_properties: std::collections::HashMap<
+                                    chunk::StringIndex,
+                                    memory_manager::ObjectField,
+                                > = std::collections::HashMap::new();
+                                for (k_idx, raw_val, vis) in &field_data {
+                                    let k_idx = *k_idx;
+                                    let raw_val = *raw_val;
+                                    let vis = *vis;
+                                    let evaled_val = match raw_val {
+                                        Value::Closure(closure_idx) => {
+                                            self.execute_thunk_sync(closure_idx, Some(o_idx), None)?
+                                        }
+                                        other => other,
+                                    };
+                                    let key_str =
+                                        self.memory_manager.load_string(k_idx).to_string();
+                                    let key_alloc = self.memory_manager.allocate_string(&key_str);
+                                    let key_val = Value::String(key_alloc.index);
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.push(func_val);
+                                    roots.push(evaled_val);
+                                    roots.push(key_val);
+                                    for f in kept_properties.values() {
+                                        roots.push(f.value);
+                                    }
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let keep = self
+                                        .call_value_with_two_args(func_val, key_val, evaled_val);
+                                    self.memory_manager.pop_external_roots();
+                                    match keep? {
+                                        Value::Boolean(true) => {
+                                            kept_properties.insert(
+                                                k_idx,
+                                                memory_manager::ObjectField {
+                                                    value: evaled_val,
+                                                    super_obj: None,
+                                                    visibility: vis,
+                                                },
+                                            );
+                                        }
+                                        Value::Boolean(false) => {}
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.filterObject: func must return bool, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                                let alloc = self
+                                    .memory_manager
+                                    .allocate_object_with_properties(kept_properties);
+                                self.push(Value::Object(alloc.index))?;
+                                continue;
+                            }
+
+                            // Handle std.objectFlatten
+                            if id == chunk::NativeFuncId::ObjectFlatten {
+                                let obj_val = args[0];
+                                let sep_val = args[1];
+                                let sep = match sep_val {
+                                    Value::String(idx) => {
+                                        self.memory_manager.load_string(idx).to_string()
+                                    }
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "std.objectFlatten: sep must be string, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let mut flat_fields: Vec<(String, Value)> = Vec::new();
+                                self.flatten_object_recursive(
+                                    obj_val,
+                                    &sep,
+                                    String::new(),
+                                    &mut flat_fields,
+                                )?;
+                                let mut properties: std::collections::HashMap<
+                                    chunk::StringIndex,
+                                    memory_manager::ObjectField,
+                                > = std::collections::HashMap::new();
+                                for (k_str, v) in flat_fields {
+                                    let k_alloc = self.memory_manager.allocate_string(&k_str);
+                                    properties.insert(
+                                        k_alloc.index,
+                                        memory_manager::ObjectField {
+                                            value: v,
+                                            super_obj: None,
+                                            visibility: FieldVisibility::Visible,
+                                        },
+                                    );
+                                }
+                                let obj_alloc = self
+                                    .memory_manager
+                                    .allocate_object_with_properties(properties);
+                                self.push(Value::Object(obj_alloc.index))?;
+                                continue;
+                            }
+
                             // Call native function
                             let span = self.get_current_span();
                             let source_id = self.current_chunk().source_id.to_string();
@@ -5361,6 +6003,56 @@ impl VirtualMachine {
                 source_id: source_id.to_string(),
             }),
         }
+    }
+
+    fn flatten_object_recursive(
+        &mut self,
+        value: Value,
+        sep: &str,
+        prefix: String,
+        out: &mut Vec<(String, Value)>,
+    ) -> Result<(), RuntimeError> {
+        match value {
+            Value::Object(o_idx) => {
+                let fields: Vec<(chunk::StringIndex, Value)> = {
+                    let obj = self.memory_manager.load_object(o_idx);
+                    obj.properties
+                        .iter()
+                        .filter(|(_, f)| f.visibility != chunk::FieldVisibility::Hidden)
+                        .map(|(k, f)| (*k, f.value))
+                        .collect()
+                };
+                for (k_idx, raw_val) in &fields {
+                    let k_idx = *k_idx;
+                    let raw_val = *raw_val;
+                    let k_str = self.memory_manager.load_string(k_idx).to_string();
+                    let full_key = if prefix.is_empty() {
+                        k_str.clone()
+                    } else {
+                        format!("{}{}{}", prefix, sep, k_str)
+                    };
+                    let forced_v = match raw_val {
+                        Value::Closure(closure_idx) => {
+                            // Protect accumulated out values and remaining fields from GC
+                            let mut temp_vals: Vec<Value> = out.iter().map(|(_, v)| *v).collect();
+                            for (_, fv) in fields.iter() {
+                                temp_vals.push(*fv);
+                            }
+                            self.memory_manager.external_roots.push(temp_vals);
+                            let result = self.execute_thunk_sync(closure_idx, Some(o_idx), None)?;
+                            self.memory_manager.external_roots.pop();
+                            result
+                        }
+                        other => other,
+                    };
+                    self.flatten_object_recursive(forced_v, sep, full_key, out)?;
+                }
+            }
+            other => {
+                out.push((prefix, other));
+            }
+        }
+        Ok(())
     }
 
     fn merge_patch_value(&mut self, target: Value, patch: Value) -> Result<Value, RuntimeError> {
