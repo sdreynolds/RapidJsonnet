@@ -44,6 +44,11 @@ crate.spec(
 )
 
 crate.spec(
+    package = "sha3",
+    version = "0.10"
+)
+
+crate.spec(
     package = "serde_yaml",
     version = "0.9"
 )

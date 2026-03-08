@@ -81,6 +81,7 @@ rust_library(
         "@crates//:md5",
         "@crates//:sha2",
         "@crates//:sha1",
+        "@crates//:sha3",
     ],
     crate_features = [
         "stress_gc",

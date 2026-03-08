@@ -255,6 +255,38 @@ pub fn call_native(
                 source_id,
             }),
         },
+        NativeFuncId::Sha512 => match args[0] {
+            Value::String(idx) => {
+                let s = memory_manager.load_string(idx).to_string();
+                use sha2::Digest;
+                let mut hasher = sha2::Sha512::new();
+                hasher.update(s.as_bytes());
+                let hex = format!("{:x}", hasher.finalize());
+                let interned = memory_manager.allocate_string(&hex);
+                Ok(Value::String(interned.index))
+            }
+            _ => Err(RuntimeError {
+                span,
+                message: format!("std.sha512 expected string, got {}", args[0].type_name()),
+                source_id,
+            }),
+        },
+        NativeFuncId::Sha3 => match args[0] {
+            Value::String(idx) => {
+                let s = memory_manager.load_string(idx).to_string();
+                use sha3::Digest as Sha3Digest;
+                let mut hasher = sha3::Sha3_256::new();
+                hasher.update(s.as_bytes());
+                let hex = format!("{:x}", hasher.finalize());
+                let interned = memory_manager.allocate_string(&hex);
+                Ok(Value::String(interned.index))
+            }
+            _ => Err(RuntimeError {
+                span,
+                message: format!("std.sha3 expected string, got {}", args[0].type_name()),
+                source_id,
+            }),
+        },
         NativeFuncId::Map
         | NativeFuncId::Filter
         | NativeFuncId::Foldl

@@ -2098,6 +2098,128 @@ impl VirtualMachine {
                         continue;
                     }
 
+                    // Handle std.minArray / std.maxArray with optional keyF and onEmpty
+                    if matches!(
+                        func_id,
+                        chunk::NativeFuncId::MinArray | chunk::NativeFuncId::MaxArray
+                    ) && args.len() >= 2
+                    {
+                        let arr_val = args[0];
+                        let key_f = args.get(1).copied();
+                        let on_empty = args.get(2).copied();
+
+                        let arr_idx = match arr_val {
+                            Value::Array(a) => a,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "std.{} expected array, got {}",
+                                        func_id.name(),
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+
+                        let elements: Vec<Value> =
+                            self.memory_manager.load_array(arr_idx).elements.clone();
+
+                        if elements.is_empty() {
+                            match on_empty {
+                                Some(v) => {
+                                    self.push(v)?;
+                                    continue;
+                                }
+                                None => {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!("std.{}: empty array", func_id.name()),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            }
+                        }
+
+                        // Check if keyF is null or absent
+                        let effective_key_f = match key_f {
+                            None | Some(Value::Null) => None,
+                            Some(v) => Some(v),
+                        };
+
+                        if let Some(key_f_val) = effective_key_f {
+                            // keyF provided — apply it to each element, compare keys
+                            let mut best_elem = elements[0];
+                            let mut best_key = {
+                                let mut roots = Vec::from(self.stack.clone());
+                                roots.extend_from_slice(&elements);
+                                roots.push(key_f_val);
+                                let mut open_upvalue_roots = Vec::new();
+                                let mut upvalue = self.open_upvalues;
+                                while let Some(uv_idx) = upvalue {
+                                    open_upvalue_roots.push(uv_idx);
+                                    upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                }
+                                self.memory_manager
+                                    .push_external_roots(roots, open_upvalue_roots);
+                                let k = self.call_value_with_one_arg(key_f_val, elements[0]);
+                                self.memory_manager.pop_external_roots();
+                                k?
+                            };
+
+                            for &elem in elements.iter().skip(1) {
+                                let key = {
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&elements);
+                                    roots.push(key_f_val);
+                                    roots.push(best_elem);
+                                    roots.push(best_key);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let k = self.call_value_with_one_arg(key_f_val, elem);
+                                    self.memory_manager.pop_external_roots();
+                                    k?
+                                };
+                                let ord =
+                                    native::compare_values(key, best_key, &self.memory_manager);
+                                let take = if func_id == chunk::NativeFuncId::MinArray {
+                                    ord == std::cmp::Ordering::Less
+                                } else {
+                                    ord == std::cmp::Ordering::Greater
+                                };
+                                if take {
+                                    best_key = key;
+                                    best_elem = elem;
+                                }
+                            }
+                            self.push(best_elem)?;
+                            continue;
+                        } else {
+                            // No keyF — compare elements directly
+                            let mut best = elements[0];
+                            for &elem in elements.iter().skip(1) {
+                                let ord = native::compare_values(elem, best, &self.memory_manager);
+                                let take = if func_id == chunk::NativeFuncId::MinArray {
+                                    ord == std::cmp::Ordering::Less
+                                } else {
+                                    ord == std::cmp::Ordering::Greater
+                                };
+                                if take {
+                                    best = elem;
+                                }
+                            }
+                            self.push(best)?;
+                            continue;
+                        }
+                    }
+
                     // Handle std.uniq with keyF
                     if func_id == chunk::NativeFuncId::Uniq && args.len() == 2 {
                         let arr_val = args[0];
@@ -3571,6 +3693,137 @@ impl VirtualMachine {
                                 let idx = self.memory_manager.allocate_string(&result);
                                 self.push(Value::String(idx.index))?;
                                 continue;
+                            }
+
+                            // Handle std.minArray / std.maxArray with optional keyF and onEmpty
+                            if matches!(
+                                id,
+                                chunk::NativeFuncId::MinArray | chunk::NativeFuncId::MaxArray
+                            ) && args.len() >= 2
+                            {
+                                let arr_val = args[0];
+                                let key_f = args.get(1).copied();
+                                let on_empty = args.get(2).copied();
+
+                                let arr_idx = match arr_val {
+                                    Value::Array(a) => a,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "std.{} expected array, got {}",
+                                                id.name(),
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+
+                                let elements: Vec<Value> =
+                                    self.memory_manager.load_array(arr_idx).elements.clone();
+
+                                if elements.is_empty() {
+                                    match on_empty {
+                                        Some(v) => {
+                                            self.push(v)?;
+                                            continue;
+                                        }
+                                        None => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!("std.{}: empty array", id.name()),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+
+                                let effective_key_f = match key_f {
+                                    None | Some(Value::Null) => None,
+                                    Some(v) => Some(v),
+                                };
+
+                                if let Some(key_f_val) = effective_key_f {
+                                    let mut best_elem = elements[0];
+                                    let mut best_key = {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&elements);
+                                        roots.push(key_f_val);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let k =
+                                            self.call_value_with_one_arg(key_f_val, elements[0]);
+                                        self.memory_manager.pop_external_roots();
+                                        k?
+                                    };
+
+                                    for &elem in elements.iter().skip(1) {
+                                        let key = {
+                                            let mut roots = Vec::from(self.stack.clone());
+                                            roots.extend_from_slice(&elements);
+                                            roots.push(key_f_val);
+                                            roots.push(best_elem);
+                                            roots.push(best_key);
+                                            let mut open_upvalue_roots = Vec::new();
+                                            let mut upvalue = self.open_upvalues;
+                                            while let Some(uv_idx) = upvalue {
+                                                open_upvalue_roots.push(uv_idx);
+                                                upvalue =
+                                                    self.memory_manager.load_upvalue(uv_idx).next;
+                                            }
+                                            self.memory_manager
+                                                .push_external_roots(roots, open_upvalue_roots);
+                                            let k = self.call_value_with_one_arg(key_f_val, elem);
+                                            self.memory_manager.pop_external_roots();
+                                            k?
+                                        };
+                                        let ord = native::compare_values(
+                                            key,
+                                            best_key,
+                                            &self.memory_manager,
+                                        );
+                                        let take = if id == chunk::NativeFuncId::MinArray {
+                                            ord == std::cmp::Ordering::Less
+                                        } else {
+                                            ord == std::cmp::Ordering::Greater
+                                        };
+                                        if take {
+                                            best_key = key;
+                                            best_elem = elem;
+                                        }
+                                    }
+                                    self.push(best_elem)?;
+                                    continue;
+                                } else {
+                                    let mut best = elements[0];
+                                    for &elem in elements.iter().skip(1) {
+                                        let ord = native::compare_values(
+                                            elem,
+                                            best,
+                                            &self.memory_manager,
+                                        );
+                                        let take = if id == chunk::NativeFuncId::MinArray {
+                                            ord == std::cmp::Ordering::Less
+                                        } else {
+                                            ord == std::cmp::Ordering::Greater
+                                        };
+                                        if take {
+                                            best = elem;
+                                        }
+                                    }
+                                    self.push(best)?;
+                                    continue;
+                                }
                             }
 
                             // Call native function
