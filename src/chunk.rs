@@ -174,6 +174,12 @@ pub enum NativeFuncId {
     Lcm = 148,
     Indent = 149,
     ObjectFlatten = 150,
+    Chunk = 151,
+    Zip = 152,
+    Unzip = 153,
+    ObjectFromPairs = 154,
+    Pick = 155,
+    Omit = 156,
 }
 
 impl NativeFuncId {
@@ -331,6 +337,12 @@ impl NativeFuncId {
             148 => Some(NativeFuncId::Lcm),
             149 => Some(NativeFuncId::Indent),
             150 => Some(NativeFuncId::ObjectFlatten),
+            151 => Some(NativeFuncId::Chunk),
+            152 => Some(NativeFuncId::Zip),
+            153 => Some(NativeFuncId::Unzip),
+            154 => Some(NativeFuncId::ObjectFromPairs),
+            155 => Some(NativeFuncId::Pick),
+            156 => Some(NativeFuncId::Omit),
             _ => None,
         }
     }
@@ -489,6 +501,12 @@ impl NativeFuncId {
             NativeFuncId::Lcm => 2,
             NativeFuncId::Indent => 2,
             NativeFuncId::ObjectFlatten => 2,
+            NativeFuncId::Chunk => 2,
+            NativeFuncId::Zip => 2,
+            NativeFuncId::Unzip => 1,
+            NativeFuncId::ObjectFromPairs => 1,
+            NativeFuncId::Pick => 2,
+            NativeFuncId::Omit => 2,
         }
     }
 
@@ -646,6 +664,12 @@ impl NativeFuncId {
             NativeFuncId::Lcm => "lcm",
             NativeFuncId::Indent => "indent",
             NativeFuncId::ObjectFlatten => "objectFlatten",
+            NativeFuncId::Chunk => "chunk",
+            NativeFuncId::Zip => "zip",
+            NativeFuncId::Unzip => "unzip",
+            NativeFuncId::ObjectFromPairs => "objectFromPairs",
+            NativeFuncId::Pick => "pick",
+            NativeFuncId::Omit => "omit",
         }
     }
 
@@ -804,6 +828,12 @@ impl NativeFuncId {
             "lcm" => Some(NativeFuncId::Lcm),
             "indent" => Some(NativeFuncId::Indent),
             "objectFlatten" => Some(NativeFuncId::ObjectFlatten),
+            "chunk" => Some(NativeFuncId::Chunk),
+            "zip" => Some(NativeFuncId::Zip),
+            "unzip" => Some(NativeFuncId::Unzip),
+            "objectFromPairs" => Some(NativeFuncId::ObjectFromPairs),
+            "pick" => Some(NativeFuncId::Pick),
+            "omit" => Some(NativeFuncId::Omit),
             _ => None,
         }
     }

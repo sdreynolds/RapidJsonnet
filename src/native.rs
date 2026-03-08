@@ -573,6 +573,14 @@ pub fn call_native(
                 source_id,
             }),
         },
+        NativeFuncId::Chunk => std_chunk(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Zip => std_zip(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Unzip => std_unzip(args[0], memory_manager, span, source_id),
+        NativeFuncId::ObjectFromPairs => {
+            std_object_from_pairs(args[0], memory_manager, span, source_id)
+        }
+        NativeFuncId::Pick => std_pick(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Omit => std_omit(args[0], args[1], memory_manager, span, source_id),
     }
 }
 
@@ -4331,4 +4339,351 @@ fn frexp(x: f64) -> (f64, i32) {
     let exp = exp_bits - 1022;
     let mantissa = f64::from_bits((bits & !(0x7ffu64 << 52)) | (1022u64 << 52));
     (mantissa, exp)
+}
+
+// ─── std.chunk ────────────────────────────────────────────────────────────────
+
+/// std.chunk(arr, size): Split arr into consecutive sub-arrays of length size
+/// (the last chunk may be shorter if the array length is not a multiple of size).
+fn std_chunk(
+    arr_val: Value,
+    size_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.chunk: first argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+    let size = match size_val {
+        Value::Number(n) if n >= 1.0 && n.fract() == 0.0 => n as usize,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.chunk: second argument must be a positive integer".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements = memory_manager.load_array(arr_idx).elements.clone();
+    let mut chunks: Vec<Value> = Vec::new();
+    for window in elements.chunks(size) {
+        let sub = memory_manager.allocate_array(window.to_vec());
+        chunks.push(Value::Array(sub.index));
+    }
+    let alloc = memory_manager.allocate_array(chunks);
+    Ok(Value::Array(alloc.index))
+}
+
+// ─── std.zip ──────────────────────────────────────────────────────────────────
+
+/// std.zip(arr1, arr2): Pair up elements from two arrays into an array of 2-element arrays,
+/// truncating to the length of the shorter array.
+fn std_zip(
+    arr1_val: Value,
+    arr2_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let a_idx = match arr1_val {
+        Value::Array(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.zip: first argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+    let b_idx = match arr2_val {
+        Value::Array(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.zip: second argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+    let a_elems = memory_manager.load_array(a_idx).elements.clone();
+    let b_elems = memory_manager.load_array(b_idx).elements.clone();
+    let len = a_elems.len().min(b_elems.len());
+    let mut result: Vec<Value> = Vec::with_capacity(len);
+    for i in 0..len {
+        let pair = memory_manager.allocate_array(vec![a_elems[i], b_elems[i]]);
+        result.push(Value::Array(pair.index));
+    }
+    let alloc = memory_manager.allocate_array(result);
+    Ok(Value::Array(alloc.index))
+}
+
+// ─── std.unzip ────────────────────────────────────────────────────────────────
+
+/// std.unzip(arr): Convert an array of 2-element arrays into a pair of arrays
+/// [firsts, seconds].
+fn std_unzip(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.unzip: argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements = memory_manager.load_array(arr_idx).elements.clone();
+    let mut firsts: Vec<Value> = Vec::with_capacity(elements.len());
+    let mut seconds: Vec<Value> = Vec::with_capacity(elements.len());
+    for &elem in &elements {
+        match elem {
+            Value::Array(pair_idx) => {
+                let pair = memory_manager.load_array(pair_idx).elements.clone();
+                if pair.len() != 2 {
+                    return Err(RuntimeError {
+                        span,
+                        message: format!(
+                            "std.unzip: each element must be a 2-element array, got length {}",
+                            pair.len()
+                        ),
+                        source_id,
+                    });
+                }
+                firsts.push(pair[0]);
+                seconds.push(pair[1]);
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.unzip: each element must be an array".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    let a1 = memory_manager.allocate_array(firsts);
+    let a2 = memory_manager.allocate_array(seconds);
+    let result =
+        memory_manager.allocate_array(vec![Value::Array(a1.index), Value::Array(a2.index)]);
+    Ok(Value::Array(result.index))
+}
+
+// ─── std.objectFromPairs ──────────────────────────────────────────────────────
+
+/// std.objectFromPairs(arr): Convert an array of [key, value] pairs into an object.
+fn std_object_from_pairs(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.objectFromPairs: argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+    let elements = memory_manager.load_array(arr_idx).elements.clone();
+    // Collect (key_string, value) pairs — two-phase borrow
+    let mut pairs: Vec<(String, Value)> = Vec::with_capacity(elements.len());
+    for &elem in &elements {
+        match elem {
+            Value::Array(pair_idx) => {
+                let pair = memory_manager.load_array(pair_idx).elements.clone();
+                if pair.len() != 2 {
+                    return Err(RuntimeError {
+                        span,
+                        message: format!(
+                            "std.objectFromPairs: each element must be a 2-element array, got length {}",
+                            pair.len()
+                        ),
+                        source_id,
+                    });
+                }
+                let key = match pair[0] {
+                    Value::String(si) => memory_manager.load_string(si).to_string(),
+                    _ => {
+                        return Err(RuntimeError {
+                            span,
+                            message: "std.objectFromPairs: keys must be strings".to_string(),
+                            source_id,
+                        });
+                    }
+                };
+                pairs.push((key, pair[1]));
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.objectFromPairs: elements must be 2-element arrays".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    let mut properties = std::collections::HashMap::new();
+    for (key, val) in pairs {
+        let key_idx = memory_manager.allocate_string(&key).index;
+        properties.insert(
+            key_idx,
+            ObjectField {
+                value: val,
+                super_obj: None,
+                visibility: FieldVisibility::Visible,
+            },
+        );
+    }
+    let obj_alloc = memory_manager.allocate_object_with_properties(properties);
+    Ok(Value::Object(obj_alloc.index))
+}
+
+// ─── std.pick ─────────────────────────────────────────────────────────────────
+
+/// std.pick(obj, keys): Return a new object containing only the fields whose names
+/// appear in the array keys (missing keys are silently ignored).
+fn std_pick(
+    obj_val: Value,
+    keys_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let obj_idx = match obj_val {
+        Value::Object(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.pick: first argument must be an object".to_string(),
+                source_id,
+            });
+        }
+    };
+    let keys_idx = match keys_val {
+        Value::Array(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.pick: second argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+    // Collect desired key names
+    let key_elems = memory_manager.load_array(keys_idx).elements.clone();
+    let mut desired: HashSet<String> = HashSet::new();
+    for &k in &key_elems {
+        match k {
+            Value::String(si) => {
+                desired.insert(memory_manager.load_string(si).to_string());
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.pick: keys must be strings".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    // Collect visible fields from the object
+    let all_pairs: Vec<(StringIndex, ObjectField)> = memory_manager
+        .load_object(obj_idx)
+        .properties
+        .iter()
+        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
+    let mut new_properties = std::collections::HashMap::new();
+    for (key_idx, field) in all_pairs {
+        let key_name = memory_manager.load_string(key_idx).to_string();
+        if desired.contains(&key_name) {
+            new_properties.insert(key_idx, field);
+        }
+    }
+    let obj_alloc = memory_manager.allocate_object_with_properties(new_properties);
+    Ok(Value::Object(obj_alloc.index))
+}
+
+// ─── std.omit ─────────────────────────────────────────────────────────────────
+
+/// std.omit(obj, keys): Return a new object with all fields except those whose names
+/// appear in the array keys.
+fn std_omit(
+    obj_val: Value,
+    keys_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let obj_idx = match obj_val {
+        Value::Object(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.omit: first argument must be an object".to_string(),
+                source_id,
+            });
+        }
+    };
+    let keys_idx = match keys_val {
+        Value::Array(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.omit: second argument must be an array".to_string(),
+                source_id,
+            });
+        }
+    };
+    // Collect excluded key names
+    let key_elems = memory_manager.load_array(keys_idx).elements.clone();
+    let mut excluded: HashSet<String> = HashSet::new();
+    for &k in &key_elems {
+        match k {
+            Value::String(si) => {
+                excluded.insert(memory_manager.load_string(si).to_string());
+            }
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.omit: keys must be strings".to_string(),
+                    source_id,
+                });
+            }
+        }
+    }
+    // Collect visible fields from the object that are not in the excluded set
+    let all_pairs: Vec<(StringIndex, ObjectField)> = memory_manager
+        .load_object(obj_idx)
+        .properties
+        .iter()
+        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
+    let mut new_properties = std::collections::HashMap::new();
+    for (key_idx, field) in all_pairs {
+        let key_name = memory_manager.load_string(key_idx).to_string();
+        if !excluded.contains(&key_name) {
+            new_properties.insert(key_idx, field);
+        }
+    }
+    let obj_alloc = memory_manager.allocate_object_with_properties(new_properties);
+    Ok(Value::Object(obj_alloc.index))
 }
