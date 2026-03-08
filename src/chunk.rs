@@ -158,6 +158,12 @@ pub enum NativeFuncId {
     Exponent = 132,
     Md5 = 133,
     ManifestYamlDoc = 134,
+    ManifestYamlStream = 135,
+    ManifestTomlEx = 136,
+    Sha256 = 137,
+    Sha1 = 138,
+    ParseYaml = 139,
+    ManifestXmlJsonml = 140,
 }
 
 impl NativeFuncId {
@@ -299,6 +305,12 @@ impl NativeFuncId {
             132 => Some(NativeFuncId::Exponent),
             133 => Some(NativeFuncId::Md5),
             134 => Some(NativeFuncId::ManifestYamlDoc),
+            135 => Some(NativeFuncId::ManifestYamlStream),
+            136 => Some(NativeFuncId::ManifestTomlEx),
+            137 => Some(NativeFuncId::Sha256),
+            138 => Some(NativeFuncId::Sha1),
+            139 => Some(NativeFuncId::ParseYaml),
+            140 => Some(NativeFuncId::ManifestXmlJsonml),
             _ => None,
         }
     }
@@ -441,6 +453,12 @@ impl NativeFuncId {
             NativeFuncId::Exponent => 1,
             NativeFuncId::Md5 => 1,
             NativeFuncId::ManifestYamlDoc => 3,
+            NativeFuncId::ManifestYamlStream => 4,
+            NativeFuncId::ManifestTomlEx => 2,
+            NativeFuncId::Sha256 => 1,
+            NativeFuncId::Sha1 => 1,
+            NativeFuncId::ParseYaml => 1,
+            NativeFuncId::ManifestXmlJsonml => 1,
         }
     }
 
@@ -582,6 +600,12 @@ impl NativeFuncId {
             NativeFuncId::Exponent => "exponent",
             NativeFuncId::Md5 => "md5",
             NativeFuncId::ManifestYamlDoc => "manifestYamlDoc",
+            NativeFuncId::ManifestYamlStream => "manifestYamlStream",
+            NativeFuncId::ManifestTomlEx => "manifestTomlEx",
+            NativeFuncId::Sha256 => "sha256",
+            NativeFuncId::Sha1 => "sha1",
+            NativeFuncId::ParseYaml => "parseYaml",
+            NativeFuncId::ManifestXmlJsonml => "manifestXmlJsonml",
         }
     }
 
@@ -724,6 +748,12 @@ impl NativeFuncId {
             "exponent" => Some(NativeFuncId::Exponent),
             "md5" => Some(NativeFuncId::Md5),
             "manifestYamlDoc" => Some(NativeFuncId::ManifestYamlDoc),
+            "manifestYamlStream" => Some(NativeFuncId::ManifestYamlStream),
+            "manifestTomlEx" => Some(NativeFuncId::ManifestTomlEx),
+            "sha256" => Some(NativeFuncId::Sha256),
+            "sha1" => Some(NativeFuncId::Sha1),
+            "parseYaml" => Some(NativeFuncId::ParseYaml),
+            "manifestXmlJsonml" => Some(NativeFuncId::ManifestXmlJsonml),
             _ => None,
         }
     }

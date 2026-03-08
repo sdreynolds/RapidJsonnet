@@ -63,6 +63,7 @@ rust_library(
         ":scanner",
         ":native",
         "@crates//:serde_json",
+        "@crates//:serde_yaml",
         "@crates//:slotmap"
     ],
     crate_features = [
@@ -78,6 +79,8 @@ rust_library(
         ":chunk",
         ":memory_manager",
         "@crates//:md5",
+        "@crates//:sha2",
+        "@crates//:sha1",
     ],
     crate_features = [
         "stress_gc",

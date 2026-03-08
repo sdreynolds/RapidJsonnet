@@ -9,6 +9,8 @@ use std::ops::Range;
 
 use native::{self, call_native};
 
+extern crate serde_yaml;
+
 /// Maximum number of nested function calls
 const MAX_FRAMES: usize = 256;
 
@@ -2945,6 +2947,116 @@ impl VirtualMachine {
                         continue;
                     }
 
+                    // Handle manifestYamlStream
+                    if func_id == chunk::NativeFuncId::ManifestYamlStream {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let value = args[0];
+                        let indent_array_in_object = match args[1] {
+                            Value::Boolean(b) => b,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message:
+                                        "manifestYamlStream: indent_array_in_object must be bool"
+                                            .to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+                        let c_document_end = match args[2] {
+                            Value::Boolean(b) => b,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: "manifestYamlStream: c_document_end must be bool"
+                                        .to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+                        let quote_keys = match args[3] {
+                            Value::Boolean(b) => b,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: "manifestYamlStream: quote_keys must be bool"
+                                        .to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+                        let result = self.manifest_yaml_stream(
+                            value,
+                            indent_array_in_object,
+                            c_document_end,
+                            quote_keys,
+                            span,
+                            source_id,
+                        )?;
+                        let idx = self.memory_manager.allocate_string(&result);
+                        self.push(Value::String(idx.index))?;
+                        continue;
+                    }
+
+                    // Handle parseYaml
+                    if func_id == chunk::NativeFuncId::ParseYaml {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let s = match args[0] {
+                            Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: "parseYaml: argument must be a string".to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+                        let yaml_val: serde_yaml::Value =
+                            serde_yaml::from_str(&s).map_err(|e| RuntimeError {
+                                span: span.clone(),
+                                message: format!("parseYaml: {}", e),
+                                source_id: source_id.clone(),
+                            })?;
+                        let result = self.serde_yaml_to_jsonnet_value(yaml_val, span, source_id)?;
+                        self.push(result)?;
+                        continue;
+                    }
+
+                    // Handle manifestXmlJsonml
+                    if func_id == chunk::NativeFuncId::ManifestXmlJsonml {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let value = args[0];
+                        let result = self.manifest_xml_jsonml(value, span, source_id)?;
+                        let idx = self.memory_manager.allocate_string(&result);
+                        self.push(Value::String(idx.index))?;
+                        continue;
+                    }
+
+                    // Handle manifestTomlEx
+                    if func_id == chunk::NativeFuncId::ManifestTomlEx {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let value = args[0];
+                        let indent = match args[1] {
+                            Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: "manifestTomlEx: indent must be a string".to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+                        let result =
+                            self.manifest_toml_ex(value, &indent.clone(), span, source_id)?;
+                        let idx = self.memory_manager.allocate_string(&result);
+                        self.push(Value::String(idx.index))?;
+                        continue;
+                    }
+
                     // Call native function
                     let span = self.get_current_span();
                     let source_id = self.current_chunk().source_id.to_string();
@@ -3340,6 +3452,122 @@ impl VirtualMachine {
                                     span,
                                     source_id,
                                 )?;
+                                let idx = self.memory_manager.allocate_string(&result);
+                                self.push(Value::String(idx.index))?;
+                                continue;
+                            }
+
+                            // Handle manifestYamlStream
+                            if id == chunk::NativeFuncId::ManifestYamlStream {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+                                let value = args[0];
+                                let indent_array_in_object = match args[1] {
+                                    Value::Boolean(b) => b,
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message: "manifestYamlStream: indent_array_in_object must be bool".to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let c_document_end = match args[2] {
+                                    Value::Boolean(b) => b,
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message:
+                                                "manifestYamlStream: c_document_end must be bool"
+                                                    .to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let quote_keys = match args[3] {
+                                    Value::Boolean(b) => b,
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message: "manifestYamlStream: quote_keys must be bool"
+                                                .to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let result = self.manifest_yaml_stream(
+                                    value,
+                                    indent_array_in_object,
+                                    c_document_end,
+                                    quote_keys,
+                                    span,
+                                    source_id,
+                                )?;
+                                let idx = self.memory_manager.allocate_string(&result);
+                                self.push(Value::String(idx.index))?;
+                                continue;
+                            }
+
+                            // Handle parseYaml
+                            if id == chunk::NativeFuncId::ParseYaml {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+                                let s = match args[0] {
+                                    Value::String(idx) => {
+                                        self.memory_manager.load_string(idx).to_string()
+                                    }
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message: "parseYaml: argument must be a string"
+                                                .to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let yaml_val: serde_yaml::Value = serde_yaml::from_str(&s)
+                                    .map_err(|e| RuntimeError {
+                                        span: span.clone(),
+                                        message: format!("parseYaml: {}", e),
+                                        source_id: source_id.clone(),
+                                    })?;
+                                let result =
+                                    self.serde_yaml_to_jsonnet_value(yaml_val, span, source_id)?;
+                                self.push(result)?;
+                                continue;
+                            }
+
+                            // Handle manifestXmlJsonml
+                            if id == chunk::NativeFuncId::ManifestXmlJsonml {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+                                let value = args[0];
+                                let result = self.manifest_xml_jsonml(value, span, source_id)?;
+                                let idx = self.memory_manager.allocate_string(&result);
+                                self.push(Value::String(idx.index))?;
+                                continue;
+                            }
+
+                            // Handle manifestTomlEx
+                            if id == chunk::NativeFuncId::ManifestTomlEx {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+                                let value = args[0];
+                                let indent = match args[1] {
+                                    Value::String(idx) => {
+                                        self.memory_manager.load_string(idx).to_string()
+                                    }
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message: "manifestTomlEx: indent must be a string"
+                                                .to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let result =
+                                    self.manifest_toml_ex(value, &indent.clone(), span, source_id)?;
                                 let idx = self.memory_manager.allocate_string(&result);
                                 self.push(Value::String(idx.index))?;
                                 continue;
@@ -4936,9 +5164,463 @@ impl VirtualMachine {
             }),
         }
     }
+
+    fn manifest_yaml_stream(
+        &mut self,
+        value: Value,
+        indent_array_in_object: bool,
+        c_document_end: bool,
+        quote_keys: bool,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        let forced = self.force_value(value)?;
+        let forced = match forced {
+            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            other => other,
+        };
+        let arr_idx = match forced {
+            Value::Array(idx) => idx,
+            other => {
+                return Err(RuntimeError {
+                    span,
+                    message: format!(
+                        "manifestYamlStream: expected array, got {}",
+                        other.type_name()
+                    ),
+                    source_id,
+                });
+            }
+        };
+
+        let elements = self.memory_manager.load_array(arr_idx).elements.clone();
+
+        if elements.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut parts: Vec<String> = Vec::new();
+        for elem in elements {
+            let doc = self.manifest_yaml_doc(
+                elem,
+                0,
+                indent_array_in_object,
+                quote_keys,
+                span.clone(),
+                source_id.clone(),
+            )?;
+            parts.push(format!("---\n{}", doc));
+        }
+
+        let mut result = parts.join("\n");
+        if c_document_end {
+            result.push_str("\n...");
+        }
+        Ok(result)
+    }
+
+    fn serde_yaml_to_jsonnet_value(
+        &mut self,
+        yaml: serde_yaml::Value,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<Value, RuntimeError> {
+        match yaml {
+            serde_yaml::Value::Null => Ok(Value::Null),
+            serde_yaml::Value::Bool(b) => Ok(Value::Boolean(b)),
+            serde_yaml::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Ok(Value::Number(i as f64))
+                } else if let Some(f) = n.as_f64() {
+                    Ok(Value::Number(f))
+                } else {
+                    Err(RuntimeError {
+                        span,
+                        message: "parseYaml: unsupported number".to_string(),
+                        source_id,
+                    })
+                }
+            }
+            serde_yaml::Value::String(s) => {
+                let alloc = self.memory_manager.allocate_string(&s);
+                Ok(Value::String(alloc.index))
+            }
+            serde_yaml::Value::Sequence(seq) => {
+                let mut elements = Vec::new();
+                for item in seq {
+                    let val =
+                        self.serde_yaml_to_jsonnet_value(item, span.clone(), source_id.clone())?;
+                    elements.push(val);
+                }
+                let alloc = self.memory_manager.allocate_array(elements);
+                Ok(Value::Array(alloc.index))
+            }
+            serde_yaml::Value::Mapping(map) => {
+                let mut props = std::collections::HashMap::new();
+                for (k, v) in map {
+                    let key = match k {
+                        serde_yaml::Value::String(s) => s,
+                        other => format!("{:?}", other),
+                    };
+                    let key_idx = self.memory_manager.allocate_string(&key).index;
+                    let val =
+                        self.serde_yaml_to_jsonnet_value(v, span.clone(), source_id.clone())?;
+                    props.insert(
+                        key_idx,
+                        ObjectField {
+                            value: val,
+                            super_obj: None,
+                            visibility: FieldVisibility::Visible,
+                        },
+                    );
+                }
+                let alloc = self.memory_manager.allocate_object_with_properties(props);
+                Ok(Value::Object(alloc.index))
+            }
+            serde_yaml::Value::Tagged(tagged) => {
+                self.serde_yaml_to_jsonnet_value(tagged.value, span, source_id)
+            }
+        }
+    }
+
+    fn manifest_xml_jsonml(
+        &mut self,
+        value: Value,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        let forced = self.force_value(value)?;
+        let forced = match forced {
+            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            other => other,
+        };
+        match forced {
+            Value::String(idx) => {
+                let s = self.memory_manager.load_string(idx).to_string();
+                Ok(xml_escape(&s))
+            }
+            Value::Array(arr_idx) => {
+                let elements = self.memory_manager.load_array(arr_idx).elements.clone();
+                if elements.is_empty() {
+                    return Err(RuntimeError {
+                        span,
+                        message:
+                            "manifestXmlJsonml: array must have at least one element (tag name)"
+                                .to_string(),
+                        source_id,
+                    });
+                }
+                // First element: tag name
+                let tag_val = self.force_value(elements[0])?;
+                let tag_val = match tag_val {
+                    Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                    other => other,
+                };
+                let tag = match tag_val {
+                    Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
+                    other => {
+                        return Err(RuntimeError {
+                            span,
+                            message: format!(
+                                "manifestXmlJsonml: first element must be string tag, got {}",
+                                other.type_name()
+                            ),
+                            source_id,
+                        });
+                    }
+                };
+
+                let mut attrs = String::new();
+                let mut child_start = 1;
+
+                // Check if second element is an attribute object
+                if elements.len() > 1 {
+                    let second_val = self.force_value(elements[1])?;
+                    let second_val = match second_val {
+                        Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                        other => other,
+                    };
+                    if let Value::Object(obj_idx) = second_val {
+                        child_start = 2;
+                        let fields: Vec<(String, Value)> = {
+                            let obj = self.memory_manager.load_object(obj_idx);
+                            let mut f: Vec<(String, Value)> = obj
+                                .properties
+                                .iter()
+                                .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+                                .map(|(k, field)| {
+                                    (self.memory_manager.load_string(*k).to_string(), field.value)
+                                })
+                                .collect();
+                            f.sort_by(|a, b| a.0.cmp(&b.0));
+                            f
+                        };
+                        for (k, v) in fields {
+                            let forced_v = self.force_value(v)?;
+                            let forced_v = match forced_v {
+                                Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                                other => other,
+                            };
+                            let vs = match forced_v {
+                                Value::String(idx) => {
+                                    self.memory_manager.load_string(idx).to_string()
+                                }
+                                Value::Number(n) => {
+                                    if n.fract() == 0.0 {
+                                        format!("{}", n as i64)
+                                    } else {
+                                        format!("{}", n)
+                                    }
+                                }
+                                Value::Boolean(b) => b.to_string(),
+                                other => {
+                                    return Err(RuntimeError {
+                                        span: span.clone(),
+                                        message: format!(
+                                            "manifestXmlJsonml: attribute value must be scalar, got {}",
+                                            other.type_name()
+                                        ),
+                                        source_id: source_id.clone(),
+                                    });
+                                }
+                            };
+                            attrs.push_str(&format!(" {}=\"{}\"", k, xml_escape(&vs)));
+                        }
+                    }
+                }
+
+                // Children
+                let mut children = String::new();
+                for child in elements[child_start..].iter().copied() {
+                    let child_str =
+                        self.manifest_xml_jsonml(child, span.clone(), source_id.clone())?;
+                    children.push_str(&child_str);
+                }
+
+                Ok(format!("<{}{}>{}</{}>", tag, attrs, children, tag))
+            }
+            other => Err(RuntimeError {
+                span,
+                message: format!(
+                    "manifestXmlJsonml: expected string or array, got {}",
+                    other.type_name()
+                ),
+                source_id,
+            }),
+        }
+    }
+
+    fn manifest_toml_ex(
+        &mut self,
+        value: Value,
+        indent: &str,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        let forced = self.force_value(value)?;
+        let forced = match forced {
+            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            other => other,
+        };
+        let obj_idx = match forced {
+            Value::Object(idx) => idx,
+            other => {
+                return Err(RuntimeError {
+                    span,
+                    message: format!("manifestTomlEx: expected object, got {}", other.type_name()),
+                    source_id,
+                });
+            }
+        };
+        let indent_owned = indent.to_string();
+        self.manifest_toml_table(obj_idx, &indent_owned, &[], span, source_id)
+    }
+
+    fn manifest_toml_table(
+        &mut self,
+        obj_idx: ObjectIndex,
+        indent: &str,
+        path: &[String],
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        let fields: Vec<(String, Value, Option<ObjectIndex>)> = {
+            let obj = self.memory_manager.load_object(obj_idx);
+            let mut f: Vec<(String, Value, Option<ObjectIndex>)> = obj
+                .properties
+                .iter()
+                .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+                .map(|(k, field)| {
+                    (
+                        self.memory_manager.load_string(*k).to_string(),
+                        field.value,
+                        field.super_obj,
+                    )
+                })
+                .collect();
+            f.sort_by(|a, b| a.0.cmp(&b.0));
+            f
+        };
+
+        let mut scalars = String::new();
+        let mut tables = String::new();
+        let mut array_tables = String::new();
+
+        for (key, val, super_obj) in fields {
+            let forced = match val {
+                Value::Closure(c) => self.execute_thunk_sync(c, Some(obj_idx), super_obj)?,
+                other => self.force_value(other)?,
+            };
+            let forced = match forced {
+                Value::Closure(c) => self.execute_thunk_sync(c, Some(obj_idx), super_obj)?,
+                other => other,
+            };
+            match forced {
+                Value::Object(sub_obj_idx) => {
+                    let mut sub_path = path.to_vec();
+                    sub_path.push(key.clone());
+                    let path_str = sub_path.join(".");
+                    let indent_owned = indent.to_string();
+                    let sub_content = self.manifest_toml_table(
+                        sub_obj_idx,
+                        &indent_owned,
+                        &sub_path,
+                        span.clone(),
+                        source_id.clone(),
+                    )?;
+                    tables.push_str(&format!("\n[{}]\n{}", path_str, sub_content));
+                }
+                Value::Array(arr_idx) => {
+                    let elems = self.memory_manager.load_array(arr_idx).elements.clone();
+                    let is_array_of_objects = if elems.is_empty() {
+                        false
+                    } else {
+                        let first_forced = self.force_value(elems[0])?;
+                        let first_forced = match first_forced {
+                            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                            other => other,
+                        };
+                        matches!(first_forced, Value::Object(_))
+                    };
+                    if is_array_of_objects {
+                        let mut sub_path = path.to_vec();
+                        sub_path.push(key.clone());
+                        let path_str = sub_path.join(".");
+                        for elem in &elems {
+                            let elem_forced = self.force_value(*elem)?;
+                            let elem_forced = match elem_forced {
+                                Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                                other => other,
+                            };
+                            let sub_obj_idx = match elem_forced {
+                                Value::Object(idx) => idx,
+                                other => {
+                                    return Err(RuntimeError {
+                                        span: span.clone(),
+                                        message: format!(
+                                            "manifestTomlEx: mixed arrays not supported, got {}",
+                                            other.type_name()
+                                        ),
+                                        source_id: source_id.clone(),
+                                    });
+                                }
+                            };
+                            let indent_owned = indent.to_string();
+                            let sub_content = self.manifest_toml_table(
+                                sub_obj_idx,
+                                &indent_owned,
+                                &sub_path,
+                                span.clone(),
+                                source_id.clone(),
+                            )?;
+                            array_tables.push_str(&format!("\n[[{}]]\n{}", path_str, sub_content));
+                        }
+                    } else {
+                        let inline = self.manifest_toml_inline_array(
+                            arr_idx,
+                            span.clone(),
+                            source_id.clone(),
+                        )?;
+                        scalars.push_str(&format!("{} = {}\n", key, inline));
+                    }
+                }
+                scalar => {
+                    let val_str =
+                        self.manifest_toml_scalar(scalar, span.clone(), source_id.clone())?;
+                    scalars.push_str(&format!("{} = {}\n", key, val_str));
+                }
+            }
+        }
+
+        Ok(format!("{}{}{}", scalars, tables, array_tables))
+    }
+
+    fn manifest_toml_scalar(
+        &mut self,
+        value: Value,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        match value {
+            Value::Null => Err(RuntimeError {
+                span,
+                message: "manifestTomlEx: null values are not supported in TOML".to_string(),
+                source_id,
+            }),
+            Value::Boolean(b) => Ok(b.to_string()),
+            Value::Number(n) => {
+                if n.fract() == 0.0 && n.abs() < 1e15 {
+                    Ok(format!("{}", n as i64))
+                } else {
+                    Ok(format!("{}", n))
+                }
+            }
+            Value::String(idx) => {
+                let s = self.memory_manager.load_string(idx).to_string();
+                let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+                Ok(format!("\"{}\"", escaped))
+            }
+            other => Err(RuntimeError {
+                span,
+                message: format!(
+                    "manifestTomlEx: unexpected value type {}",
+                    other.type_name()
+                ),
+                source_id,
+            }),
+        }
+    }
+
+    fn manifest_toml_inline_array(
+        &mut self,
+        arr_idx: chunk::ArrayIndex,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        let elems = self.memory_manager.load_array(arr_idx).elements.clone();
+        let mut parts = Vec::new();
+        for elem in elems {
+            let forced = self.force_value(elem)?;
+            let forced = match forced {
+                Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                other => other,
+            };
+            let s = self.manifest_toml_scalar(forced, span.clone(), source_id.clone())?;
+            parts.push(s);
+        }
+        Ok(format!("[{}]", parts.join(", ")))
+    }
 }
 
 /// Returns true if a YAML string value needs to be quoted
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 fn yaml_needs_quoting(s: &str) -> bool {
     if s.is_empty() {
         return true;

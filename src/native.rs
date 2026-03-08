@@ -214,11 +214,47 @@ pub fn call_native(
         | NativeFuncId::ManifestIni
         | NativeFuncId::ManifestPython
         | NativeFuncId::ManifestPythonVars
-        | NativeFuncId::ManifestYamlDoc => Err(RuntimeError {
+        | NativeFuncId::ManifestYamlDoc
+        | NativeFuncId::ManifestYamlStream
+        | NativeFuncId::ManifestTomlEx
+        | NativeFuncId::ParseYaml
+        | NativeFuncId::ManifestXmlJsonml => Err(RuntimeError {
             span,
             message: format!("std.{} must be handled by the VM", id.name()),
             source_id,
         }),
+        NativeFuncId::Sha256 => match args[0] {
+            Value::String(idx) => {
+                let s = memory_manager.load_string(idx).to_string();
+                use sha2::Digest;
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(s.as_bytes());
+                let hex = format!("{:x}", hasher.finalize());
+                let interned = memory_manager.allocate_string(&hex);
+                Ok(Value::String(interned.index))
+            }
+            _ => Err(RuntimeError {
+                span,
+                message: format!("std.sha256 expected string, got {}", args[0].type_name()),
+                source_id,
+            }),
+        },
+        NativeFuncId::Sha1 => match args[0] {
+            Value::String(idx) => {
+                let s = memory_manager.load_string(idx).to_string();
+                use sha1::Digest;
+                let mut hasher = sha1::Sha1::new();
+                hasher.update(s.as_bytes());
+                let hex = format!("{:x}", hasher.finalize());
+                let interned = memory_manager.allocate_string(&hex);
+                Ok(Value::String(interned.index))
+            }
+            _ => Err(RuntimeError {
+                span,
+                message: format!("std.sha1 expected string, got {}", args[0].type_name()),
+                source_id,
+            }),
+        },
         NativeFuncId::Map
         | NativeFuncId::Filter
         | NativeFuncId::Foldl
