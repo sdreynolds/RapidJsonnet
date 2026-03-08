@@ -1,1 +1,1 @@
-!"hello"
+assert (!"hello") == false; false

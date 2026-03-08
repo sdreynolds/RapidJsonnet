@@ -1,2 +1,2 @@
 // This should use StringConcat optimization
-"Hello" + " " + "World"
+assert ("Hello" + " " + "World") == "Hello World"; "Hello World"

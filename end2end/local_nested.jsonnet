@@ -1,3 +1,3 @@
-local x = 1;
+assert (local x = 1;
 local y = x + 1;
-y
+y) == 2.0; 2.0

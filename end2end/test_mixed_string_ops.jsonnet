@@ -1,1 +1,1 @@
-("hello" + "world") == "helloworld"
+assert (("hello" + "world") == "helloworld"); true

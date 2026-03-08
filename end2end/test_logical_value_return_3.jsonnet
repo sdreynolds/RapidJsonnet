@@ -1,1 +1,1 @@
-null || "hi"
+assert (null || "hi") == "hi"; "hi"

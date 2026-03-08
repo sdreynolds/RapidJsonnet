@@ -1,1 +1,1 @@
-0 && 7
+assert (0 && 7) == false; false

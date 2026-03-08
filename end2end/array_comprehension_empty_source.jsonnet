@@ -1,1 +1,1 @@
-[x for x in []]
+assert ([x for x in []]) == []; []

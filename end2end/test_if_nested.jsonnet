@@ -1,1 +1,1 @@
-if true then (if false then 1 else 2) else 3
+assert (if true then (if false then 1 else 2) else 3) == 2.0; 2.0

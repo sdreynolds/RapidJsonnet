@@ -1,1 +1,1 @@
-"true" == true
+assert ("true" == true) == false; false

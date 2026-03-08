@@ -1,1 +1,1 @@
-42 || false
+assert (42 || false); true

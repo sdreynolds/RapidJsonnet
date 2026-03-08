@@ -1,1 +1,1 @@
-{a: true}.a
+assert ({a: true}.a); true

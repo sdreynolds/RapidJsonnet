@@ -1,3 +1,4 @@
+assert (
 std.format("Hello %s", "world") == "Hello world" &&
 std.format("%d + %d = %d", [1, 2, 3]) == "1 + 2 = 3" &&
 std.format("%05d", 42) == "00042" &&
@@ -15,3 +16,4 @@ std.format("%e", 314.159) == "3.141590e+02" &&
 // %g switching between f and e
 std.format("%g", 0.00001) == "1e-05" &&
 std.format("%g", 100000.0) == "100000"
+); true

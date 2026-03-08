@@ -1,3 +1,4 @@
+assert (
 std.min(1, 2) == 1 &&
 std.min(2, 1) == 1 &&
 std.min(-5, 3) == -5 &&
@@ -11,3 +12,4 @@ std.sign(-5) == -1 &&
 std.sign(0) == 0 &&
 std.sign(3.14) == 1 &&
 std.sign(-3.14) == -1
+); true

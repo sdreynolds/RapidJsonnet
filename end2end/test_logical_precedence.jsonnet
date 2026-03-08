@@ -1,1 +1,1 @@
-true || false && false
+assert (true || false && false); true

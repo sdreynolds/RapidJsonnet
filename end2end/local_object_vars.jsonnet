@@ -1,4 +1,4 @@
-local y = "this is great";
+assert (local y = "this is great";
 local x = {
   awesome: true,
   nestedObj: {
@@ -6,4 +6,4 @@ local x = {
     someString: y,
   }
 };
-x
+x) == {"awesome":true,"nestedObj":{"anotherNest":45.0,"someString":"this is great"}}; {"awesome":true,"nestedObj":{"anotherNest":45.0,"someString":"this is great"}}

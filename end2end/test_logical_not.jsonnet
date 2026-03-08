@@ -1,1 +1,1 @@
-!true
+assert (!true) == false; false

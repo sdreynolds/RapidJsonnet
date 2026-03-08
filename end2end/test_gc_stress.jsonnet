@@ -1,2 +1,2 @@
-// Create many strings to trigger GC
-"a" + "b" + "c" + "d" + "e" + "f" + "g" + "h" + "i" + "j" + "k" + "l"
+assert (// Create many strings to trigger GC
+"a" + "b" + "c" + "d" + "e" + "f" + "g" + "h" + "i" + "j" + "k" + "l") == "abcdefghijkl"; "abcdefghijkl"

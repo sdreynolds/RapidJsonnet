@@ -1,4 +1,4 @@
-std.isArray([]) == true &&
+assert (std.isArray([]) == true &&
 std.isArray([1, 2, 3]) == true &&
 std.isArray({}) == false &&
 std.isArray(null) == false &&
@@ -23,4 +23,4 @@ std.isNull(false) == false &&
 std.isNull(0) == false &&
 std.isNull("") == false &&
 std.isFunction(function(x) x) == true &&
-std.isFunction(42) == false
+std.isFunction(42) == false); true

@@ -1,1 +1,1 @@
-if false then 42
+assert (if false then 42) == null; null

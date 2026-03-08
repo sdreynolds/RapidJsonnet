@@ -1,1 +1,1 @@
-"Unicode: \u0048\u0065\u006C\u006C\u006F"
+assert ("Unicode: \u0048\u0065\u006C\u006C\u006F") == "Unicode: Hello"; "Unicode: Hello"

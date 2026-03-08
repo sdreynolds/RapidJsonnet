@@ -1,1 +1,1 @@
-("hello" == "hello") && ("world" != "hello") && ("42" != 42) && (true != false)
+assert (("hello" == "hello") && ("world" != "hello") && ("42" != 42) && (true != false)); true

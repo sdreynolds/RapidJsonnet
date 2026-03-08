@@ -1,1 +1,1 @@
-"42" == 42
+assert ("42" == 42) == false; false

@@ -1,1 +1,1 @@
-"hello" == @"hello"
+assert ("hello" == @"hello"); true

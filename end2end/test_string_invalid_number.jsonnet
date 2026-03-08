@@ -1,1 +1,1 @@
-"hello" + 5
+assert ("hello" + 5) == "hello5"; "hello5"

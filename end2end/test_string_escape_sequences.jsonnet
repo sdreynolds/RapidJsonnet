@@ -1,1 +1,1 @@
-"Line1\nLine2\tTabbed\rReturn\"Quote\'Apostrophe\\Backslash\/Slash\bBackspace\fFormfeed"
+assert ("Line1\nLine2\tTabbed\rReturn\"Quote\'Apostrophe\\Backslash\/Slash\bBackspace\fFormfeed") == "Line1\nLine2\tTabbed\rReturn\"Quote'Apostrophe\\Backslash/Slash\bBackspace\fFormfeed"; "Line1\nLine2\tTabbed\rReturn\"Quote'Apostrophe\\Backslash/Slash\bBackspace\fFormfeed"

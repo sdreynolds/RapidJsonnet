@@ -1,1 +1,1 @@
-true || (1/0 > 0)
+assert (true || (1/0 > 0)); true

@@ -1011,7 +1011,7 @@ impl VirtualMachine {
                 Opcode::Eq => {
                     let b = self.pop_forced()?;
                     let a = self.pop_forced()?;
-                    let result = self.values_equal(&a, &b);
+                    let result = self.values_equal(&a, &b)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -1019,7 +1019,7 @@ impl VirtualMachine {
                 Opcode::Ne => {
                     let b = self.pop_forced()?;
                     let a = self.pop_forced()?;
-                    let result = !self.values_equal(&a, &b);
+                    let result = !self.values_equal(&a, &b)?;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -3249,58 +3249,130 @@ impl VirtualMachine {
         }
     }
 
-    /// Compare two values for equality according to Jsonnet semantics
-    fn values_equal(&self, a: &Value, b: &Value) -> bool {
-        match (a, b) {
-            // Same type comparisons
-            (Value::Null, Value::Null) => true,
-            (Value::Boolean(a), Value::Boolean(b)) => a == b,
-            (Value::Number(a), Value::Number(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b, // compares only the keys and so can be quick
+    /// Check if two values are equal according to Jsonnet semantics.
+    /// Note: this only performs a structural comparison, it does not
+    /// compare object identity for anything except functions and closures.
+    pub fn values_equal(&mut self, a: &Value, b: &Value) -> Result<bool, RuntimeError> {
+        // Protect values from GC during comparison
+        self.memory_manager
+            .external_roots
+            .push(vec![a.clone(), b.clone()]);
+
+        let result = (|| match (a, b) {
+            (Value::Null, Value::Null) => Ok(true),
+            (Value::Boolean(a), Value::Boolean(b)) => Ok(a == b),
+            (Value::Number(a), Value::Number(b)) => Ok(a == b),
+            (Value::String(a), Value::String(b)) => Ok(a == b),
             (Value::Array(a_idx), Value::Array(b_idx)) => {
                 if a_idx == b_idx {
-                    return true;
+                    return Ok(true);
                 }
-                let a_arr = self.memory_manager.load_array(*a_idx);
-                let b_arr = self.memory_manager.load_array(*b_idx);
-                if a_arr.elements.len() != b_arr.elements.len() {
-                    return false;
-                }
-                for (v_a, v_b) in a_arr.elements.iter().zip(b_arr.elements.iter()) {
-                    if !self.values_equal(v_a, v_b) {
-                        return false;
+                let a_elements = self.memory_manager.load_array(*a_idx).elements.clone();
+                let b_elements = self.memory_manager.load_array(*b_idx).elements.clone();
+
+                self.memory_manager.external_roots.push(a_elements.clone());
+                self.memory_manager.external_roots.push(b_elements.clone());
+
+                let res = (|| {
+                    if a_elements.len() != b_elements.len() {
+                        return Ok(false);
                     }
-                }
-                true
+                    for (v_a, v_b) in a_elements.iter().zip(b_elements.iter()) {
+                        if !self.values_equal(v_a, v_b)? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                })();
+
+                self.memory_manager.external_roots.pop();
+                self.memory_manager.external_roots.pop();
+                res
             }
             (Value::Object(a_idx), Value::Object(b_idx)) => {
                 if a_idx == b_idx {
-                    return true;
+                    return Ok(true);
                 }
-                let a_obj = self.memory_manager.load_object(*a_idx);
-                let b_obj = self.memory_manager.load_object(*b_idx);
-                if a_obj.properties.len() != b_obj.properties.len() {
-                    return false;
-                }
-                for (name, field_a) in a_obj.properties.iter() {
-                    match b_obj.properties.get(name) {
-                        Some(field_b) => {
-                            if !self.values_equal(&field_a.value, &field_b.value) {
-                                return false;
-                            }
-                        }
-                        None => return false,
-                    }
-                }
-                true
-            }
-            (Value::Function(a), Value::Function(b)) => a == b, // compare function indices
-            (Value::Closure(a), Value::Closure(b)) => a == b,   // compare closure indices
-            (Value::Binary(a), Value::Binary(b)) => a == b, // compare binary object keys (identity)
 
-            // Different types are never equal
-            _ => false,
+                let a_fields = self.get_visible_fields(*a_idx)?;
+                let a_vals: Vec<Value> = a_fields.values().cloned().collect();
+                self.memory_manager.external_roots.push(a_vals);
+
+                let b_fields_result = self.get_visible_fields(*b_idx);
+                if b_fields_result.is_err() {
+                    self.memory_manager.external_roots.pop();
+                    return b_fields_result.map(|_| unreachable!());
+                }
+                let b_fields = b_fields_result.unwrap();
+
+                let b_vals: Vec<Value> = b_fields.values().cloned().collect();
+                self.memory_manager.external_roots.push(b_vals);
+
+                let res = (|| {
+                    if a_fields.len() != b_fields.len() {
+                        return Ok(false);
+                    }
+
+                    for (name, val_a) in a_fields {
+                        match b_fields.get(&name) {
+                            Some(val_b) => {
+                                if !self.values_equal(&val_a, val_b)? {
+                                    return Ok(false);
+                                }
+                            }
+                            None => return Ok(false),
+                        }
+                    }
+                    Ok(true)
+                })();
+
+                self.memory_manager.external_roots.pop();
+                self.memory_manager.external_roots.pop();
+                res
+            }
+            (Value::Function(a), Value::Function(b)) => Ok(a == b),
+            (Value::Closure(a), Value::Closure(b)) => Ok(a == b),
+            (Value::Binary(a), Value::Binary(b)) => Ok(a == b),
+            _ => Ok(false),
+        })();
+
+        self.memory_manager.external_roots.pop();
+        result
+    }
+
+    /// Helper to get all visible fields of an object with their evaluated values.
+    fn get_visible_fields(
+        &mut self,
+        obj_idx: ObjectIndex,
+    ) -> Result<std::collections::HashMap<StringIndex, Value>, RuntimeError> {
+        let obj = self.memory_manager.load_object(obj_idx);
+        let mut visible_fields = std::collections::HashMap::new();
+
+        let properties: Vec<(StringIndex, ObjectField)> = obj
+            .properties
+            .iter()
+            .map(|(&k, f)| (k, f.clone()))
+            .collect();
+
+        for (name, field) in properties {
+            if field.visibility != FieldVisibility::Hidden {
+                let current_vals: Vec<Value> = visible_fields.values().cloned().collect();
+                self.memory_manager.external_roots.push(current_vals);
+
+                let val_res = match field.value {
+                    Value::Closure(closure_idx) => {
+                        self.execute_thunk_sync(closure_idx, Some(obj_idx), None)
+                    }
+                    other => Ok(other),
+                };
+
+                self.memory_manager.external_roots.pop();
+
+                let val = val_res?;
+                visible_fields.insert(name, val);
+            }
         }
+        Ok(visible_fields)
     }
 
     /// Convert a VM Value to serde_json::Value for JSON output

@@ -1,1 +1,1 @@
-"null" == null
+assert ("null" == null) == false; false

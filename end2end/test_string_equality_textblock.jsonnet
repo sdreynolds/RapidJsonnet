@@ -1,4 +1,5 @@
-"hello world" == 
+assert ("hello world" == 
 |||
     hello world
 |||
+); true

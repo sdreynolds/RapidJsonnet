@@ -1,1 +1,1 @@
-false && (1/0 > 0)
+assert (false && (1/0 > 0)) == false; false

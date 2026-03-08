@@ -1,3 +1,3 @@
-std.base64Decode("aGVsbG8=") == "hello" &&
+assert (std.base64Decode("aGVsbG8=") == "hello" &&
 std.base64Decode("TWFu") == "Man" &&
-std.base64Decode("") == ""
+std.base64Decode("") == ""); true

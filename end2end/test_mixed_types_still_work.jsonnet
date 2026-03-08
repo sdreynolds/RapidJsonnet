@@ -1,1 +1,1 @@
-"Number: " + 42
+assert ("Number: " + 42) == "Number: 42"; "Number: 42"
