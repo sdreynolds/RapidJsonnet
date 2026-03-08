@@ -122,7 +122,6 @@ pub fn call_native(
         NativeFuncId::EncodeUTF8 => std_encode_utf8(args[0], memory_manager, span, source_id),
         NativeFuncId::DecodeUTF8 => std_decode_utf8(args[0], memory_manager, span, source_id),
         NativeFuncId::Sort => std_sort(args[0], memory_manager, span, source_id),
-        NativeFuncId::Uniq => std_uniq(args[0], memory_manager, span, source_id),
         NativeFuncId::SplitLimitR => {
             std_split_limit_r(args[0], args[1], args[2], memory_manager, span, source_id)
         }
@@ -201,13 +200,17 @@ pub fn call_native(
         NativeFuncId::Base64Decode => {
             std_base64_decode_string(args[0], memory_manager, span, source_id)
         }
-        NativeFuncId::Prune => std_prune(args[0], memory_manager, span, source_id),
         NativeFuncId::MinArray => std_min_array(args[0], memory_manager, span, source_id),
         NativeFuncId::MaxArray => std_max_array(args[0], memory_manager, span, source_id),
         NativeFuncId::DeepJoin => std_deep_join(args[0], memory_manager, span, source_id),
         NativeFuncId::ManifestJsonEx
         | NativeFuncId::ManifestJson
-        | NativeFuncId::ManifestJsonMinified => Err(RuntimeError {
+        | NativeFuncId::ManifestJsonMinified
+        | NativeFuncId::Uniq
+        | NativeFuncId::Prune
+        | NativeFuncId::MergePatch
+        | NativeFuncId::Set
+        | NativeFuncId::SetUnion => Err(RuntimeError {
             span,
             message: format!("std.{} must be handled by the VM", id.name()),
             source_id,
@@ -225,45 +228,6 @@ pub fn call_native(
             message: format!("std.{} must be handled by the VM", id.name()),
             source_id,
         }),
-        NativeFuncId::Set => {
-            let arr_val = args[0];
-            let sorted = std_sort(arr_val, memory_manager, span.clone(), source_id.clone())?;
-            std_uniq(sorted, memory_manager, span, source_id)
-        }
-        NativeFuncId::SetUnion => {
-            let a_val = args[0];
-            let b_val = args[1];
-            let a_idx = match a_val {
-                Value::Array(i) => i,
-                _ => {
-                    return Err(RuntimeError {
-                        span,
-                        message: "std.setUnion: first argument must be an array".to_string(),
-                        source_id,
-                    });
-                }
-            };
-            let b_idx = match b_val {
-                Value::Array(i) => i,
-                _ => {
-                    return Err(RuntimeError {
-                        span,
-                        message: "std.setUnion: second argument must be an array".to_string(),
-                        source_id,
-                    });
-                }
-            };
-            let mut combined = memory_manager.load_array(a_idx).elements.clone();
-            combined.extend_from_slice(&memory_manager.load_array(b_idx).elements.clone());
-            let alloc = memory_manager.allocate_array(combined);
-            let sorted = std_sort(
-                Value::Array(alloc.index),
-                memory_manager,
-                span.clone(),
-                source_id.clone(),
-            )?;
-            std_uniq(sorted, memory_manager, span, source_id)
-        }
         NativeFuncId::SetInter => {
             let a_val = args[0];
             let b_val = args[1];
@@ -388,9 +352,11 @@ pub fn call_native(
             }
             Ok(Value::Boolean(found))
         }
-        NativeFuncId::MergePatch => {
-            std_merge_patch(args[0], args[1], memory_manager, span, source_id)
-        }
+        NativeFuncId::MergePatch => Err(RuntimeError {
+            span,
+            message: format!("std.{} must be handled by the VM", id.name()),
+            source_id,
+        }),
     }
 }
 
@@ -2728,39 +2694,6 @@ fn std_sort(
     Ok(Value::Array(arr_alloc.index))
 }
 
-// ─── std.uniq ────────────────────────────────────────────────────────────────
-
-/// std.uniq(arr): Removes consecutive duplicates from arr
-fn std_uniq(
-    arr_val: Value,
-    memory_manager: &mut MemoryManager,
-    span: Range<usize>,
-    source_id: String,
-) -> Result<Value, RuntimeError> {
-    let arr_idx = match arr_val {
-        Value::Array(a) => a,
-        _ => {
-            return Err(RuntimeError {
-                span,
-                message: "std.uniq() expected array, but got something else".to_string(),
-                source_id,
-            });
-        }
-    };
-    let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
-    let mut result: Vec<Value> = Vec::new();
-    for elem in elements {
-        if let Some(last) = result.last() {
-            if values_equal(*last, elem, memory_manager) {
-                continue;
-            }
-        }
-        result.push(elem);
-    }
-    let arr_alloc = memory_manager.allocate_array(result);
-    Ok(Value::Array(arr_alloc.index))
-}
-
 // ─── std.splitLimitR ─────────────────────────────────────────────────────────
 
 /// std.splitLimitR(str, c, maxsplits): Like splitLimit but splits from the right
@@ -4058,84 +3991,6 @@ fn std_base64_decode_string(
     }
 }
 
-/// Helper: is a value "prunable" (null, empty array, or empty object)?
-fn is_prunable(val: &Value, memory_manager: &MemoryManager) -> bool {
-    match val {
-        Value::Null => true,
-        Value::Array(a_idx) => memory_manager.load_array(*a_idx).elements.is_empty(),
-        Value::Object(o_idx) => {
-            let obj = memory_manager.load_object(*o_idx);
-            // Check if all visible fields are prunable (i.e., no visible fields remain after prune)
-            obj.properties
-                .values()
-                .filter(|f| f.visibility != FieldVisibility::Hidden)
-                .count()
-                == 0
-        }
-        _ => false,
-    }
-}
-
-/// Recursively prune a value: remove nulls, empty arrays, empty objects
-fn prune_val(val: Value, memory_manager: &mut MemoryManager) -> Value {
-    match val {
-        Value::Array(a_idx) => {
-            let elements = memory_manager.load_array(a_idx).elements.clone();
-            let pruned: Vec<Value> = elements
-                .into_iter()
-                .filter_map(|elem| {
-                    let pruned_elem = prune_val(elem, memory_manager);
-                    if is_prunable(&pruned_elem, memory_manager) {
-                        None
-                    } else {
-                        Some(pruned_elem)
-                    }
-                })
-                .collect();
-            let alloc = memory_manager.allocate_array(pruned);
-            Value::Array(alloc.index)
-        }
-        Value::Object(o_idx) => {
-            // Collect visible fields first
-            let field_data: Vec<(StringIndex, Value, Option<ObjectIndex>, FieldVisibility)> = {
-                let obj = memory_manager.load_object(o_idx);
-                obj.properties
-                    .iter()
-                    .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                    .map(|(k, f)| (*k, f.value, f.super_obj, f.visibility))
-                    .collect()
-            };
-            let mut new_props = std::collections::HashMap::new();
-            for (k, v, super_obj, vis) in field_data {
-                let pruned_v = prune_val(v, memory_manager);
-                if !is_prunable(&pruned_v, memory_manager) {
-                    new_props.insert(
-                        k,
-                        ObjectField {
-                            value: pruned_v,
-                            super_obj,
-                            visibility: vis,
-                        },
-                    );
-                }
-            }
-            let alloc = memory_manager.allocate_object_with_properties(new_props);
-            Value::Object(alloc.index)
-        }
-        other => other,
-    }
-}
-
-/// std.prune(a): recursively remove null/empty arrays/empty objects
-fn std_prune(
-    val: Value,
-    memory_manager: &mut MemoryManager,
-    _span: Range<usize>,
-    _source_id: String,
-) -> Result<Value, RuntimeError> {
-    Ok(prune_val(val, memory_manager))
-}
-
 /// std.minArray(arr): return the minimum element
 fn std_min_array(
     val: Value,
@@ -4238,58 +4093,4 @@ fn std_deep_join(
             source_id,
         }),
     }
-}
-
-/// std.mergePatch(target, patch): RFC 7396 deep object merge
-fn std_merge_patch(
-    target: Value,
-    patch: Value,
-    mm: &mut MemoryManager,
-    span: Range<usize>,
-    source_id: String,
-) -> Result<Value, RuntimeError> {
-    // If patch is not an object, patch replaces target completely
-    let patch_idx = match patch {
-        Value::Object(o) => o,
-        _ => return Ok(patch),
-    };
-    // patch is an object — collect its properties
-    let patch_props: Vec<(StringIndex, ObjectField)> = {
-        let obj = mm.load_object(patch_idx);
-        obj.properties
-            .iter()
-            .map(|(k, f)| (*k, f.clone()))
-            .collect()
-    };
-    // Build base from target if it's an object, otherwise start empty
-    let mut result: std::collections::HashMap<StringIndex, ObjectField> = match target {
-        Value::Object(t_idx) => {
-            let obj = mm.load_object(t_idx);
-            obj.properties
-                .iter()
-                .map(|(k, f)| (*k, f.clone()))
-                .collect()
-        }
-        _ => std::collections::HashMap::new(),
-    };
-    // Apply patch
-    for (key, field) in patch_props {
-        if field.value == Value::Null {
-            result.remove(&key);
-        } else {
-            let existing = result.get(&key).map(|f| f.value).unwrap_or(Value::Null);
-            let merged =
-                std_merge_patch(existing, field.value, mm, span.clone(), source_id.clone())?;
-            result.insert(
-                key,
-                ObjectField {
-                    value: merged,
-                    super_obj: field.super_obj,
-                    visibility: field.visibility,
-                },
-            );
-        }
-    }
-    let alloc = mm.allocate_object_with_properties(result);
-    Ok(Value::Object(alloc.index))
 }

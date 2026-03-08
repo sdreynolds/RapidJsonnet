@@ -351,7 +351,7 @@ impl NativeFuncId {
             NativeFuncId::EncodeUTF8 => 1,
             NativeFuncId::DecodeUTF8 => 1,
             NativeFuncId::Sort => 1,
-            NativeFuncId::Uniq => 1,
+            NativeFuncId::Uniq => 2,
             NativeFuncId::SplitLimitR => 3,
             NativeFuncId::StripChars => 2,
             NativeFuncId::LstripChars => 2,

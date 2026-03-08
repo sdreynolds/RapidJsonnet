@@ -2785,11 +2785,100 @@ impl VirtualMachine {
                         continue;
                     }
 
+                    if matches!(
+                        func_id,
+                        chunk::NativeFuncId::MergePatch
+                            | chunk::NativeFuncId::Prune
+                            | chunk::NativeFuncId::Uniq
+                            | chunk::NativeFuncId::Set
+                            | chunk::NativeFuncId::SetUnion
+                    ) {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+
+                        match func_id {
+                            chunk::NativeFuncId::MergePatch => {
+                                let result = self.merge_patch_value(args[0], args[1])?;
+                                self.push(result)?;
+                                continue;
+                            }
+                            chunk::NativeFuncId::Prune => {
+                                let result = self.prune_value(args[0])?;
+                                self.push(result)?;
+                                continue;
+                            }
+                            chunk::NativeFuncId::Uniq => {
+                                let result = self.uniq_value(args[0], args.get(1).copied())?;
+                                self.push(result)?;
+                                continue;
+                            }
+                            chunk::NativeFuncId::Set => {
+                                let arr_val = args[0];
+                                let sorted = crate::native::call_native(
+                                    chunk::NativeFuncId::Sort,
+                                    &[arr_val],
+                                    &mut self.memory_manager,
+                                    span.clone(),
+                                    source_id.clone(),
+                                )?;
+                                let result = self.uniq_value(sorted, args.get(1).copied())?;
+                                self.push(result)?;
+                                continue;
+                            }
+                            chunk::NativeFuncId::SetUnion => {
+                                let a_val = args[0];
+                                let b_val = args[1];
+                                let a_idx = match a_val {
+                                    Value::Array(i) => i,
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message:
+                                                "std.setUnion: first argument must be an array"
+                                                    .to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let b_idx = match b_val {
+                                    Value::Array(i) => i,
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message:
+                                                "std.setUnion: second argument must be an array"
+                                                    .to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let mut combined =
+                                    self.memory_manager.load_array(a_idx).elements.clone();
+                                combined.extend_from_slice(
+                                    &self.memory_manager.load_array(b_idx).elements.clone(),
+                                );
+                                let alloc = self.memory_manager.allocate_array(combined);
+                                let sorted = crate::native::call_native(
+                                    chunk::NativeFuncId::Sort,
+                                    &[Value::Array(alloc.index)],
+                                    &mut self.memory_manager,
+                                    span.clone(),
+                                    source_id.clone(),
+                                )?;
+                                let result = self.uniq_value(sorted, args.get(2).copied())?;
+                                self.push(result)?;
+                                continue;
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+
                     // Call native function
                     let span = self.get_current_span();
                     let source_id = self.current_chunk().source_id.to_string();
                     let result =
                         call_native(func_id, &args, &mut self.memory_manager, span, source_id)?;
+
                     self.push(result)?;
                 }
 
@@ -3021,6 +3110,94 @@ impl VirtualMachine {
                             for _ in 0..=arg_count {
                                 self.pop()?;
                             }
+
+                            if matches!(
+                                id,
+                                chunk::NativeFuncId::MergePatch
+                                    | chunk::NativeFuncId::Prune
+                                    | chunk::NativeFuncId::Uniq
+                                    | chunk::NativeFuncId::Set
+                                    | chunk::NativeFuncId::SetUnion
+                            ) {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+
+                                match id {
+                                    chunk::NativeFuncId::MergePatch => {
+                                        let result = self.merge_patch_value(args[0], args[1])?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
+                                    chunk::NativeFuncId::Prune => {
+                                        let result = self.prune_value(args[0])?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
+                                    chunk::NativeFuncId::Uniq => {
+                                        let result =
+                                            self.uniq_value(args[0], args.get(1).copied())?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
+                                    chunk::NativeFuncId::Set => {
+                                        let arr_val = args[0];
+                                        let sorted = crate::native::call_native(
+                                            chunk::NativeFuncId::Sort,
+                                            &[arr_val],
+                                            &mut self.memory_manager,
+                                            span.clone(),
+                                            source_id.clone(),
+                                        )?;
+                                        let result =
+                                            self.uniq_value(sorted, args.get(1).copied())?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
+                                    chunk::NativeFuncId::SetUnion => {
+                                        let a_val = args[0];
+                                        let b_val = args[1];
+                                        let a_idx = match a_val {
+                                            Value::Array(i) => i,
+                                            _ => return Err(RuntimeError {
+                                                span,
+                                                message:
+                                                    "std.setUnion: first argument must be an array"
+                                                        .to_string(),
+                                                source_id,
+                                            }),
+                                        };
+                                        let b_idx = match b_val {
+                                            Value::Array(i) => i,
+                                            _ => return Err(RuntimeError {
+                                                span,
+                                                message:
+                                                    "std.setUnion: second argument must be an array"
+                                                        .to_string(),
+                                                source_id,
+                                            }),
+                                        };
+                                        let mut combined =
+                                            self.memory_manager.load_array(a_idx).elements.clone();
+                                        combined.extend_from_slice(
+                                            &self.memory_manager.load_array(b_idx).elements.clone(),
+                                        );
+                                        let alloc = self.memory_manager.allocate_array(combined);
+                                        let sorted = crate::native::call_native(
+                                            chunk::NativeFuncId::Sort,
+                                            &[Value::Array(alloc.index)],
+                                            &mut self.memory_manager,
+                                            span.clone(),
+                                            source_id.clone(),
+                                        )?;
+                                        let result =
+                                            self.uniq_value(sorted, args.get(2).copied())?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
+                                    _ => unreachable!(),
+                                }
+                            }
+
                             // Call native function
                             let span = self.get_current_span();
                             let source_id = self.current_chunk().source_id.to_string();
@@ -3028,6 +3205,7 @@ impl VirtualMachine {
                                 call_native(id, &args, &mut self.memory_manager, span, source_id)?;
                             self.push(result)?;
                         }
+
                         _ => {
                             return Err(RuntimeError {
                                 span: self.get_current_span(),
@@ -3759,6 +3937,254 @@ impl VirtualMachine {
                 source_id: source_id.to_string(),
             }),
         }
+    }
+
+    fn merge_patch_value(&mut self, target: Value, patch: Value) -> Result<Value, RuntimeError> {
+        let patch_idx = match patch {
+            Value::Object(o) => o,
+            _ => return Ok(patch),
+        };
+        let patch_props: Vec<(StringIndex, memory_manager::ObjectField)> = {
+            let obj = self.memory_manager.load_object(patch_idx);
+            obj.properties
+                .iter()
+                .map(|(k, f)| (*k, f.clone()))
+                .collect()
+        };
+        let t_idx_opt = match target {
+            Value::Object(t_idx) => Some(t_idx),
+            _ => None,
+        };
+        let mut result: std::collections::HashMap<StringIndex, memory_manager::ObjectField> =
+            match target {
+                Value::Object(t_idx) => {
+                    let obj = self.memory_manager.load_object(t_idx);
+                    obj.properties
+                        .iter()
+                        .map(|(k, f)| (*k, f.clone()))
+                        .collect()
+                }
+                _ => std::collections::HashMap::new(),
+            };
+        for (key, field) in patch_props {
+            // Must evaluate field value to see if it's null
+            let mut val = field.value;
+            if let Value::Closure(closure_idx) = val {
+                // Protect result HashMap during thunk execution
+                let mut temp_vals = Vec::new();
+                for f in result.values() {
+                    temp_vals.push(f.value);
+                }
+                self.memory_manager.external_roots.push(temp_vals);
+
+                val = self.execute_thunk_sync(closure_idx, Some(patch_idx), None)?;
+
+                self.memory_manager.external_roots.pop();
+            }
+            if val == Value::Null {
+                result.remove(&key);
+            } else {
+                let mut existing = result.get(&key).map(|f| f.value).unwrap_or(Value::Null);
+
+                if let Value::Closure(c_idx) = existing {
+                    let mut temp_vals = Vec::new();
+                    for f in result.values() {
+                        temp_vals.push(f.value);
+                    }
+                    temp_vals.push(val);
+                    self.memory_manager.external_roots.push(temp_vals);
+
+                    existing = self.execute_thunk_sync(c_idx, t_idx_opt, None)?;
+
+                    self.memory_manager.external_roots.pop();
+                }
+
+                // Protect result during recursion
+                let mut temp_vals = Vec::new();
+                for f in result.values() {
+                    temp_vals.push(f.value);
+                }
+                temp_vals.push(val);
+                temp_vals.push(existing);
+                self.memory_manager.external_roots.push(temp_vals);
+
+                let merged = self.merge_patch_value(existing, val)?;
+
+                self.memory_manager.external_roots.pop();
+
+                result.insert(
+                    key,
+                    memory_manager::ObjectField {
+                        value: merged,
+                        super_obj: field.super_obj,
+                        visibility: field.visibility,
+                    },
+                );
+            }
+        }
+        let alloc = self.memory_manager.allocate_object_with_properties(result);
+        Ok(Value::Object(alloc.index))
+    }
+
+    fn prune_value(&mut self, val: Value) -> Result<Value, RuntimeError> {
+        match val {
+            Value::Array(a_idx) => {
+                let elements = self.memory_manager.load_array(a_idx).elements.clone();
+                let mut pruned = Vec::new();
+                for elem in elements {
+                    // Protect pruned so far
+                    self.memory_manager.external_roots.push(pruned.clone());
+                    let pruned_elem = self.prune_value(elem)?;
+                    self.memory_manager.external_roots.pop();
+
+                    if !self.is_prunable(pruned_elem)? {
+                        pruned.push(pruned_elem);
+                    }
+                }
+                let alloc = self.memory_manager.allocate_array(pruned);
+                Ok(Value::Array(alloc.index))
+            }
+            Value::Object(o_idx) => {
+                let field_data: Vec<(
+                    StringIndex,
+                    Value,
+                    Option<ObjectIndex>,
+                    chunk::FieldVisibility,
+                )> = {
+                    let obj = self.memory_manager.load_object(o_idx);
+                    obj.properties
+                        .iter()
+                        .filter(|(_, f)| f.visibility != chunk::FieldVisibility::Hidden)
+                        .map(|(k, f)| (*k, f.value, f.super_obj, f.visibility))
+                        .collect()
+                };
+                let mut new_props: std::collections::HashMap<
+                    StringIndex,
+                    memory_manager::ObjectField,
+                > = std::collections::HashMap::new();
+                for (k, v, super_obj, vis) in field_data {
+                    let mut eval_v = v;
+                    if let Value::Closure(closure_idx) = eval_v {
+                        let mut temp_vals = Vec::new();
+                        for f in new_props.values() {
+                            temp_vals.push(f.value);
+                        }
+                        self.memory_manager.external_roots.push(temp_vals);
+                        eval_v = self.execute_thunk_sync(closure_idx, Some(o_idx), None)?;
+                        self.memory_manager.external_roots.pop();
+                    }
+
+                    let mut temp_vals = Vec::new();
+                    for f in new_props.values() {
+                        temp_vals.push(f.value);
+                    }
+                    self.memory_manager.external_roots.push(temp_vals);
+                    let pruned_v = self.prune_value(eval_v)?;
+                    self.memory_manager.external_roots.pop();
+
+                    if !self.is_prunable(pruned_v)? {
+                        new_props.insert(
+                            k,
+                            memory_manager::ObjectField {
+                                value: pruned_v,
+                                super_obj,
+                                visibility: vis,
+                            },
+                        );
+                    }
+                }
+                let alloc = self
+                    .memory_manager
+                    .allocate_object_with_properties(new_props);
+                Ok(Value::Object(alloc.index))
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn is_prunable(&mut self, val: Value) -> Result<bool, RuntimeError> {
+        match val {
+            Value::Null => Ok(true),
+            Value::Array(a_idx) => Ok(self.memory_manager.load_array(a_idx).elements.is_empty()),
+            Value::Object(o_idx) => {
+                let properties: Vec<(StringIndex, memory_manager::ObjectField)> = self
+                    .memory_manager
+                    .load_object(o_idx)
+                    .properties
+                    .iter()
+                    .map(|(k, f)| (*k, f.clone()))
+                    .collect();
+
+                let mut all_prunable = true;
+                for (_k, field) in properties {
+                    if field.visibility != chunk::FieldVisibility::Hidden {
+                        let mut v = field.value;
+                        if let Value::Closure(closure_idx) = v {
+                            self.memory_manager.external_roots.push(vec![val]);
+                            v = self.execute_thunk_sync(closure_idx, Some(o_idx), None)?;
+                            self.memory_manager.external_roots.pop();
+                        }
+                        if !self.is_prunable(v)? {
+                            all_prunable = false;
+                            break;
+                        }
+                    }
+                }
+                Ok(all_prunable)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn uniq_value(
+        &mut self,
+        arr_val: Value,
+        key_func_opt: Option<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let arr_idx = match arr_val {
+            Value::Array(a) => a,
+            _ => {
+                return Err(RuntimeError {
+                    span: self.get_current_span(),
+                    message: "std.uniq: first argument must be an array".to_string(),
+                    source_id: self.current_chunk().source_id.to_string(),
+                });
+            }
+        };
+        let elements = self.memory_manager.load_array(arr_idx).elements.clone();
+        let mut result = Vec::new();
+        let mut last_key: Option<Value> = None;
+
+        for elem in elements {
+            self.memory_manager.external_roots.push(result.clone());
+            if let Some(k) = last_key {
+                self.memory_manager.external_roots.push(vec![k, elem]);
+            } else {
+                self.memory_manager.external_roots.push(vec![elem]);
+            }
+
+            let key = match key_func_opt {
+                Some(f) => self.call_value_with_one_arg(f, elem)?,
+                None => elem,
+            };
+
+            let mut duplicate = false;
+            if let Some(lk) = last_key {
+                if self.values_equal(&lk, &key)? {
+                    duplicate = true;
+                }
+            }
+
+            self.memory_manager.external_roots.pop(); // pop keys
+            self.memory_manager.external_roots.pop(); // pop result
+
+            if !duplicate {
+                result.push(elem);
+                last_key = Some(key);
+            }
+        }
+        let arr_alloc = self.memory_manager.allocate_array(result);
+        Ok(Value::Array(arr_alloc.index))
     }
 }
 
