@@ -2873,6 +2873,78 @@ impl VirtualMachine {
                         }
                     }
 
+                    // Handle manifestIni
+                    if func_id == chunk::NativeFuncId::ManifestIni {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let value = args[0];
+                        let result = self.manifest_ini(value, span, source_id)?;
+                        let idx = self.memory_manager.allocate_string(&result);
+                        self.push(Value::String(idx.index))?;
+                        continue;
+                    }
+
+                    // Handle manifestPython
+                    if func_id == chunk::NativeFuncId::ManifestPython {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let value = args[0];
+                        let result = self.manifest_python_value(value, 0, span, source_id)?;
+                        let idx = self.memory_manager.allocate_string(&result);
+                        self.push(Value::String(idx.index))?;
+                        continue;
+                    }
+
+                    // Handle manifestPythonVars
+                    if func_id == chunk::NativeFuncId::ManifestPythonVars {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let value = args[0];
+                        let result = self.manifest_python_vars(value, span, source_id)?;
+                        let idx = self.memory_manager.allocate_string(&result);
+                        self.push(Value::String(idx.index))?;
+                        continue;
+                    }
+
+                    // Handle manifestYamlDoc
+                    if func_id == chunk::NativeFuncId::ManifestYamlDoc {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let value = args[0];
+                        let indent_array_in_object = match args[1] {
+                            Value::Boolean(b) => b,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: "manifestYamlDoc: indent_array_in_object must be bool"
+                                        .to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+                        let quote_keys = match args[2] {
+                            Value::Boolean(b) => b,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: "manifestYamlDoc: quote_keys must be bool".to_string(),
+                                    source_id,
+                                });
+                            }
+                        };
+                        let result = self.manifest_yaml_doc(
+                            value,
+                            0,
+                            indent_array_in_object,
+                            quote_keys,
+                            span,
+                            source_id,
+                        )?;
+                        let idx = self.memory_manager.allocate_string(&result);
+                        self.push(Value::String(idx.index))?;
+                        continue;
+                    }
+
                     // Call native function
                     let span = self.get_current_span();
                     let source_id = self.current_chunk().source_id.to_string();
@@ -3196,6 +3268,81 @@ impl VirtualMachine {
                                     }
                                     _ => unreachable!(),
                                 }
+                            }
+
+                            // Handle manifestIni
+                            if id == chunk::NativeFuncId::ManifestIni {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+                                let value = args[0];
+                                let result = self.manifest_ini(value, span, source_id)?;
+                                let idx = self.memory_manager.allocate_string(&result);
+                                self.push(Value::String(idx.index))?;
+                                continue;
+                            }
+
+                            // Handle manifestPython
+                            if id == chunk::NativeFuncId::ManifestPython {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+                                let value = args[0];
+                                let result =
+                                    self.manifest_python_value(value, 0, span, source_id)?;
+                                let idx = self.memory_manager.allocate_string(&result);
+                                self.push(Value::String(idx.index))?;
+                                continue;
+                            }
+
+                            // Handle manifestPythonVars
+                            if id == chunk::NativeFuncId::ManifestPythonVars {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+                                let value = args[0];
+                                let result = self.manifest_python_vars(value, span, source_id)?;
+                                let idx = self.memory_manager.allocate_string(&result);
+                                self.push(Value::String(idx.index))?;
+                                continue;
+                            }
+
+                            // Handle manifestYamlDoc
+                            if id == chunk::NativeFuncId::ManifestYamlDoc {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+                                let value = args[0];
+                                let indent_array_in_object = match args[1] {
+                                    Value::Boolean(b) => b,
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message:
+                                                "manifestYamlDoc: indent_array_in_object must be bool"
+                                                    .to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let quote_keys = match args[2] {
+                                    Value::Boolean(b) => b,
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message: "manifestYamlDoc: quote_keys must be bool"
+                                                .to_string(),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                let result = self.manifest_yaml_doc(
+                                    value,
+                                    0,
+                                    indent_array_in_object,
+                                    quote_keys,
+                                    span,
+                                    source_id,
+                                )?;
+                                let idx = self.memory_manager.allocate_string(&result);
+                                self.push(Value::String(idx.index))?;
+                                continue;
                             }
 
                             // Call native function
@@ -4186,6 +4333,638 @@ impl VirtualMachine {
         let arr_alloc = self.memory_manager.allocate_array(result);
         Ok(Value::Array(arr_alloc.index))
     }
+
+    /// Manifest a value as an INI-formatted string
+    fn manifest_ini(
+        &mut self,
+        value: Value,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        let forced = self.force_value(value)?;
+        let forced = match forced {
+            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            other => other,
+        };
+        let obj_idx = match forced {
+            Value::Object(idx) => idx,
+            other => {
+                return Err(RuntimeError {
+                    span,
+                    message: format!(
+                        "std.manifestIni: expected object, got {}",
+                        other.type_name()
+                    ),
+                    source_id,
+                });
+            }
+        };
+
+        let mut result = String::new();
+
+        // Process "main" section (no header)
+        let main_val = {
+            let obj = self.memory_manager.load_object(obj_idx);
+            obj.properties.iter().find_map(|(k, f)| {
+                if self.memory_manager.load_string(*k) == "main"
+                    && f.visibility != FieldVisibility::Hidden
+                {
+                    Some((f.value, f.super_obj))
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some((main_raw, main_super)) = main_val {
+            let main_forced = match main_raw {
+                Value::Closure(c) => self.execute_thunk_sync(c, Some(obj_idx), main_super)?,
+                other => other,
+            };
+            let main_forced = self.force_value(main_forced)?;
+            let main_obj_idx = match main_forced {
+                Value::Object(idx) => idx,
+                other => {
+                    return Err(RuntimeError {
+                        span,
+                        message: format!(
+                            "std.manifestIni: 'main' must be an object, got {}",
+                            other.type_name()
+                        ),
+                        source_id,
+                    });
+                }
+            };
+            let main_fields: Vec<(String, Value, Option<ObjectIndex>)> = {
+                let mobj = self.memory_manager.load_object(main_obj_idx);
+                let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = mobj
+                    .properties
+                    .iter()
+                    .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                    .map(|(k, f)| {
+                        (
+                            self.memory_manager.load_string(*k).to_string(),
+                            f.value,
+                            f.super_obj,
+                        )
+                    })
+                    .collect();
+                fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+                fields
+            };
+            for (key, val, super_obj) in main_fields {
+                let forced_val = match val {
+                    Value::Closure(c) => {
+                        self.execute_thunk_sync(c, Some(main_obj_idx), super_obj)?
+                    }
+                    other => other,
+                };
+                let forced_val = self.force_value(forced_val)?;
+                let val_str = self.ini_scalar_to_string(forced_val, span.clone(), &source_id)?;
+                result.push_str(&format!("{} = {}\n", key, val_str));
+            }
+        }
+
+        // Process named sections
+        let sections_val = {
+            let obj = self.memory_manager.load_object(obj_idx);
+            obj.properties.iter().find_map(|(k, f)| {
+                if self.memory_manager.load_string(*k) == "sections"
+                    && f.visibility != FieldVisibility::Hidden
+                {
+                    Some((f.value, f.super_obj))
+                } else {
+                    None
+                }
+            })
+        };
+        if let Some((sections_raw, sections_super)) = sections_val {
+            let sections_forced = match sections_raw {
+                Value::Closure(c) => self.execute_thunk_sync(c, Some(obj_idx), sections_super)?,
+                other => other,
+            };
+            let sections_forced = self.force_value(sections_forced)?;
+            let sections_obj_idx = match sections_forced {
+                Value::Object(idx) => idx,
+                other => {
+                    return Err(RuntimeError {
+                        span,
+                        message: format!(
+                            "std.manifestIni: 'sections' must be an object, got {}",
+                            other.type_name()
+                        ),
+                        source_id,
+                    });
+                }
+            };
+            let section_names: Vec<(String, Value, Option<ObjectIndex>)> = {
+                let sobj = self.memory_manager.load_object(sections_obj_idx);
+                let mut names: Vec<(String, Value, Option<ObjectIndex>)> = sobj
+                    .properties
+                    .iter()
+                    .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                    .map(|(k, f)| {
+                        (
+                            self.memory_manager.load_string(*k).to_string(),
+                            f.value,
+                            f.super_obj,
+                        )
+                    })
+                    .collect();
+                names.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+                names
+            };
+            for (section_name, section_raw, section_super) in section_names {
+                result.push_str(&format!("[{}]\n", section_name));
+                let section_forced = match section_raw {
+                    Value::Closure(c) => {
+                        self.execute_thunk_sync(c, Some(sections_obj_idx), section_super)?
+                    }
+                    other => other,
+                };
+                let section_forced = self.force_value(section_forced)?;
+                let section_obj_idx = match section_forced {
+                    Value::Object(idx) => idx,
+                    other => {
+                        return Err(RuntimeError {
+                            span,
+                            message: format!(
+                                "std.manifestIni: section '{}' must be an object, got {}",
+                                section_name,
+                                other.type_name()
+                            ),
+                            source_id,
+                        });
+                    }
+                };
+                let section_fields: Vec<(String, Value, Option<ObjectIndex>)> = {
+                    let sobj = self.memory_manager.load_object(section_obj_idx);
+                    let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = sobj
+                        .properties
+                        .iter()
+                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                        .map(|(k, f)| {
+                            (
+                                self.memory_manager.load_string(*k).to_string(),
+                                f.value,
+                                f.super_obj,
+                            )
+                        })
+                        .collect();
+                    fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+                    fields
+                };
+                for (key, val, super_obj) in section_fields {
+                    let forced_val = match val {
+                        Value::Closure(c) => {
+                            self.execute_thunk_sync(c, Some(section_obj_idx), super_obj)?
+                        }
+                        other => other,
+                    };
+                    let forced_val = self.force_value(forced_val)?;
+                    let val_str =
+                        self.ini_scalar_to_string(forced_val, span.clone(), &source_id)?;
+                    result.push_str(&format!("{} = {}\n", key, val_str));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn ini_scalar_to_string(
+        &mut self,
+        value: Value,
+        span: Range<usize>,
+        source_id: &str,
+    ) -> Result<String, RuntimeError> {
+        match value {
+            Value::String(idx) => Ok(self.memory_manager.load_string(idx).to_string()),
+            Value::Number(n) => {
+                if n.fract() == 0.0 && n.abs() < 1e15 {
+                    Ok(format!("{}", n as i64))
+                } else {
+                    Ok(format!("{}", n))
+                }
+            }
+            Value::Boolean(b) => Ok(b.to_string()),
+            Value::Null => Ok("null".to_string()),
+            other => Err(RuntimeError {
+                span,
+                message: format!(
+                    "std.manifestIni: value must be a scalar, got {}",
+                    other.type_name()
+                ),
+                source_id: source_id.to_string(),
+            }),
+        }
+    }
+
+    /// Manifest a value as Python literal syntax
+    fn manifest_python_value(
+        &mut self,
+        value: Value,
+        depth: usize,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        let forced = self.force_value(value)?;
+        let forced = match forced {
+            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            other => other,
+        };
+
+        match forced {
+            Value::Null => Ok("None".to_string()),
+            Value::Boolean(true) => Ok("True".to_string()),
+            Value::Boolean(false) => Ok("False".to_string()),
+            Value::Number(n) => {
+                if n.is_nan() {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.manifestPython: cannot serialize NaN".to_string(),
+                        source_id,
+                    });
+                }
+                if n.is_infinite() {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.manifestPython: cannot serialize Infinite".to_string(),
+                        source_id,
+                    });
+                }
+                if n.fract() == 0.0 && n.abs() < 1e15 {
+                    Ok(format!("{}", n as i64))
+                } else {
+                    Ok(format!("{}", n))
+                }
+            }
+            Value::String(s_idx) => {
+                let s = self.memory_manager.load_string(s_idx).to_string();
+                let mut out = String::from("\"");
+                for ch in s.chars() {
+                    match ch {
+                        '"' => out.push_str("\\\""),
+                        '\\' => out.push_str("\\\\"),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        c if (c as u32) < 0x20 => {
+                            out.push_str(&format!("\\u{:04x}", c as u32));
+                        }
+                        c => out.push(c),
+                    }
+                }
+                out.push('"');
+                Ok(out)
+            }
+            Value::Array(a_idx) => {
+                let elements = self.memory_manager.load_array(a_idx).elements.clone();
+                if elements.is_empty() {
+                    return Ok("[ ]".to_string());
+                }
+                let indent = "   ".repeat(depth + 1);
+                let close_indent = "   ".repeat(depth);
+                let mut items = Vec::with_capacity(elements.len());
+                for elem in elements {
+                    let s = self.manifest_python_value(
+                        elem,
+                        depth + 1,
+                        span.clone(),
+                        source_id.clone(),
+                    )?;
+                    items.push(format!("{}{}", indent, s));
+                }
+                Ok(format!("[\n{}\n{}]", items.join(",\n"), close_indent))
+            }
+            Value::Object(o_idx) => {
+                let field_data: Vec<(String, Value, Option<ObjectIndex>)> = {
+                    let obj = self.memory_manager.load_object(o_idx);
+                    let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = obj
+                        .properties
+                        .iter()
+                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                        .map(|(k, f)| {
+                            (
+                                self.memory_manager.load_string(*k).to_string(),
+                                f.value,
+                                f.super_obj,
+                            )
+                        })
+                        .collect();
+                    fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+                    fields
+                };
+
+                if field_data.is_empty() {
+                    return Ok("{ }".to_string());
+                }
+
+                let item_indent = "   ".repeat(depth + 1);
+                let close_indent = "   ".repeat(depth);
+                let mut pairs = Vec::with_capacity(field_data.len());
+                for (key_str, field_val, super_obj) in field_data {
+                    let forced_val = match field_val {
+                        Value::Closure(c) => self.execute_thunk_sync(c, Some(o_idx), super_obj)?,
+                        other => other,
+                    };
+                    let val_s = self.manifest_python_value(
+                        forced_val,
+                        depth + 1,
+                        span.clone(),
+                        source_id.clone(),
+                    )?;
+                    // JSON-escape the key
+                    let mut key_out = String::from("\"");
+                    for ch in key_str.chars() {
+                        match ch {
+                            '"' => key_out.push_str("\\\""),
+                            '\\' => key_out.push_str("\\\\"),
+                            '\n' => key_out.push_str("\\n"),
+                            '\r' => key_out.push_str("\\r"),
+                            '\t' => key_out.push_str("\\t"),
+                            c if (c as u32) < 0x20 => {
+                                key_out.push_str(&format!("\\u{:04x}", c as u32));
+                            }
+                            c => key_out.push(c),
+                        }
+                    }
+                    key_out.push('"');
+                    pairs.push(format!("{}{}: {}", item_indent, key_out, val_s));
+                }
+                Ok(format!("{{\n{}\n{}}}", pairs.join(",\n"), close_indent))
+            }
+            _ => Err(RuntimeError {
+                span,
+                message: "std.manifestPython: cannot manifest function".to_string(),
+                source_id,
+            }),
+        }
+    }
+
+    /// Manifest an object as Python variable assignments
+    fn manifest_python_vars(
+        &mut self,
+        value: Value,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        let forced = self.force_value(value)?;
+        let forced = match forced {
+            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            other => other,
+        };
+        let obj_idx = match forced {
+            Value::Object(idx) => idx,
+            other => {
+                return Err(RuntimeError {
+                    span,
+                    message: format!(
+                        "std.manifestPythonVars: expected object, got {}",
+                        other.type_name()
+                    ),
+                    source_id,
+                });
+            }
+        };
+
+        let fields: Vec<(String, Value, Option<ObjectIndex>)> = {
+            let obj = self.memory_manager.load_object(obj_idx);
+            let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = obj
+                .properties
+                .iter()
+                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                .map(|(k, f)| {
+                    (
+                        self.memory_manager.load_string(*k).to_string(),
+                        f.value,
+                        f.super_obj,
+                    )
+                })
+                .collect();
+            fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+            fields
+        };
+
+        let mut result = String::new();
+        for (key, val, super_obj) in fields {
+            let forced_val = match val {
+                Value::Closure(c) => self.execute_thunk_sync(c, Some(obj_idx), super_obj)?,
+                other => other,
+            };
+            let python_val =
+                self.manifest_python_value(forced_val, 0, span.clone(), source_id.clone())?;
+            result.push_str(&format!("{} = {}\n", key, python_val));
+        }
+        Ok(result)
+    }
+
+    /// Manifest a value as a YAML document
+    fn manifest_yaml_doc(
+        &mut self,
+        value: Value,
+        depth: usize,
+        indent_array_in_object: bool,
+        quote_keys: bool,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        let forced = self.force_value(value)?;
+        let forced = match forced {
+            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            other => other,
+        };
+
+        match forced {
+            Value::Null => Ok("null".to_string()),
+            Value::Boolean(b) => Ok(b.to_string()),
+            Value::Number(n) => {
+                if n.is_nan() {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.manifestYamlDoc: cannot serialize NaN".to_string(),
+                        source_id,
+                    });
+                }
+                if n.is_infinite() {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.manifestYamlDoc: cannot serialize Infinite".to_string(),
+                        source_id,
+                    });
+                }
+                if n.fract() == 0.0 && n.abs() < 1e15 {
+                    Ok(format!("{}", n as i64))
+                } else {
+                    Ok(format!("{}", n))
+                }
+            }
+            Value::String(s_idx) => {
+                let s = self.memory_manager.load_string(s_idx).to_string();
+                if yaml_needs_quoting(&s) {
+                    let mut out = String::from("\"");
+                    for ch in s.chars() {
+                        match ch {
+                            '"' => out.push_str("\\\""),
+                            '\\' => out.push_str("\\\\"),
+                            '\n' => out.push_str("\\n"),
+                            '\r' => out.push_str("\\r"),
+                            '\t' => out.push_str("\\t"),
+                            c if (c as u32) < 0x20 => {
+                                out.push_str(&format!("\\u{:04x}", c as u32));
+                            }
+                            c => out.push(c),
+                        }
+                    }
+                    out.push('"');
+                    Ok(out)
+                } else {
+                    Ok(s)
+                }
+            }
+            Value::Array(a_idx) => {
+                let elements = self.memory_manager.load_array(a_idx).elements.clone();
+                if elements.is_empty() {
+                    return Ok("[ ]".to_string());
+                }
+                let indent = "  ".repeat(depth);
+                let mut lines = Vec::with_capacity(elements.len());
+                for elem in elements {
+                    let elem_str = self.manifest_yaml_doc(
+                        elem,
+                        depth + 1,
+                        indent_array_in_object,
+                        quote_keys,
+                        span.clone(),
+                        source_id.clone(),
+                    )?;
+                    if elem_str.contains('\n') {
+                        // Multi-line: first line on same line as "- ", rest indented
+                        let mut sub_lines = elem_str.lines();
+                        let first = sub_lines.next().unwrap_or("");
+                        let rest: Vec<String> =
+                            sub_lines.map(|l| format!("{}  {}", indent, l)).collect();
+                        if rest.is_empty() {
+                            lines.push(format!("{}- {}", indent, first));
+                        } else {
+                            lines.push(format!("{}- {}\n{}", indent, first, rest.join("\n")));
+                        }
+                    } else {
+                        lines.push(format!("{}- {}", indent, elem_str));
+                    }
+                }
+                Ok(lines.join("\n"))
+            }
+            Value::Object(o_idx) => {
+                let field_data: Vec<(String, Value, Option<ObjectIndex>)> = {
+                    let obj = self.memory_manager.load_object(o_idx);
+                    let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = obj
+                        .properties
+                        .iter()
+                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                        .map(|(k, f)| {
+                            (
+                                self.memory_manager.load_string(*k).to_string(),
+                                f.value,
+                                f.super_obj,
+                            )
+                        })
+                        .collect();
+                    fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+                    fields
+                };
+
+                if field_data.is_empty() {
+                    return Ok("{ }".to_string());
+                }
+
+                let indent = "  ".repeat(depth);
+                let mut lines = Vec::with_capacity(field_data.len());
+                for (key_str, field_val, super_obj) in field_data {
+                    let forced_val = match field_val {
+                        Value::Closure(c) => self.execute_thunk_sync(c, Some(o_idx), super_obj)?,
+                        other => other,
+                    };
+                    let key_repr = if quote_keys {
+                        // Escape key as JSON string
+                        let mut out = String::from("\"");
+                        for ch in key_str.chars() {
+                            match ch {
+                                '"' => out.push_str("\\\""),
+                                '\\' => out.push_str("\\\\"),
+                                '\n' => out.push_str("\\n"),
+                                '\r' => out.push_str("\\r"),
+                                '\t' => out.push_str("\\t"),
+                                c if (c as u32) < 0x20 => {
+                                    out.push_str(&format!("\\u{:04x}", c as u32));
+                                }
+                                c => out.push(c),
+                            }
+                        }
+                        out.push('"');
+                        out
+                    } else {
+                        key_str.clone()
+                    };
+
+                    let val_str = self.manifest_yaml_doc(
+                        forced_val,
+                        depth + 1,
+                        indent_array_in_object,
+                        quote_keys,
+                        span.clone(),
+                        source_id.clone(),
+                    )?;
+
+                    if val_str.contains('\n') {
+                        // Multi-line value: key on its own line then indented content
+                        let indented: String = val_str
+                            .lines()
+                            .map(|l| format!("{}  {}", indent, l))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        lines.push(format!("{}{}:\n{}", indent, key_repr, indented));
+                    } else {
+                        lines.push(format!("{}{}: {}", indent, key_repr, val_str));
+                    }
+                }
+                Ok(lines.join("\n"))
+            }
+            other => Err(RuntimeError {
+                span,
+                message: format!("std.manifestYamlDoc: cannot manifest {}", other.type_name()),
+                source_id,
+            }),
+        }
+    }
+}
+
+/// Returns true if a YAML string value needs to be quoted
+fn yaml_needs_quoting(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    let lower = s.to_lowercase();
+    if matches!(
+        lower.as_str(),
+        "true" | "false" | "null" | "yes" | "no" | "on" | "off"
+    ) {
+        return true;
+    }
+    // Starts with a special YAML character
+    if let Some(first) = s.chars().next() {
+        if ":{[],&*?|-<>=!%@`'\"".contains(first) {
+            return true;
+        }
+    }
+    // Contains ': ' or ' #' (YAML comment/mapping indicators in flow context)
+    if s.contains(": ") || s.contains(" #") {
+        return true;
+    }
+    // Looks like a number
+    if s.parse::<f64>().is_ok() {
+        return true;
+    }
+    false
 }
 
 /// Main execution function - entry point for running Jsonnet bytecode

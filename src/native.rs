@@ -1,4 +1,4 @@
-use chunk::{FieldVisibility, NativeFuncId, ObjectIndex, RuntimeError, StringIndex, Value};
+use chunk::{FieldVisibility, NativeFuncId, RuntimeError, StringIndex, Value};
 use memory_manager::{MemoryManager, ObjectField};
 use std::collections::HashSet;
 use std::ops::Range;
@@ -210,7 +210,11 @@ pub fn call_native(
         | NativeFuncId::Prune
         | NativeFuncId::MergePatch
         | NativeFuncId::Set
-        | NativeFuncId::SetUnion => Err(RuntimeError {
+        | NativeFuncId::SetUnion
+        | NativeFuncId::ManifestIni
+        | NativeFuncId::ManifestPython
+        | NativeFuncId::ManifestPythonVars
+        | NativeFuncId::ManifestYamlDoc => Err(RuntimeError {
             span,
             message: format!("std.{} must be handled by the VM", id.name()),
             source_id,
@@ -352,11 +356,42 @@ pub fn call_native(
             }
             Ok(Value::Boolean(found))
         }
-        NativeFuncId::MergePatch => Err(RuntimeError {
-            span,
-            message: format!("std.{} must be handled by the VM", id.name()),
-            source_id,
-        }),
+        NativeFuncId::Mantissa => match args[0] {
+            Value::Number(n) => {
+                let (mantissa, _exp) = frexp(n);
+                Ok(Value::Number(mantissa))
+            }
+            _ => Err(RuntimeError {
+                span,
+                message: format!("std.mantissa expected number, got {}", args[0].type_name()),
+                source_id,
+            }),
+        },
+        NativeFuncId::Exponent => match args[0] {
+            Value::Number(n) => {
+                let (_mantissa, exp) = frexp(n);
+                Ok(Value::Number(exp as f64))
+            }
+            _ => Err(RuntimeError {
+                span,
+                message: format!("std.exponent expected number, got {}", args[0].type_name()),
+                source_id,
+            }),
+        },
+        NativeFuncId::Md5 => match args[0] {
+            Value::String(idx) => {
+                let s = memory_manager.load_string(idx).to_string();
+                let digest = md5::compute(s.as_bytes());
+                let hex = format!("{:032x}", digest);
+                let interned = memory_manager.allocate_string(&hex);
+                Ok(Value::String(interned.index))
+            }
+            _ => Err(RuntimeError {
+                span,
+                message: format!("std.md5 expected string, got {}", args[0].type_name()),
+                source_id,
+            }),
+        },
     }
 }
 
@@ -4093,4 +4128,26 @@ fn std_deep_join(
             source_id,
         }),
     }
+}
+
+/// Decompose a float into (mantissa, exponent) such that x = mantissa * 2^exponent,
+/// with 0.5 <= |mantissa| < 1.0 (matching C's frexp semantics).
+fn frexp(x: f64) -> (f64, i32) {
+    if x == 0.0 || x.is_nan() || x.is_infinite() {
+        return (x, 0);
+    }
+    let bits = x.to_bits();
+    let exp_bits = ((bits >> 52) & 0x7ff) as i32;
+    if exp_bits == 0 {
+        // Subnormal: normalize first
+        let norm = x * (1u64 << 52) as f64;
+        let norm_bits = norm.to_bits();
+        let norm_exp = ((norm_bits >> 52) & 0x7ff) as i32 - 1022 - 52;
+        let mantissa = f64::from_bits((norm_bits & !(0x7ffu64 << 52)) | (1022u64 << 52));
+        let sign = if x < 0.0 { -1.0f64 } else { 1.0f64 };
+        return (mantissa * sign, norm_exp);
+    }
+    let exp = exp_bits - 1022;
+    let mantissa = f64::from_bits((bits & !(0x7ffu64 << 52)) | (1022u64 << 52));
+    (mantissa, exp)
 }

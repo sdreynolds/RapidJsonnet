@@ -28,6 +28,11 @@ crate.spec(
     version = "1.0.7"
 )
 
+crate.spec(
+    package = "md5",
+    version = "0.7"
+)
+
 crate.from_specs()
 use_repo(crate, "crates")
 

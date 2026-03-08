@@ -151,6 +151,13 @@ pub enum NativeFuncId {
     SetInter = 125,
     SetDiff = 126,
     SetMember = 127,
+    ManifestIni = 128,
+    ManifestPython = 129,
+    ManifestPythonVars = 130,
+    Mantissa = 131,
+    Exponent = 132,
+    Md5 = 133,
+    ManifestYamlDoc = 134,
 }
 
 impl NativeFuncId {
@@ -285,6 +292,13 @@ impl NativeFuncId {
             125 => Some(NativeFuncId::SetInter),
             126 => Some(NativeFuncId::SetDiff),
             127 => Some(NativeFuncId::SetMember),
+            128 => Some(NativeFuncId::ManifestIni),
+            129 => Some(NativeFuncId::ManifestPython),
+            130 => Some(NativeFuncId::ManifestPythonVars),
+            131 => Some(NativeFuncId::Mantissa),
+            132 => Some(NativeFuncId::Exponent),
+            133 => Some(NativeFuncId::Md5),
+            134 => Some(NativeFuncId::ManifestYamlDoc),
             _ => None,
         }
     }
@@ -420,6 +434,13 @@ impl NativeFuncId {
             NativeFuncId::SetInter => 2,
             NativeFuncId::SetDiff => 2,
             NativeFuncId::SetMember => 2,
+            NativeFuncId::ManifestIni => 1,
+            NativeFuncId::ManifestPython => 1,
+            NativeFuncId::ManifestPythonVars => 1,
+            NativeFuncId::Mantissa => 1,
+            NativeFuncId::Exponent => 1,
+            NativeFuncId::Md5 => 1,
+            NativeFuncId::ManifestYamlDoc => 3,
         }
     }
 
@@ -554,6 +575,13 @@ impl NativeFuncId {
             NativeFuncId::SetInter => "setInter",
             NativeFuncId::SetDiff => "setDiff",
             NativeFuncId::SetMember => "setMember",
+            NativeFuncId::ManifestIni => "manifestIni",
+            NativeFuncId::ManifestPython => "manifestPython",
+            NativeFuncId::ManifestPythonVars => "manifestPythonVars",
+            NativeFuncId::Mantissa => "mantissa",
+            NativeFuncId::Exponent => "exponent",
+            NativeFuncId::Md5 => "md5",
+            NativeFuncId::ManifestYamlDoc => "manifestYamlDoc",
         }
     }
 
@@ -689,6 +717,13 @@ impl NativeFuncId {
             "setInter" => Some(NativeFuncId::SetInter),
             "setDiff" => Some(NativeFuncId::SetDiff),
             "setMember" => Some(NativeFuncId::SetMember),
+            "manifestIni" => Some(NativeFuncId::ManifestIni),
+            "manifestPython" => Some(NativeFuncId::ManifestPython),
+            "manifestPythonVars" => Some(NativeFuncId::ManifestPythonVars),
+            "mantissa" => Some(NativeFuncId::Mantissa),
+            "exponent" => Some(NativeFuncId::Exponent),
+            "md5" => Some(NativeFuncId::Md5),
+            "manifestYamlDoc" => Some(NativeFuncId::ManifestYamlDoc),
             _ => None,
         }
     }
@@ -712,6 +747,23 @@ pub enum Value {
 
 // Manual implementation of Eq for Value
 impl Eq for Value {}
+
+impl Value {
+    /// Returns a human-readable name for the type of this value
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Null => "null",
+            Value::Boolean(_) => "boolean",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Object(_) => "object",
+            Value::Array(_) => "array",
+            Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) => "function",
+            Value::Import(_) => "import",
+            Value::Binary(_) => "binary",
+        }
+    }
+}
 
 // Manual implementation of Hash for Value
 impl std::hash::Hash for Value {
