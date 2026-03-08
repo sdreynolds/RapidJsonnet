@@ -218,7 +218,8 @@ pub fn call_native(
         | NativeFuncId::ManifestYamlStream
         | NativeFuncId::ManifestTomlEx
         | NativeFuncId::ParseYaml
-        | NativeFuncId::ManifestXmlJsonml => Err(RuntimeError {
+        | NativeFuncId::ManifestXmlJsonml
+        | NativeFuncId::ExtVar => Err(RuntimeError {
             span,
             message: format!("std.{} must be handled by the VM", id.name()),
             source_id,

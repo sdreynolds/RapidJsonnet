@@ -166,6 +166,7 @@ pub enum NativeFuncId {
     ManifestXmlJsonml = 140,
     Sha512 = 141,
     Sha3 = 142,
+    ExtVar = 143,
 }
 
 impl NativeFuncId {
@@ -315,6 +316,7 @@ impl NativeFuncId {
             140 => Some(NativeFuncId::ManifestXmlJsonml),
             141 => Some(NativeFuncId::Sha512),
             142 => Some(NativeFuncId::Sha3),
+            143 => Some(NativeFuncId::ExtVar),
             _ => None,
         }
     }
@@ -465,6 +467,7 @@ impl NativeFuncId {
             NativeFuncId::ManifestXmlJsonml => 1,
             NativeFuncId::Sha512 => 1,
             NativeFuncId::Sha3 => 1,
+            NativeFuncId::ExtVar => 1,
         }
     }
 
@@ -614,6 +617,7 @@ impl NativeFuncId {
             NativeFuncId::ManifestXmlJsonml => "manifestXmlJsonml",
             NativeFuncId::Sha512 => "sha512",
             NativeFuncId::Sha3 => "sha3",
+            NativeFuncId::ExtVar => "extVar",
         }
     }
 
@@ -764,6 +768,7 @@ impl NativeFuncId {
             "manifestXmlJsonml" => Some(NativeFuncId::ManifestXmlJsonml),
             "sha512" => Some(NativeFuncId::Sha512),
             "sha3" => Some(NativeFuncId::Sha3),
+            "extVar" => Some(NativeFuncId::ExtVar),
             _ => None,
         }
     }

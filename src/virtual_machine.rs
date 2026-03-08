@@ -62,6 +62,8 @@ pub struct VirtualMachine {
     memory_manager: MemoryManager,
     /// Start IP of the instruction currently being executed
     instruction_start_ip: usize,
+    /// External variables set via --ext-str / --ext-code CLI flags
+    pub ext_vars: std::collections::HashMap<String, Value>,
 }
 
 impl VirtualMachine {
@@ -89,7 +91,15 @@ impl VirtualMachine {
             stack: Vec::with_capacity(256),
             memory_manager,
             instruction_start_ip: 0,
+            ext_vars: std::collections::HashMap::new(),
         }
+    }
+
+    /// Set an external variable as a string value (for --ext-str CLI flag)
+    pub fn set_ext_var_string(&mut self, key: &str, value: &str) {
+        let alloc = self.memory_manager.allocate_string(value);
+        self.ext_vars
+            .insert(key.to_string(), Value::String(alloc.index));
     }
 
     /// Get the current call frame
@@ -2883,6 +2893,389 @@ impl VirtualMachine {
                         continue;
                     }
 
+                    // Handle std.extVar
+                    if func_id == chunk::NativeFuncId::ExtVar {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let key = match args[0] {
+                            Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
+                            other => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: format!(
+                                        "std.extVar: argument must be a string, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id,
+                                });
+                            }
+                        };
+                        match self.ext_vars.get(&key).copied() {
+                            Some(val) => {
+                                self.push(val)?;
+                                continue;
+                            }
+                            None => {
+                                return Err(RuntimeError {
+                                    span,
+                                    message: format!("Undefined external variable: '{}'", key),
+                                    source_id,
+                                });
+                            }
+                        }
+                    }
+
+                    // Handle set operations with keyF (3-arg forms)
+                    if func_id == chunk::NativeFuncId::SetInter && args.len() == 3 {
+                        let a_val = args[0];
+                        let b_val = args[1];
+                        let key_f = args[2];
+                        let a_idx = match a_val {
+                            Value::Array(i) => i,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "setInter: expected array, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let b_idx = match b_val {
+                            Value::Array(i) => i,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "setInter: expected array, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let a_elems: Vec<Value> =
+                            self.memory_manager.load_array(a_idx).elements.clone();
+                        let b_elems: Vec<Value> =
+                            self.memory_manager.load_array(b_idx).elements.clone();
+                        let mut a_keys: Vec<Value> = Vec::with_capacity(a_elems.len());
+                        for &elem in &a_elems {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&a_elems);
+                            roots.extend_from_slice(&b_elems);
+                            roots.extend_from_slice(&a_keys);
+                            roots.push(key_f);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let key = self.call_value_with_one_arg(key_f, elem);
+                            self.memory_manager.pop_external_roots();
+                            a_keys.push(key?);
+                        }
+                        let mut b_keys: Vec<Value> = Vec::with_capacity(b_elems.len());
+                        for &elem in &b_elems {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&a_elems);
+                            roots.extend_from_slice(&b_elems);
+                            roots.extend_from_slice(&a_keys);
+                            roots.extend_from_slice(&b_keys);
+                            roots.push(key_f);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let key = self.call_value_with_one_arg(key_f, elem);
+                            self.memory_manager.pop_external_roots();
+                            b_keys.push(key?);
+                        }
+                        let mut result = Vec::new();
+                        let (mut i, mut j) = (0usize, 0usize);
+                        while i < a_elems.len() && j < b_elems.len() {
+                            let cmp =
+                                native::compare_values(a_keys[i], b_keys[j], &self.memory_manager);
+                            match cmp {
+                                std::cmp::Ordering::Less => i += 1,
+                                std::cmp::Ordering::Greater => j += 1,
+                                std::cmp::Ordering::Equal => {
+                                    result.push(a_elems[i]);
+                                    i += 1;
+                                    j += 1;
+                                }
+                            }
+                        }
+                        let alloc = self.memory_manager.allocate_array(result);
+                        self.push(Value::Array(alloc.index))?;
+                        continue;
+                    }
+
+                    if func_id == chunk::NativeFuncId::SetDiff && args.len() == 3 {
+                        let a_val = args[0];
+                        let b_val = args[1];
+                        let key_f = args[2];
+                        let a_idx = match a_val {
+                            Value::Array(i) => i,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "setDiff: expected array, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let b_idx = match b_val {
+                            Value::Array(i) => i,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "setDiff: expected array, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let a_elems: Vec<Value> =
+                            self.memory_manager.load_array(a_idx).elements.clone();
+                        let b_elems: Vec<Value> =
+                            self.memory_manager.load_array(b_idx).elements.clone();
+                        let mut a_keys: Vec<Value> = Vec::with_capacity(a_elems.len());
+                        for &elem in &a_elems {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&a_elems);
+                            roots.extend_from_slice(&b_elems);
+                            roots.extend_from_slice(&a_keys);
+                            roots.push(key_f);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let key = self.call_value_with_one_arg(key_f, elem);
+                            self.memory_manager.pop_external_roots();
+                            a_keys.push(key?);
+                        }
+                        let mut b_keys: Vec<Value> = Vec::with_capacity(b_elems.len());
+                        for &elem in &b_elems {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&a_elems);
+                            roots.extend_from_slice(&b_elems);
+                            roots.extend_from_slice(&a_keys);
+                            roots.extend_from_slice(&b_keys);
+                            roots.push(key_f);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let key = self.call_value_with_one_arg(key_f, elem);
+                            self.memory_manager.pop_external_roots();
+                            b_keys.push(key?);
+                        }
+                        let mut result = Vec::new();
+                        let (mut i, mut j) = (0usize, 0usize);
+                        while i < a_elems.len() {
+                            if j >= b_elems.len() {
+                                result.push(a_elems[i]);
+                                i += 1;
+                                continue;
+                            }
+                            let cmp =
+                                native::compare_values(a_keys[i], b_keys[j], &self.memory_manager);
+                            match cmp {
+                                std::cmp::Ordering::Less => {
+                                    result.push(a_elems[i]);
+                                    i += 1;
+                                }
+                                std::cmp::Ordering::Greater => {
+                                    j += 1;
+                                }
+                                std::cmp::Ordering::Equal => {
+                                    i += 1;
+                                    j += 1;
+                                }
+                            }
+                        }
+                        let alloc = self.memory_manager.allocate_array(result);
+                        self.push(Value::Array(alloc.index))?;
+                        continue;
+                    }
+
+                    if func_id == chunk::NativeFuncId::SetMember && args.len() == 3 {
+                        let x_val = args[0];
+                        let arr_val = args[1];
+                        let key_f = args[2];
+                        let arr_idx = match arr_val {
+                            Value::Array(i) => i,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "setMember: expected array, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let arr_elems: Vec<Value> =
+                            self.memory_manager.load_array(arr_idx).elements.clone();
+                        // Compute key for x
+                        let x_key = {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&arr_elems);
+                            roots.push(key_f);
+                            roots.push(x_val);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let k = self.call_value_with_one_arg(key_f, x_val);
+                            self.memory_manager.pop_external_roots();
+                            k?
+                        };
+                        // Binary search
+                        let mut lo = 0usize;
+                        let mut hi = arr_elems.len();
+                        let mut found = false;
+                        while lo < hi {
+                            let mid = lo + (hi - lo) / 2;
+                            let mid_key = {
+                                let mut roots = Vec::from(self.stack.clone());
+                                roots.extend_from_slice(&arr_elems);
+                                roots.push(key_f);
+                                roots.push(x_val);
+                                roots.push(x_key);
+                                let mut open_upvalue_roots = Vec::new();
+                                let mut upvalue = self.open_upvalues;
+                                while let Some(uv_idx) = upvalue {
+                                    open_upvalue_roots.push(uv_idx);
+                                    upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                }
+                                self.memory_manager
+                                    .push_external_roots(roots, open_upvalue_roots);
+                                let k = self.call_value_with_one_arg(key_f, arr_elems[mid]);
+                                self.memory_manager.pop_external_roots();
+                                k?
+                            };
+                            let cmp = native::compare_values(x_key, mid_key, &self.memory_manager);
+                            match cmp {
+                                std::cmp::Ordering::Equal => {
+                                    found = true;
+                                    break;
+                                }
+                                std::cmp::Ordering::Less => hi = mid,
+                                std::cmp::Ordering::Greater => lo = mid + 1,
+                            }
+                        }
+                        self.push(Value::Boolean(found))?;
+                        continue;
+                    }
+
+                    if func_id == chunk::NativeFuncId::SetUnion && args.len() == 3 {
+                        let a_val = args[0];
+                        let b_val = args[1];
+                        let key_f = args[2];
+                        let a_idx = match a_val {
+                            Value::Array(i) => i,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "setUnion: expected array, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let b_idx = match b_val {
+                            Value::Array(i) => i,
+                            other => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "setUnion: expected array, got {}",
+                                        other.type_name()
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let mut combined = self.memory_manager.load_array(a_idx).elements.clone();
+                        combined.extend_from_slice(
+                            &self.memory_manager.load_array(b_idx).elements.clone(),
+                        );
+                        // Sort combined by keyF
+                        let mut keys: Vec<Value> = Vec::with_capacity(combined.len());
+                        for &elem in &combined {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&combined);
+                            roots.extend_from_slice(&keys);
+                            roots.push(key_f);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let key = self.call_value_with_one_arg(key_f, elem);
+                            self.memory_manager.pop_external_roots();
+                            keys.push(key?);
+                        }
+                        let mut indexed: Vec<usize> = (0..combined.len()).collect();
+                        {
+                            let mm = &self.memory_manager;
+                            indexed.sort_by(|&a, &b| native::compare_values(keys[a], keys[b], mm));
+                        }
+                        let sorted_elems: Vec<Value> =
+                            indexed.iter().map(|&i| combined[i]).collect();
+                        let sorted_keys: Vec<Value> = indexed.iter().map(|&i| keys[i]).collect();
+                        // Dedup by keyF: keep first occurrence of each key
+                        let mut result: Vec<Value> = Vec::new();
+                        let mut last_key: Option<Value> = None;
+                        for (elem, key) in sorted_elems.iter().zip(sorted_keys.iter()) {
+                            if let Some(lk) = last_key {
+                                if native::compare_values(lk, *key, &self.memory_manager)
+                                    == std::cmp::Ordering::Equal
+                                {
+                                    continue;
+                                }
+                            }
+                            result.push(*elem);
+                            last_key = Some(*key);
+                        }
+                        let alloc = self.memory_manager.allocate_array(result);
+                        self.push(Value::Array(alloc.index))?;
+                        continue;
+                    }
+
                     // Handle std.parseJson
                     if func_id == chunk::NativeFuncId::ParseJson {
                         let span = self.get_current_span();
@@ -3826,6 +4219,404 @@ impl VirtualMachine {
                                 }
                             }
 
+                            // Handle std.extVar
+                            if id == chunk::NativeFuncId::ExtVar {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+                                let key = match args[0] {
+                                    Value::String(idx) => {
+                                        self.memory_manager.load_string(idx).to_string()
+                                    }
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message: format!(
+                                                "std.extVar: argument must be a string, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id,
+                                        });
+                                    }
+                                };
+                                match self.ext_vars.get(&key).copied() {
+                                    Some(val) => {
+                                        self.push(val)?;
+                                        continue;
+                                    }
+                                    None => {
+                                        return Err(RuntimeError {
+                                            span,
+                                            message: format!(
+                                                "Undefined external variable: '{}'",
+                                                key
+                                            ),
+                                            source_id,
+                                        });
+                                    }
+                                }
+                            }
+
+                            // Handle set operations with keyF (3-arg forms)
+                            if id == chunk::NativeFuncId::SetInter && args.len() == 3 {
+                                let a_val = args[0];
+                                let b_val = args[1];
+                                let key_f = args[2];
+                                let a_idx = match a_val {
+                                    Value::Array(i) => i,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "setInter: expected array, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let b_idx = match b_val {
+                                    Value::Array(i) => i,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "setInter: expected array, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let a_elems: Vec<Value> =
+                                    self.memory_manager.load_array(a_idx).elements.clone();
+                                let b_elems: Vec<Value> =
+                                    self.memory_manager.load_array(b_idx).elements.clone();
+                                let mut a_keys: Vec<Value> = Vec::with_capacity(a_elems.len());
+                                for &elem in &a_elems {
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&a_elems);
+                                    roots.extend_from_slice(&b_elems);
+                                    roots.extend_from_slice(&a_keys);
+                                    roots.push(key_f);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let key = self.call_value_with_one_arg(key_f, elem);
+                                    self.memory_manager.pop_external_roots();
+                                    a_keys.push(key?);
+                                }
+                                let mut b_keys: Vec<Value> = Vec::with_capacity(b_elems.len());
+                                for &elem in &b_elems {
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&a_elems);
+                                    roots.extend_from_slice(&b_elems);
+                                    roots.extend_from_slice(&a_keys);
+                                    roots.extend_from_slice(&b_keys);
+                                    roots.push(key_f);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let key = self.call_value_with_one_arg(key_f, elem);
+                                    self.memory_manager.pop_external_roots();
+                                    b_keys.push(key?);
+                                }
+                                let mut result = Vec::new();
+                                let (mut i, mut j) = (0usize, 0usize);
+                                while i < a_elems.len() && j < b_elems.len() {
+                                    let cmp = native::compare_values(
+                                        a_keys[i],
+                                        b_keys[j],
+                                        &self.memory_manager,
+                                    );
+                                    match cmp {
+                                        std::cmp::Ordering::Less => i += 1,
+                                        std::cmp::Ordering::Greater => j += 1,
+                                        std::cmp::Ordering::Equal => {
+                                            result.push(a_elems[i]);
+                                            i += 1;
+                                            j += 1;
+                                        }
+                                    }
+                                }
+                                let alloc = self.memory_manager.allocate_array(result);
+                                self.push(Value::Array(alloc.index))?;
+                                continue;
+                            }
+
+                            if id == chunk::NativeFuncId::SetDiff && args.len() == 3 {
+                                let a_val = args[0];
+                                let b_val = args[1];
+                                let key_f = args[2];
+                                let a_idx = match a_val {
+                                    Value::Array(i) => i,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "setDiff: expected array, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let b_idx = match b_val {
+                                    Value::Array(i) => i,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "setDiff: expected array, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let a_elems: Vec<Value> =
+                                    self.memory_manager.load_array(a_idx).elements.clone();
+                                let b_elems: Vec<Value> =
+                                    self.memory_manager.load_array(b_idx).elements.clone();
+                                let mut a_keys: Vec<Value> = Vec::with_capacity(a_elems.len());
+                                for &elem in &a_elems {
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&a_elems);
+                                    roots.extend_from_slice(&b_elems);
+                                    roots.extend_from_slice(&a_keys);
+                                    roots.push(key_f);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let key = self.call_value_with_one_arg(key_f, elem);
+                                    self.memory_manager.pop_external_roots();
+                                    a_keys.push(key?);
+                                }
+                                let mut b_keys: Vec<Value> = Vec::with_capacity(b_elems.len());
+                                for &elem in &b_elems {
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&a_elems);
+                                    roots.extend_from_slice(&b_elems);
+                                    roots.extend_from_slice(&a_keys);
+                                    roots.extend_from_slice(&b_keys);
+                                    roots.push(key_f);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let key = self.call_value_with_one_arg(key_f, elem);
+                                    self.memory_manager.pop_external_roots();
+                                    b_keys.push(key?);
+                                }
+                                let mut result = Vec::new();
+                                let (mut i, mut j) = (0usize, 0usize);
+                                while i < a_elems.len() {
+                                    if j >= b_elems.len() {
+                                        result.push(a_elems[i]);
+                                        i += 1;
+                                        continue;
+                                    }
+                                    let cmp = native::compare_values(
+                                        a_keys[i],
+                                        b_keys[j],
+                                        &self.memory_manager,
+                                    );
+                                    match cmp {
+                                        std::cmp::Ordering::Less => {
+                                            result.push(a_elems[i]);
+                                            i += 1;
+                                        }
+                                        std::cmp::Ordering::Greater => {
+                                            j += 1;
+                                        }
+                                        std::cmp::Ordering::Equal => {
+                                            i += 1;
+                                            j += 1;
+                                        }
+                                    }
+                                }
+                                let alloc = self.memory_manager.allocate_array(result);
+                                self.push(Value::Array(alloc.index))?;
+                                continue;
+                            }
+
+                            if id == chunk::NativeFuncId::SetMember && args.len() == 3 {
+                                let x_val = args[0];
+                                let arr_val = args[1];
+                                let key_f = args[2];
+                                let arr_idx = match arr_val {
+                                    Value::Array(i) => i,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "setMember: expected array, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let arr_elems: Vec<Value> =
+                                    self.memory_manager.load_array(arr_idx).elements.clone();
+                                let x_key = {
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&arr_elems);
+                                    roots.push(key_f);
+                                    roots.push(x_val);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let k = self.call_value_with_one_arg(key_f, x_val);
+                                    self.memory_manager.pop_external_roots();
+                                    k?
+                                };
+                                let mut lo = 0usize;
+                                let mut hi = arr_elems.len();
+                                let mut found = false;
+                                while lo < hi {
+                                    let mid = lo + (hi - lo) / 2;
+                                    let mid_key = {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&arr_elems);
+                                        roots.push(key_f);
+                                        roots.push(x_val);
+                                        roots.push(x_key);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let k = self.call_value_with_one_arg(key_f, arr_elems[mid]);
+                                        self.memory_manager.pop_external_roots();
+                                        k?
+                                    };
+                                    let cmp = native::compare_values(
+                                        x_key,
+                                        mid_key,
+                                        &self.memory_manager,
+                                    );
+                                    match cmp {
+                                        std::cmp::Ordering::Equal => {
+                                            found = true;
+                                            break;
+                                        }
+                                        std::cmp::Ordering::Less => hi = mid,
+                                        std::cmp::Ordering::Greater => lo = mid + 1,
+                                    }
+                                }
+                                self.push(Value::Boolean(found))?;
+                                continue;
+                            }
+
+                            if id == chunk::NativeFuncId::SetUnion && args.len() == 3 {
+                                let a_val = args[0];
+                                let b_val = args[1];
+                                let key_f = args[2];
+                                let a_idx = match a_val {
+                                    Value::Array(i) => i,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "setUnion: expected array, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let b_idx = match b_val {
+                                    Value::Array(i) => i,
+                                    other => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "setUnion: expected array, got {}",
+                                                other.type_name()
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let mut combined =
+                                    self.memory_manager.load_array(a_idx).elements.clone();
+                                combined.extend_from_slice(
+                                    &self.memory_manager.load_array(b_idx).elements.clone(),
+                                );
+                                let mut keys: Vec<Value> = Vec::with_capacity(combined.len());
+                                for &elem in &combined {
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&combined);
+                                    roots.extend_from_slice(&keys);
+                                    roots.push(key_f);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let key = self.call_value_with_one_arg(key_f, elem);
+                                    self.memory_manager.pop_external_roots();
+                                    keys.push(key?);
+                                }
+                                let mut indexed: Vec<usize> = (0..combined.len()).collect();
+                                {
+                                    let mm = &self.memory_manager;
+                                    indexed.sort_by(|&a, &b| {
+                                        native::compare_values(keys[a], keys[b], mm)
+                                    });
+                                }
+                                let sorted_elems: Vec<Value> =
+                                    indexed.iter().map(|&i| combined[i]).collect();
+                                let sorted_keys: Vec<Value> =
+                                    indexed.iter().map(|&i| keys[i]).collect();
+                                let mut result: Vec<Value> = Vec::new();
+                                let mut last_key: Option<Value> = None;
+                                for (elem, key) in sorted_elems.iter().zip(sorted_keys.iter()) {
+                                    if let Some(lk) = last_key {
+                                        if native::compare_values(lk, *key, &self.memory_manager)
+                                            == std::cmp::Ordering::Equal
+                                        {
+                                            continue;
+                                        }
+                                    }
+                                    result.push(*elem);
+                                    last_key = Some(*key);
+                                }
+                                let alloc = self.memory_manager.allocate_array(result);
+                                self.push(Value::Array(alloc.index))?;
+                                continue;
+                            }
+
                             // Call native function
                             let span = self.get_current_span();
                             let source_id = self.current_chunk().source_id.to_string();
@@ -4283,6 +5074,11 @@ impl VirtualMachine {
         // Add all active frames' closures as roots
         for i in 0..self.frame_count {
             roots.push(Value::Closure(self.frames[i].closure));
+        }
+
+        // Root all ext_vars values so GC doesn't collect them
+        for val in self.ext_vars.values() {
+            roots.push(*val);
         }
 
         // Collect open upvalues - these are upvalues that point to stack locations
@@ -5907,7 +6703,20 @@ pub fn execute(
     chunk: Chunk,
     memory_manager: MemoryManager,
 ) -> Result<serde_json::Value, RuntimeError> {
+    execute_with_ext_vars(chunk, memory_manager, &[])
+}
+
+/// Execute with external variables set via --ext-str / --ext-code CLI flags
+pub fn execute_with_ext_vars(
+    chunk: Chunk,
+    memory_manager: MemoryManager,
+    ext_strs: &[(String, String)],
+) -> Result<serde_json::Value, RuntimeError> {
     let mut vm = VirtualMachine::new(chunk, memory_manager);
+
+    for (k, v) in ext_strs {
+        vm.set_ext_var_string(k, v);
+    }
 
     let value = vm.interpret()?;
 
@@ -6515,5 +7324,52 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("Invalid stack slot"));
+    }
+
+    #[test]
+    fn test_ext_var_string() {
+        // Compile std.extVar("myVar") and run with ext var set
+        let source = r#"std.extVar("myVar")"#;
+        let mut scanner = scanner::Scanner::new(source, "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = compiler::Compiler::new(&mut scanner, "test.jsonnet");
+        let chunk = compiler
+            .compile(&mut memory_manager)
+            .expect("compile failed");
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        vm.set_ext_var_string("myVar", "hello");
+        let result = vm.interpret().expect("interpret failed");
+
+        match result {
+            Value::String(idx) => {
+                assert_eq!(vm.memory_manager.load_string(idx), "hello");
+            }
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ext_var_undefined_error() {
+        // Compile std.extVar("undefined") and run without setting any ext vars
+        let source = r#"std.extVar("undefined")"#;
+        let mut scanner = scanner::Scanner::new(source, "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = compiler::Compiler::new(&mut scanner, "test.jsonnet");
+        let chunk = compiler
+            .compile(&mut memory_manager)
+            .expect("compile failed");
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret();
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("Undefined external variable"),
+            "expected 'Undefined external variable' in error message"
+        );
     }
 }

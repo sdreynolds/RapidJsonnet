@@ -5,7 +5,7 @@ use scanner::Scanner;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use virtual_machine::execute;
+use virtual_machine::{execute, execute_with_ext_vars};
 
 #[derive(Debug)]
 enum MainError {
@@ -25,13 +25,33 @@ impl std::fmt::Display for MainError {
 impl std::error::Error for MainError {}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
+    // Parse --ext-str flags before the filename argument
+    let mut ext_strs: Vec<(String, String)> = Vec::new();
+    let mut args_iter = env::args().skip(1).peekable();
+    while let Some(arg) = args_iter.peek().cloned() {
+        if arg.starts_with("--ext-str=") {
+            let kv = arg.trim_start_matches("--ext-str=");
+            if let Some((k, v)) = kv.split_once('=') {
+                ext_strs.push((k.to_string(), v.to_string()));
+            }
+            args_iter.next();
+        } else if arg == "--ext-str" {
+            args_iter.next();
+            if let Some(kv) = args_iter.next() {
+                if let Some((k, v)) = kv.split_once('=') {
+                    ext_strs.push((k.to_string(), v.to_string()));
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    let file_arg = args_iter.next();
 
-    if args.len() > 1 {
+    if let Some(filename) = file_arg {
         // File mode: read from file, compile, and execute
-        let filename = &args[1];
-        let content = fs::read_to_string(filename)?;
-        compile_and_execute(&content, filename)?;
+        let content = fs::read_to_string(&filename)?;
+        compile_and_execute(&content, &filename, &ext_strs)?;
     } else {
         // REPL mode: read from stdin, compile, and execute
         repl_mode()?;
@@ -40,7 +60,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn compile_and_execute(
+    content: &str,
+    source_id: &str,
+    ext_strs: &[(String, String)],
+) -> Result<(), Box<dyn std::error::Error>> {
     let source = Source::from(content);
 
     // Compile the input
@@ -60,8 +84,8 @@ fn compile_and_execute(content: &str, source_id: &str) -> Result<(), Box<dyn std
             let debug_report = chunk.debug_compilation();
             debug_report.print((source_id, &source))?;
 
-            // Execute the compiled chunk
-            match execute(chunk, memory_manager) {
+            // Execute the compiled chunk with ext vars
+            match execute_with_ext_vars(chunk, memory_manager, ext_strs) {
                 Ok(result) => {
                     println!("🎯 Execution result: {}", result);
                     Ok(())
