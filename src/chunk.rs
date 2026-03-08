@@ -143,6 +143,14 @@ pub enum NativeFuncId {
     MergePatch = 117,
     ParseJson = 118,
     MapWithIndex = 119,
+    Foldr = 120,
+    MapWithKey = 121,
+    FilterMap = 122,
+    Set = 123,
+    SetUnion = 124,
+    SetInter = 125,
+    SetDiff = 126,
+    SetMember = 127,
 }
 
 impl NativeFuncId {
@@ -269,6 +277,14 @@ impl NativeFuncId {
             117 => Some(NativeFuncId::MergePatch),
             118 => Some(NativeFuncId::ParseJson),
             119 => Some(NativeFuncId::MapWithIndex),
+            120 => Some(NativeFuncId::Foldr),
+            121 => Some(NativeFuncId::MapWithKey),
+            122 => Some(NativeFuncId::FilterMap),
+            123 => Some(NativeFuncId::Set),
+            124 => Some(NativeFuncId::SetUnion),
+            125 => Some(NativeFuncId::SetInter),
+            126 => Some(NativeFuncId::SetDiff),
+            127 => Some(NativeFuncId::SetMember),
             _ => None,
         }
     }
@@ -396,6 +412,14 @@ impl NativeFuncId {
             NativeFuncId::MergePatch => 2,
             NativeFuncId::ParseJson => 1,
             NativeFuncId::MapWithIndex => 2,
+            NativeFuncId::Foldr => 3,
+            NativeFuncId::MapWithKey => 2,
+            NativeFuncId::FilterMap => 3,
+            NativeFuncId::Set => 1,
+            NativeFuncId::SetUnion => 2,
+            NativeFuncId::SetInter => 2,
+            NativeFuncId::SetDiff => 2,
+            NativeFuncId::SetMember => 2,
         }
     }
 
@@ -522,6 +546,14 @@ impl NativeFuncId {
             NativeFuncId::MergePatch => "mergePatch",
             NativeFuncId::ParseJson => "parseJson",
             NativeFuncId::MapWithIndex => "mapWithIndex",
+            NativeFuncId::Foldr => "foldr",
+            NativeFuncId::MapWithKey => "mapWithKey",
+            NativeFuncId::FilterMap => "filterMap",
+            NativeFuncId::Set => "set",
+            NativeFuncId::SetUnion => "setUnion",
+            NativeFuncId::SetInter => "setInter",
+            NativeFuncId::SetDiff => "setDiff",
+            NativeFuncId::SetMember => "setMember",
         }
     }
 
@@ -649,6 +681,14 @@ impl NativeFuncId {
             "mergePatch" => Some(NativeFuncId::MergePatch),
             "parseJson" => Some(NativeFuncId::ParseJson),
             "mapWithIndex" => Some(NativeFuncId::MapWithIndex),
+            "foldr" => Some(NativeFuncId::Foldr),
+            "mapWithKey" => Some(NativeFuncId::MapWithKey),
+            "filterMap" => Some(NativeFuncId::FilterMap),
+            "set" => Some(NativeFuncId::Set),
+            "setUnion" => Some(NativeFuncId::SetUnion),
+            "setInter" => Some(NativeFuncId::SetInter),
+            "setDiff" => Some(NativeFuncId::SetDiff),
+            "setMember" => Some(NativeFuncId::SetMember),
             _ => None,
         }
     }

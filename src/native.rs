@@ -217,11 +217,177 @@ pub fn call_native(
         | NativeFuncId::Foldl
         | NativeFuncId::FlatMap
         | NativeFuncId::MapWithIndex
-        | NativeFuncId::ParseJson => Err(RuntimeError {
+        | NativeFuncId::ParseJson
+        | NativeFuncId::Foldr
+        | NativeFuncId::MapWithKey
+        | NativeFuncId::FilterMap => Err(RuntimeError {
             span,
             message: format!("std.{} must be handled by the VM", id.name()),
             source_id,
         }),
+        NativeFuncId::Set => {
+            let arr_val = args[0];
+            let sorted = std_sort(arr_val, memory_manager, span.clone(), source_id.clone())?;
+            std_uniq(sorted, memory_manager, span, source_id)
+        }
+        NativeFuncId::SetUnion => {
+            let a_val = args[0];
+            let b_val = args[1];
+            let a_idx = match a_val {
+                Value::Array(i) => i,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.setUnion: first argument must be an array".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let b_idx = match b_val {
+                Value::Array(i) => i,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.setUnion: second argument must be an array".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let mut combined = memory_manager.load_array(a_idx).elements.clone();
+            combined.extend_from_slice(&memory_manager.load_array(b_idx).elements.clone());
+            let alloc = memory_manager.allocate_array(combined);
+            let sorted = std_sort(
+                Value::Array(alloc.index),
+                memory_manager,
+                span.clone(),
+                source_id.clone(),
+            )?;
+            std_uniq(sorted, memory_manager, span, source_id)
+        }
+        NativeFuncId::SetInter => {
+            let a_val = args[0];
+            let b_val = args[1];
+            let a_idx = match a_val {
+                Value::Array(i) => i,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.setInter: first argument must be an array".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let b_idx = match b_val {
+                Value::Array(i) => i,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.setInter: second argument must be an array".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let a_elems = memory_manager.load_array(a_idx).elements.clone();
+            let b_elems = memory_manager.load_array(b_idx).elements.clone();
+            let mut result: Vec<Value> = Vec::new();
+            let mut i = 0;
+            let mut j = 0;
+            while i < a_elems.len() && j < b_elems.len() {
+                let cmp = compare_values(a_elems[i], b_elems[j], memory_manager);
+                match cmp {
+                    std::cmp::Ordering::Less => i += 1,
+                    std::cmp::Ordering::Greater => j += 1,
+                    std::cmp::Ordering::Equal => {
+                        result.push(a_elems[i]);
+                        i += 1;
+                        j += 1;
+                    }
+                }
+            }
+            let alloc = memory_manager.allocate_array(result);
+            Ok(Value::Array(alloc.index))
+        }
+        NativeFuncId::SetDiff => {
+            let a_val = args[0];
+            let b_val = args[1];
+            let a_idx = match a_val {
+                Value::Array(i) => i,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.setDiff: first argument must be an array".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let b_idx = match b_val {
+                Value::Array(i) => i,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.setDiff: second argument must be an array".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let a_elems = memory_manager.load_array(a_idx).elements.clone();
+            let b_elems = memory_manager.load_array(b_idx).elements.clone();
+            let mut result: Vec<Value> = Vec::new();
+            let mut i = 0;
+            let mut j = 0;
+            while i < a_elems.len() {
+                if j >= b_elems.len() {
+                    result.push(a_elems[i]);
+                    i += 1;
+                } else {
+                    let cmp = compare_values(a_elems[i], b_elems[j], memory_manager);
+                    match cmp {
+                        std::cmp::Ordering::Less => {
+                            result.push(a_elems[i]);
+                            i += 1;
+                        }
+                        std::cmp::Ordering::Greater => j += 1,
+                        std::cmp::Ordering::Equal => {
+                            i += 1;
+                            j += 1;
+                        }
+                    }
+                }
+            }
+            let alloc = memory_manager.allocate_array(result);
+            Ok(Value::Array(alloc.index))
+        }
+        NativeFuncId::SetMember => {
+            let x_val = args[0];
+            let arr_val = args[1];
+            let arr_idx = match arr_val {
+                Value::Array(i) => i,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.setMember: second argument must be an array".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let elems = memory_manager.load_array(arr_idx).elements.clone();
+            let mut lo = 0usize;
+            let mut hi = elems.len();
+            let mut found = false;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let cmp = compare_values(x_val, elems[mid], memory_manager);
+                match cmp {
+                    std::cmp::Ordering::Equal => {
+                        found = true;
+                        break;
+                    }
+                    std::cmp::Ordering::Less => hi = mid,
+                    std::cmp::Ordering::Greater => lo = mid + 1,
+                }
+            }
+            Ok(Value::Boolean(found))
+        }
         NativeFuncId::MergePatch => {
             std_merge_patch(args[0], args[1], memory_manager, span, source_id)
         }

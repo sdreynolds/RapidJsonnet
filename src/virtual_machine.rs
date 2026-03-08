@@ -2569,6 +2569,196 @@ impl VirtualMachine {
                         continue;
                     }
 
+                    // Handle std.foldr (right-to-left fold, element first argument)
+                    if func_id == chunk::NativeFuncId::Foldr {
+                        let func_val = args[0];
+                        let arr_val = args[1];
+                        let mut acc = args[2];
+                        let arr_idx = match arr_val {
+                            Value::Array(a) => a,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "std.foldr: second argument must be an array"
+                                        .to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let elements: Vec<Value> =
+                            self.memory_manager.load_array(arr_idx).elements.clone();
+                        for &elem in elements.iter().rev() {
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&elements);
+                            roots.push(func_val);
+                            roots.push(acc);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let result = self.call_value_with_two_args(func_val, elem, acc);
+                            self.memory_manager.pop_external_roots();
+                            acc = result?;
+                        }
+                        self.push(acc)?;
+                        continue;
+                    }
+
+                    // Handle std.mapWithKey (2-arg callback over object fields: key, value)
+                    if func_id == chunk::NativeFuncId::MapWithKey {
+                        let func_val = args[0];
+                        let obj_val = args[1];
+                        let o_idx = match obj_val {
+                            Value::Object(o) => o,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "std.mapWithKey: second argument must be an object"
+                                        .to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        // Collect visible fields: (key StringIndex, raw value, visibility)
+                        let field_data: Vec<(StringIndex, Value, FieldVisibility)> = {
+                            let obj = self.memory_manager.load_object(o_idx);
+                            obj.properties
+                                .iter()
+                                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                                .map(|(k, f)| (*k, f.value, f.visibility))
+                                .collect()
+                        };
+                        let mut new_properties: std::collections::HashMap<
+                            StringIndex,
+                            ObjectField,
+                        > = std::collections::HashMap::new();
+                        for (k_idx, raw_val, vis) in &field_data {
+                            let k_idx = *k_idx;
+                            let raw_val = *raw_val;
+                            let vis = *vis;
+                            // Force-evaluate thunk if needed
+                            let evaled_val = match raw_val {
+                                Value::Closure(closure_idx) => {
+                                    self.execute_thunk_sync(closure_idx, Some(o_idx), None)?
+                                }
+                                other => other,
+                            };
+                            // Build key string value
+                            let key_str = self.memory_manager.load_string(k_idx).to_string();
+                            let key_alloc = self.memory_manager.allocate_string(&key_str);
+                            let key_val = Value::String(key_alloc.index);
+                            // GC root
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.push(func_val);
+                            roots.push(evaled_val);
+                            roots.push(key_val);
+                            for f in new_properties.values() {
+                                roots.push(f.value);
+                            }
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let result =
+                                self.call_value_with_two_args(func_val, key_val, evaled_val);
+                            self.memory_manager.pop_external_roots();
+                            new_properties.insert(
+                                k_idx,
+                                ObjectField {
+                                    value: result?,
+                                    super_obj: None,
+                                    visibility: vis,
+                                },
+                            );
+                        }
+                        let alloc = self
+                            .memory_manager
+                            .allocate_object_with_properties(new_properties);
+                        self.push(Value::Object(alloc.index))?;
+                        continue;
+                    }
+
+                    // Handle std.filterMap (filter then map, both 1-arg callbacks)
+                    if func_id == chunk::NativeFuncId::FilterMap {
+                        let filter_func = args[0];
+                        let map_func = args[1];
+                        let arr_val = args[2];
+                        let arr_idx = match arr_val {
+                            Value::Array(a) => a,
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: "std.filterMap: third argument must be an array"
+                                        .to_string(),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        };
+                        let elements: Vec<Value> =
+                            self.memory_manager.load_array(arr_idx).elements.clone();
+                        let mut results: Vec<Value> = Vec::new();
+                        for &elem in &elements {
+                            // Filter pass
+                            let mut roots = Vec::from(self.stack.clone());
+                            roots.extend_from_slice(&elements);
+                            roots.extend_from_slice(&results);
+                            roots.push(filter_func);
+                            roots.push(map_func);
+                            let mut open_upvalue_roots = Vec::new();
+                            let mut upvalue = self.open_upvalues;
+                            while let Some(uv_idx) = upvalue {
+                                open_upvalue_roots.push(uv_idx);
+                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                            }
+                            self.memory_manager
+                                .push_external_roots(roots, open_upvalue_roots);
+                            let keep = self.call_value_with_one_arg(filter_func, elem);
+                            self.memory_manager.pop_external_roots();
+                            match keep? {
+                                Value::Boolean(true) => {
+                                    // Map pass
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&elements);
+                                    roots.extend_from_slice(&results);
+                                    roots.push(filter_func);
+                                    roots.push(map_func);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let mapped = self.call_value_with_one_arg(map_func, elem);
+                                    self.memory_manager.pop_external_roots();
+                                    results.push(mapped?);
+                                }
+                                Value::Boolean(false) => {}
+                                _ => {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message:
+                                            "std.filterMap: filter function must return a boolean"
+                                                .to_string(),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        let alloc = self.memory_manager.allocate_array(results);
+                        self.push(Value::Array(alloc.index))?;
+                        continue;
+                    }
+
                     // Handle std.parseJson
                     if func_id == chunk::NativeFuncId::ParseJson {
                         let span = self.get_current_span();
