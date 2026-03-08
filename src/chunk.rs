@@ -180,6 +180,13 @@ pub enum NativeFuncId {
     ObjectFromPairs = 154,
     Pick = 155,
     Omit = 156,
+    SortBy = 157,
+    CountBy = 158,
+    UniqBy = 159,
+    ToPairs = 160,
+    MinBy = 161,
+    MaxBy = 162,
+    Product = 163,
 }
 
 impl NativeFuncId {
@@ -343,6 +350,13 @@ impl NativeFuncId {
             154 => Some(NativeFuncId::ObjectFromPairs),
             155 => Some(NativeFuncId::Pick),
             156 => Some(NativeFuncId::Omit),
+            157 => Some(NativeFuncId::SortBy),
+            158 => Some(NativeFuncId::CountBy),
+            159 => Some(NativeFuncId::UniqBy),
+            160 => Some(NativeFuncId::ToPairs),
+            161 => Some(NativeFuncId::MinBy),
+            162 => Some(NativeFuncId::MaxBy),
+            163 => Some(NativeFuncId::Product),
             _ => None,
         }
     }
@@ -507,6 +521,13 @@ impl NativeFuncId {
             NativeFuncId::ObjectFromPairs => 1,
             NativeFuncId::Pick => 2,
             NativeFuncId::Omit => 2,
+            NativeFuncId::SortBy => 2,
+            NativeFuncId::CountBy => 2,
+            NativeFuncId::UniqBy => 2,
+            NativeFuncId::ToPairs => 1,
+            NativeFuncId::MinBy => 2,
+            NativeFuncId::MaxBy => 2,
+            NativeFuncId::Product => 1,
         }
     }
 
@@ -670,6 +691,13 @@ impl NativeFuncId {
             NativeFuncId::ObjectFromPairs => "objectFromPairs",
             NativeFuncId::Pick => "pick",
             NativeFuncId::Omit => "omit",
+            NativeFuncId::SortBy => "sortBy",
+            NativeFuncId::CountBy => "countBy",
+            NativeFuncId::UniqBy => "uniqBy",
+            NativeFuncId::ToPairs => "toPairs",
+            NativeFuncId::MinBy => "minBy",
+            NativeFuncId::MaxBy => "maxBy",
+            NativeFuncId::Product => "product",
         }
     }
 
@@ -834,6 +862,13 @@ impl NativeFuncId {
             "objectFromPairs" => Some(NativeFuncId::ObjectFromPairs),
             "pick" => Some(NativeFuncId::Pick),
             "omit" => Some(NativeFuncId::Omit),
+            "sortBy" => Some(NativeFuncId::SortBy),
+            "countBy" => Some(NativeFuncId::CountBy),
+            "uniqBy" => Some(NativeFuncId::UniqBy),
+            "toPairs" => Some(NativeFuncId::ToPairs),
+            "minBy" => Some(NativeFuncId::MinBy),
+            "maxBy" => Some(NativeFuncId::MaxBy),
+            "product" => Some(NativeFuncId::Product),
             _ => None,
         }
     }

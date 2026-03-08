@@ -300,7 +300,13 @@ pub fn call_native(
         | NativeFuncId::GroupBy
         | NativeFuncId::MapKeys
         | NativeFuncId::FilterObject
-        | NativeFuncId::ObjectFlatten => Err(RuntimeError {
+        | NativeFuncId::ObjectFlatten
+        | NativeFuncId::SortBy
+        | NativeFuncId::CountBy
+        | NativeFuncId::UniqBy
+        | NativeFuncId::MinBy
+        | NativeFuncId::MaxBy
+        | NativeFuncId::ToPairs => Err(RuntimeError {
             span,
             message: format!("std.{} must be handled by the VM", id.name()),
             source_id,
@@ -581,6 +587,7 @@ pub fn call_native(
         }
         NativeFuncId::Pick => std_pick(args[0], args[1], memory_manager, span, source_id),
         NativeFuncId::Omit => std_omit(args[0], args[1], memory_manager, span, source_id),
+        NativeFuncId::Product => std_product(args[0], memory_manager, span, source_id),
     }
 }
 
@@ -4686,4 +4693,101 @@ fn std_omit(
     }
     let obj_alloc = memory_manager.allocate_object_with_properties(new_properties);
     Ok(Value::Object(obj_alloc.index))
+}
+
+// ─── std.toPairs ──────────────────────────────────────────────────────────────
+
+/// std.toPairs(obj): Convert an object to an array of [key, value] pairs.
+fn std_to_pairs(
+    obj_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let obj_idx = match obj_val {
+        Value::Object(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.toPairs: argument must be an object".to_string(),
+                source_id,
+            });
+        }
+    };
+    // Two-phase borrow: collect visible fields
+    let all_pairs: Vec<(StringIndex, Value)> = memory_manager
+        .load_object(obj_idx)
+        .properties
+        .iter()
+        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+        .map(|(k, v)| (*k, v.value))
+        .collect();
+    let mut pairs: Vec<Value> = Vec::with_capacity(all_pairs.len());
+    for (key_idx, val) in all_pairs {
+        let key_str = memory_manager.load_string(key_idx).to_string();
+        let k_alloc = memory_manager.allocate_string(&key_str);
+        let k_val = Value::String(k_alloc.index);
+        let pair_alloc = memory_manager.allocate_array(vec![k_val, val]);
+        pairs.push(Value::Array(pair_alloc.index));
+    }
+    let alloc = memory_manager.allocate_array(pairs);
+    Ok(Value::Array(alloc.index))
+}
+
+// ─── std.product ──────────────────────────────────────────────────────────────
+
+/// std.product(arrs): Cartesian product of an array of arrays.
+fn std_product(
+    arr_val: Value,
+    memory_manager: &mut MemoryManager,
+    span: Range<usize>,
+    source_id: String,
+) -> Result<Value, RuntimeError> {
+    let arr_idx = match arr_val {
+        Value::Array(i) => i,
+        _ => {
+            return Err(RuntimeError {
+                span,
+                message: "std.product: argument must be an array of arrays".to_string(),
+                source_id,
+            });
+        }
+    };
+    let sub_arrays: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
+
+    // Start with one empty tuple
+    let mut result: Vec<Vec<Value>> = vec![vec![]];
+
+    for sub_val in &sub_arrays {
+        let sub_idx = match sub_val {
+            Value::Array(i) => *i,
+            _ => {
+                return Err(RuntimeError {
+                    span,
+                    message: "std.product: each element must be an array".to_string(),
+                    source_id,
+                });
+            }
+        };
+        let sub_elems: Vec<Value> = memory_manager.load_array(sub_idx).elements.clone();
+
+        let mut next_result: Vec<Vec<Value>> = Vec::new();
+        for existing in &result {
+            for &elem in &sub_elems {
+                let mut new_tuple = existing.clone();
+                new_tuple.push(elem);
+                next_result.push(new_tuple);
+            }
+        }
+        result = next_result;
+    }
+
+    // Convert Vec<Vec<Value>> to Vec<Value> (each inner Vec becomes an array)
+    let mut output: Vec<Value> = Vec::with_capacity(result.len());
+    for tuple in result {
+        let tuple_alloc = memory_manager.allocate_array(tuple);
+        output.push(Value::Array(tuple_alloc.index));
+    }
+    let alloc = memory_manager.allocate_array(output);
+    Ok(Value::Array(alloc.index))
 }
