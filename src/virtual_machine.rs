@@ -2456,10 +2456,14 @@ impl VirtualMachine {
                         let elements = self.memory_manager.load_array(arr_idx).elements.clone();
                         let mut results = Vec::with_capacity(elements.len());
                         for &elem in &elements {
-                            let mut roots = Vec::from(self.stack.clone());
+                            // Only root things NOT already on stack or in args (if args were rooted).
+                            // Since args is not rooted in StdCall yet, we must root func_val and elements.
+                            let mut roots = Vec::new();
                             roots.extend_from_slice(&elements);
                             roots.extend_from_slice(&results);
                             roots.push(func_val);
+                            roots.push(elem);
+
                             let mut open_upvalue_roots = Vec::new();
                             let mut upvalue = self.open_upvalues;
                             while let Some(uv_idx) = upvalue {
@@ -2495,10 +2499,11 @@ impl VirtualMachine {
                         let elements = self.memory_manager.load_array(arr_idx).elements.clone();
                         let mut results = Vec::new();
                         for &elem in &elements {
-                            let mut roots = Vec::from(self.stack.clone());
+                            let mut roots = Vec::new();
                             roots.extend_from_slice(&elements);
                             roots.extend_from_slice(&results);
                             roots.push(func_val);
+                            roots.push(elem);
                             let mut open_upvalue_roots = Vec::new();
                             let mut upvalue = self.open_upvalues;
                             while let Some(uv_idx) = upvalue {
@@ -4122,7 +4127,7 @@ impl VirtualMachine {
                             let key_str = self.memory_manager.load_string(k_idx).to_string();
                             let key_alloc = self.memory_manager.allocate_string(&key_str);
                             let key_val = Value::String(key_alloc.index);
-                            let mut roots = Vec::from(self.stack.clone());
+                            let mut roots = Vec::new();
                             roots.push(func_val);
                             roots.push(evaled_val);
                             roots.push(key_val);
@@ -4188,16 +4193,29 @@ impl VirtualMachine {
                             }
                         };
                         let mut flat_fields: Vec<(String, Value)> = Vec::new();
-                        self.flatten_object_recursive(
+
+                        // Root arguments during recursive flattening
+                        self.memory_manager
+                            .push_external_roots(args.clone(), Vec::new());
+                        let flatten_res = self.flatten_object_recursive(
                             obj_val,
                             &sep,
                             String::new(),
                             &mut flat_fields,
-                        )?;
+                        );
+                        self.memory_manager.pop_external_roots();
+                        flatten_res?;
+
                         let mut properties: std::collections::HashMap<
                             chunk::StringIndex,
                             memory_manager::ObjectField,
                         > = std::collections::HashMap::new();
+
+                        // Root the values in flat_fields while building the object
+                        let flat_vals: Vec<Value> = flat_fields.iter().map(|(_, v)| *v).collect();
+                        self.memory_manager
+                            .push_external_roots(flat_vals, Vec::new());
+
                         for (k_str, v) in flat_fields {
                             let k_alloc = self.memory_manager.allocate_string(&k_str);
                             properties.insert(
@@ -4212,7 +4230,14 @@ impl VirtualMachine {
                         let obj_alloc = self
                             .memory_manager
                             .allocate_object_with_properties(properties);
+
+                        self.memory_manager.pop_external_roots();
+
                         self.push(Value::Object(obj_alloc.index))?;
+
+                        if obj_alloc.should_garbage_collect {
+                            self.run_garbage_collection();
+                        }
                         continue;
                     }
 
@@ -5939,16 +5964,30 @@ impl VirtualMachine {
                                     }
                                 };
                                 let mut flat_fields: Vec<(String, Value)> = Vec::new();
-                                self.flatten_object_recursive(
+
+                                // Root arguments during recursive flattening
+                                self.memory_manager
+                                    .push_external_roots(args.clone(), Vec::new());
+                                let flatten_res = self.flatten_object_recursive(
                                     obj_val,
                                     &sep,
                                     String::new(),
                                     &mut flat_fields,
-                                )?;
+                                );
+                                self.memory_manager.pop_external_roots();
+                                flatten_res?;
+
                                 let mut properties: std::collections::HashMap<
                                     chunk::StringIndex,
                                     memory_manager::ObjectField,
                                 > = std::collections::HashMap::new();
+
+                                // Root the values in flat_fields while building the object
+                                let flat_vals: Vec<Value> =
+                                    flat_fields.iter().map(|(_, v)| *v).collect();
+                                self.memory_manager
+                                    .push_external_roots(flat_vals, Vec::new());
+
                                 for (k_str, v) in flat_fields {
                                     let k_alloc = self.memory_manager.allocate_string(&k_str);
                                     properties.insert(
@@ -5963,7 +6002,14 @@ impl VirtualMachine {
                                 let obj_alloc = self
                                     .memory_manager
                                     .allocate_object_with_properties(properties);
+
+                                self.memory_manager.pop_external_roots();
+
                                 self.push(Value::Object(obj_alloc.index))?;
+
+                                if obj_alloc.should_garbage_collect {
+                                    self.run_garbage_collection();
+                                }
                                 continue;
                             }
 
@@ -6764,171 +6810,198 @@ impl VirtualMachine {
         span: Range<usize>,
         source_id: &str,
     ) -> Result<String, RuntimeError> {
-        // Force closures/imports
-        let value = self.force_value(value)?;
-        let value = match value {
-            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
-            other => other,
-        };
+        // Root the current value
+        self.memory_manager
+            .push_external_roots(vec![value], Vec::new());
 
-        match value {
-            Value::Null => Ok("null".to_string()),
-            Value::Boolean(true) => Ok("true".to_string()),
-            Value::Boolean(false) => Ok("false".to_string()),
-            Value::Number(n) => {
-                if n.is_nan() {
-                    return Err(RuntimeError {
-                        span,
-                        message: "std.manifestJson: cannot serialize NaN".to_string(),
-                        source_id: source_id.to_string(),
-                    });
-                }
-                if n.is_infinite() {
-                    return Err(RuntimeError {
-                        span,
-                        message: "std.manifestJson: cannot serialize Infinite".to_string(),
-                        source_id: source_id.to_string(),
-                    });
-                }
-                if n.fract() == 0.0 && n.abs() < 1e15 {
-                    Ok(format!("{}", n as i64))
-                } else {
-                    Ok(format!("{}", n))
-                }
-            }
-            Value::String(s_idx) => {
-                let s = self.memory_manager.load_string(s_idx).to_string();
-                let mut out = String::from("\"");
-                for ch in s.chars() {
-                    match ch {
-                        '"' => out.push_str("\\\""),
-                        '\\' => out.push_str("\\\\"),
-                        '\n' => out.push_str("\\n"),
-                        '\r' => out.push_str("\\r"),
-                        '\t' => out.push_str("\\t"),
-                        c if (c as u32) < 0x20 => {
-                            out.push_str(&format!("\\u{:04x}", c as u32));
-                        }
-                        c => out.push(c),
-                    }
-                }
-                out.push('"');
-                Ok(out)
-            }
-            Value::Array(a_idx) => {
-                let elements = self.memory_manager.load_array(a_idx).elements.clone();
-                if elements.is_empty() {
-                    return Ok("[ ]".to_string());
-                }
-                let item_indent = indent.repeat(depth + 1);
-                let close_indent = indent.repeat(depth);
-                let mut items = Vec::with_capacity(elements.len());
-                for elem in elements {
-                    let s = self.manifest_json_value(
-                        elem,
-                        indent,
-                        newline,
-                        key_val_sep,
-                        depth + 1,
-                        span.clone(),
-                        source_id,
-                    )?;
-                    items.push(format!("{}{}", item_indent, s));
-                }
-                Ok(format!(
-                    "[{}{}{}{}]",
-                    newline,
-                    items.join(&format!(",{}", newline)),
-                    newline,
-                    close_indent,
-                ))
-            }
-            Value::Object(o_idx) => {
-                // Collect visible fields
-                let field_data: Vec<(StringIndex, Value, Option<ObjectIndex>)> = {
-                    let obj = self.memory_manager.load_object(o_idx);
-                    let mut fields: Vec<(StringIndex, Value, Option<ObjectIndex>)> = obj
-                        .properties
-                        .iter()
-                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                        .map(|(k, f)| (*k, f.value, f.super_obj))
-                        .collect();
-                    // Sort by field name
-                    fields.sort_by(|(ka, _, _), (kb, _, _)| {
-                        let sa = obj.properties.get(ka).map(|_| {
-                            // We need to sort by key string; collect key strings separately
-                            *ka
+        let res = (|| -> Result<String, RuntimeError> {
+            // Force closures/imports
+            let value = self.force_value(value)?;
+            let value = match value {
+                Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                other => other,
+            };
+
+            match value {
+                Value::Null => Ok("null".to_string()),
+                Value::Boolean(true) => Ok("true".to_string()),
+                Value::Boolean(false) => Ok("false".to_string()),
+                Value::Number(n) => {
+                    if n.is_nan() {
+                        return Err(RuntimeError {
+                            span,
+                            message: "std.manifestJson: cannot serialize NaN".to_string(),
+                            source_id: source_id.to_string(),
                         });
-                        let _ = sa;
-                        ka.cmp(kb)
-                    });
-                    fields
-                };
-
-                // Sort fields by string name
-                let mut sorted_fields: Vec<(String, Value, Option<ObjectIndex>)> = field_data
-                    .into_iter()
-                    .map(|(k, v, so)| (self.memory_manager.load_string(k).to_string(), v, so))
-                    .collect();
-                sorted_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-
-                if sorted_fields.is_empty() {
-                    return Ok("{ }".to_string());
+                    }
+                    if n.is_infinite() {
+                        return Err(RuntimeError {
+                            span,
+                            message: "std.manifestJson: cannot serialize Infinite".to_string(),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                    if n.fract() == 0.0 && n.abs() < 1e15 {
+                        Ok(format!("{}", n as i64))
+                    } else {
+                        Ok(format!("{}", n))
+                    }
                 }
-
-                let item_indent = indent.repeat(depth + 1);
-                let close_indent = indent.repeat(depth);
-                let mut pairs = Vec::with_capacity(sorted_fields.len());
-                for (key_str, field_val, super_obj) in sorted_fields {
-                    // Force field value (thunk)
-                    let forced_val = match field_val {
-                        Value::Closure(c) => self.execute_thunk_sync(c, Some(o_idx), super_obj)?,
-                        other => other,
-                    };
-                    let val_s = self.manifest_json_value(
-                        forced_val,
-                        indent,
-                        newline,
-                        key_val_sep,
-                        depth + 1,
-                        span.clone(),
-                        source_id,
-                    )?;
-                    // JSON-escape the key
-                    let mut key_out = String::from("\"");
-                    for ch in key_str.chars() {
+                Value::String(s_idx) => {
+                    let s = self.memory_manager.load_string(s_idx).to_string();
+                    let mut out = String::from("\"");
+                    for ch in s.chars() {
                         match ch {
-                            '"' => key_out.push_str("\\\""),
-                            '\\' => key_out.push_str("\\\\"),
-                            '\n' => key_out.push_str("\\n"),
-                            '\r' => key_out.push_str("\\r"),
-                            '\t' => key_out.push_str("\\t"),
+                            '"' => out.push_str("\\\""),
+                            '\\' => out.push_str("\\\\"),
+                            '\n' => out.push_str("\\n"),
+                            '\r' => out.push_str("\\r"),
+                            '\t' => out.push_str("\\t"),
                             c if (c as u32) < 0x20 => {
-                                key_out.push_str(&format!("\\u{:04x}", c as u32));
+                                out.push_str(&format!("\\u{:04x}", c as u32));
                             }
-                            c => key_out.push(c),
+                            c => out.push(c),
                         }
                     }
-                    key_out.push('"');
-                    pairs.push(format!(
-                        "{}{}{}{}",
-                        item_indent, key_out, key_val_sep, val_s
-                    ));
+                    out.push('"');
+                    Ok(out)
                 }
-                Ok(format!(
-                    "{{{}{}{}{}}}",
-                    newline,
-                    pairs.join(&format!(",{}", newline)),
-                    newline,
-                    close_indent,
-                ))
+                Value::Array(a_idx) => {
+                    let elements = self.memory_manager.load_array(a_idx).elements.clone();
+                    if elements.is_empty() {
+                        return Ok("[ ]".to_string());
+                    }
+                    let item_indent = indent.repeat(depth + 1);
+                    let close_indent = indent.repeat(depth);
+                    let mut items = Vec::with_capacity(elements.len());
+                    for elem in elements {
+                        // Root elem before recursive call
+                        self.memory_manager
+                            .push_external_roots(vec![elem], Vec::new());
+                        let s = self.manifest_json_value(
+                            elem,
+                            indent,
+                            newline,
+                            key_val_sep,
+                            depth + 1,
+                            span.clone(),
+                            source_id,
+                        );
+                        self.memory_manager.pop_external_roots();
+                        let s = s?;
+                        items.push(format!("{}{}", item_indent, s));
+                    }
+                    Ok(format!(
+                        "[{}{}{}{}]",
+                        newline,
+                        items.join(&format!(",{}", newline)),
+                        newline,
+                        close_indent,
+                    ))
+                }
+                Value::Object(o_idx) => {
+                    // Collect visible fields
+                    let field_data: Vec<(StringIndex, Value, Option<ObjectIndex>)> = {
+                        let obj = self.memory_manager.load_object(o_idx);
+                        let mut fields: Vec<(StringIndex, Value, Option<ObjectIndex>)> = obj
+                            .properties
+                            .iter()
+                            .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                            .map(|(k, f)| (*k, f.value, f.super_obj))
+                            .collect();
+                        // Sort by field name
+                        fields.sort_by(|(ka, _, _), (kb, _, _)| {
+                            let sa = obj.properties.get(ka).map(|_| {
+                                // We need to sort by key string; collect key strings separately
+                                *ka
+                            });
+                            let _ = sa;
+                            ka.cmp(kb)
+                        });
+                        fields
+                    };
+
+                    // Sort fields by string name
+                    let mut sorted_fields: Vec<(String, Value, Option<ObjectIndex>)> = field_data
+                        .into_iter()
+                        .map(|(k, v, so)| (self.memory_manager.load_string(k).to_string(), v, so))
+                        .collect();
+                    sorted_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+
+                    if sorted_fields.is_empty() {
+                        return Ok("{ }".to_string());
+                    }
+
+                    let item_indent = indent.repeat(depth + 1);
+                    let close_indent = indent.repeat(depth);
+                    let mut pairs = Vec::with_capacity(sorted_fields.len());
+                    for (key_str, field_val, super_obj) in sorted_fields {
+                        // Force field value (thunk)
+                        let forced_val = match field_val {
+                            Value::Closure(c) => {
+                                // Root everything needed before calling thunk
+                                let roots = vec![field_val];
+                                self.memory_manager.push_external_roots(roots, Vec::new());
+                                let result = self.execute_thunk_sync(c, Some(o_idx), super_obj);
+                                self.memory_manager.pop_external_roots();
+                                result?
+                            }
+                            other => other,
+                        };
+
+                        // Root forced_val before recursive call
+                        self.memory_manager
+                            .push_external_roots(vec![forced_val], Vec::new());
+                        let val_s = self.manifest_json_value(
+                            forced_val,
+                            indent,
+                            newline,
+                            key_val_sep,
+                            depth + 1,
+                            span.clone(),
+                            source_id,
+                        );
+                        self.memory_manager.pop_external_roots();
+                        let val_s = val_s?;
+                        // JSON-escape the key
+                        let mut key_out = String::from("\"");
+                        for ch in key_str.chars() {
+                            match ch {
+                                '"' => key_out.push_str("\\\""),
+                                '\\' => key_out.push_str("\\\\"),
+                                '\n' => key_out.push_str("\\n"),
+                                '\r' => key_out.push_str("\\r"),
+                                '\t' => key_out.push_str("\\t"),
+                                c if (c as u32) < 0x20 => {
+                                    key_out.push_str(&format!("\\u{:04x}", c as u32));
+                                }
+                                c => key_out.push(c),
+                            }
+                        }
+                        key_out.push('"');
+                        pairs.push(format!(
+                            "{}{}{}{}",
+                            item_indent, key_out, key_val_sep, val_s
+                        ));
+                    }
+                    Ok(format!(
+                        "{{{}{}{}{}}}",
+                        newline,
+                        pairs.join(&format!(",{}", newline)),
+                        newline,
+                        close_indent,
+                    ))
+                }
+                _ => Err(RuntimeError {
+                    span,
+                    message: "std.manifestJson: cannot manifest function".to_string(),
+                    source_id: source_id.to_string(),
+                }),
             }
-            _ => Err(RuntimeError {
-                span,
-                message: "std.manifestJson: cannot manifest function".to_string(),
-                source_id: source_id.to_string(),
-            }),
-        }
+        })();
+
+        self.memory_manager.pop_external_roots();
+        res
     }
 
     fn flatten_object_recursive(
@@ -6938,7 +7011,11 @@ impl VirtualMachine {
         prefix: String,
         out: &mut Vec<(String, Value)>,
     ) -> Result<(), RuntimeError> {
-        match value {
+        // Root the current value being processed
+        self.memory_manager
+            .push_external_roots(vec![value], Vec::new());
+
+        let res = match value {
             Value::Object(o_idx) => {
                 let fields: Vec<(chunk::StringIndex, Value)> = {
                     let obj = self.memory_manager.load_object(o_idx);
@@ -6948,6 +7025,8 @@ impl VirtualMachine {
                         .map(|(k, f)| (*k, f.value))
                         .collect()
                 };
+
+                let mut loop_res = Ok(());
                 for (k_idx, raw_val) in &fields {
                     let k_idx = *k_idx;
                     let raw_val = *raw_val;
@@ -6957,28 +7036,49 @@ impl VirtualMachine {
                     } else {
                         format!("{}{}{}", prefix, sep, k_str)
                     };
+
+                    // Protect accumulated out values and ALL remaining fields from GC.
+                    // This is crucial because any evaluation might trigger GC.
+                    let mut temp_vals: Vec<Value> = out.iter().map(|(_, v)| *v).collect();
+                    for (_, fv) in fields.iter() {
+                        temp_vals.push(*fv);
+                    }
+                    self.memory_manager
+                        .push_external_roots(temp_vals, Vec::new());
+
                     let forced_v = match raw_val {
                         Value::Closure(closure_idx) => {
-                            // Protect accumulated out values and remaining fields from GC
-                            let mut temp_vals: Vec<Value> = out.iter().map(|(_, v)| *v).collect();
-                            for (_, fv) in fields.iter() {
-                                temp_vals.push(*fv);
+                            let result = self.execute_thunk_sync(closure_idx, Some(o_idx), None);
+                            match result {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    self.memory_manager.pop_external_roots();
+                                    loop_res = Err(e);
+                                    break;
+                                }
                             }
-                            self.memory_manager.external_roots.push(temp_vals);
-                            let result = self.execute_thunk_sync(closure_idx, Some(o_idx), None)?;
-                            self.memory_manager.external_roots.pop();
-                            result
                         }
                         other => other,
                     };
-                    self.flatten_object_recursive(forced_v, sep, full_key, out)?;
+
+                    let rec_res = self.flatten_object_recursive(forced_v, sep, full_key, out);
+                    self.memory_manager.pop_external_roots();
+
+                    if let Err(e) = rec_res {
+                        loop_res = Err(e);
+                        break;
+                    }
                 }
+                loop_res
             }
             other => {
                 out.push((prefix, other));
+                Ok(())
             }
-        }
-        Ok(())
+        };
+
+        self.memory_manager.pop_external_roots();
+        res
     }
 
     fn merge_patch_value(&mut self, target: Value, patch: Value) -> Result<Value, RuntimeError> {
