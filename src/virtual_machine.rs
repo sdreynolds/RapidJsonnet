@@ -2350,6 +2350,19 @@ impl VirtualMachine {
                         }
                     }
 
+                    // Handle std.toString for Array/Object via manifest_json_value
+                    if func_id == chunk::NativeFuncId::ToString
+                        && matches!(args[0], Value::Array(_) | Value::Object(_))
+                    {
+                        let span = self.get_current_span();
+                        let source_id = self.current_chunk().source_id.to_string();
+                        let json = self
+                            .manifest_json_value(args[0], "   ", "\n", ": ", 0, span, &source_id)?;
+                        let idx = self.memory_manager.allocate_string(&json);
+                        self.push(Value::String(idx.index))?;
+                        continue;
+                    }
+
                     // Handle manifestJson* variants in the VM
                     if matches!(
                         func_id,
@@ -7794,7 +7807,9 @@ impl VirtualMachine {
                         for (k, v) in fields {
                             let forced_v = self.force_value(v)?;
                             let forced_v = match forced_v {
-                                Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                                Value::Closure(c) => {
+                                    self.execute_thunk_sync(c, Some(obj_idx), None)?
+                                }
                                 other => other,
                             };
                             let vs = match forced_v {
