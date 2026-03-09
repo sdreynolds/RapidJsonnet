@@ -5985,6 +5985,224 @@ impl VirtualMachine {
                     }
                 }
 
+                Opcode::TailCall => {
+                    // Read operands: positional_count and named_count (same layout as Call)
+                    let frame = self.current_frame();
+                    let chunk = self.current_chunk();
+
+                    if frame.ip + 2 >= chunk.count() {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Invalid bytecode - missing TailCall operands".to_string(),
+                            source_id: chunk.source_id.to_string(),
+                        });
+                    }
+
+                    let positional_count = chunk.code[frame.ip + 1] as usize;
+                    let named_count = chunk.code[frame.ip + 2] as usize;
+
+                    // For now, only support positional arguments
+                    if named_count > 0 {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: "Named arguments not yet implemented".to_string(),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+
+                    let arg_count = positional_count;
+
+                    // Advance IP past this instruction (opcode + 2 bytes)
+                    self.current_frame_mut().ip += 3;
+
+                    // Get callee from stack at position: stack.len() - arg_count - 1
+                    let callee_position = self.stack.len() - arg_count - 1;
+                    if callee_position >= self.stack.len() {
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!(
+                                "Invalid stack access for callee at position {} (stack size: {})",
+                                callee_position,
+                                self.stack.len()
+                            ),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+
+                    let mut callee = self.stack[callee_position];
+                    callee = self.force_value(callee)?;
+                    self.stack[callee_position] = callee;
+
+                    // Force all arguments before destroying the current frame
+                    let stack_len = self.stack.len();
+                    for i in 0..arg_count {
+                        let arg_pos = stack_len - arg_count + i;
+                        let arg = self.stack[arg_pos];
+                        let forced_arg = self.force_value(arg)?;
+                        self.stack[arg_pos] = forced_arg;
+                    }
+
+                    match callee {
+                        Value::Closure(closure_index) => {
+                            // Validate arity before doing anything destructive
+                            let arity = {
+                                let closure = self.memory_manager.load_closure(closure_index);
+                                let function = self.memory_manager.load_function(closure.function);
+                                function.arity as usize
+                            };
+                            if arg_count != arity {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Function expects {} arguments, got {}",
+                                        arity, arg_count
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+
+                            // Copy the current frame's stack_base before mutating
+                            let current_stack_base = self.current_frame().stack_base;
+
+                            // Close upvalues for slots at or above current_stack_base
+                            // (same as what return_from_function does)
+                            self.close_upvalues(current_stack_base);
+
+                            // Move [closure, arg0, ..., argN-1] from their current positions
+                            // to start at current_stack_base, then truncate the stack.
+                            let new_frame_start = self.stack.len() - arg_count - 1;
+                            let item_count = arg_count + 1; // closure + args
+
+                            // Copy the items into place
+                            for i in 0..item_count {
+                                self.stack[current_stack_base + i] =
+                                    self.stack[new_frame_start + i];
+                            }
+                            self.stack.truncate(current_stack_base + item_count);
+
+                            // Reuse the current frame: update its fields in-place
+                            {
+                                let frame = self.current_frame_mut();
+                                frame.closure = closure_index;
+                                frame.ip = 0;
+                                frame.self_obj = None;
+                                frame.super_obj = None;
+                                // frame.stack_base stays the same
+                            }
+
+                            // Do NOT push a new frame — frame_count stays the same
+                            continue;
+                        }
+                        Value::NativeFunction(id) => {
+                            // Fall back to regular Call behaviour for native functions
+                            let args = self.stack[self.stack.len() - arg_count..].to_vec();
+                            for _ in 0..=arg_count {
+                                self.pop()?;
+                            }
+
+                            if matches!(
+                                id,
+                                chunk::NativeFuncId::MergePatch
+                                    | chunk::NativeFuncId::Prune
+                                    | chunk::NativeFuncId::Uniq
+                                    | chunk::NativeFuncId::Set
+                                    | chunk::NativeFuncId::SetUnion
+                            ) {
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+
+                                match id {
+                                    chunk::NativeFuncId::MergePatch => {
+                                        let result = self.merge_patch_value(args[0], args[1])?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
+                                    chunk::NativeFuncId::Prune => {
+                                        let result = self.prune_value(args[0])?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
+                                    chunk::NativeFuncId::Uniq => {
+                                        let result =
+                                            self.uniq_value(args[0], args.get(1).copied())?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
+                                    chunk::NativeFuncId::Set => {
+                                        let arr_val = args[0];
+                                        let sorted = crate::native::call_native(
+                                            chunk::NativeFuncId::Sort,
+                                            &[arr_val],
+                                            &mut self.memory_manager,
+                                            span.clone(),
+                                            source_id.clone(),
+                                        )?;
+                                        let result =
+                                            self.uniq_value(sorted, args.get(1).copied())?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
+                                    chunk::NativeFuncId::SetUnion => {
+                                        let a_val = args[0];
+                                        let b_val = args[1];
+                                        let a_idx = match a_val {
+                                            Value::Array(i) => i,
+                                            _ => return Err(RuntimeError {
+                                                span,
+                                                message:
+                                                    "std.setUnion: first argument must be an array"
+                                                        .to_string(),
+                                                source_id,
+                                            }),
+                                        };
+                                        let b_idx = match b_val {
+                                            Value::Array(i) => i,
+                                            _ => return Err(RuntimeError {
+                                                span,
+                                                message:
+                                                    "std.setUnion: second argument must be an array"
+                                                        .to_string(),
+                                                source_id,
+                                            }),
+                                        };
+                                        let mut combined =
+                                            self.memory_manager.load_array(a_idx).elements.clone();
+                                        combined.extend_from_slice(
+                                            &self.memory_manager.load_array(b_idx).elements.clone(),
+                                        );
+                                        let alloc = self.memory_manager.allocate_array(combined);
+                                        let sorted = crate::native::call_native(
+                                            chunk::NativeFuncId::Sort,
+                                            &[Value::Array(alloc.index)],
+                                            &mut self.memory_manager,
+                                            span.clone(),
+                                            source_id.clone(),
+                                        )?;
+                                        let result =
+                                            self.uniq_value(sorted, args.get(2).copied())?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
+                                    _ => unreachable!(),
+                                }
+                            }
+
+                            let span = self.get_current_span();
+                            let source_id = self.current_chunk().source_id.to_string();
+                            let result =
+                                call_native(id, &args, &mut self.memory_manager, span, source_id)?;
+                            self.push(result)?;
+                        }
+                        _ => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!("Cannot call non-function value: {:?}", callee),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+                }
+
                 Opcode::Return => {
                     let return_value = self.pop()?;
 

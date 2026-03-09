@@ -146,6 +146,9 @@ pub struct Compiler<'a> {
     function_type: FunctionType, // Type of function being compiled
     enclosing: Option<Box<EnclosingScope<'a>>>, // Enclosing scope for upvalue resolution
     object_depth: u32,  // Track object literal nesting depth
+    tail_call_pending: bool, // Whether the next call should be emitted as TailCall
+    in_tail_position: bool, // Whether we are currently in a tail position
+    tail_calls_emitted: usize, // Number of tail calls emitted so far
 }
 
 impl<'a> Compiler<'a> {
@@ -164,6 +167,9 @@ impl<'a> Compiler<'a> {
             function_type: FunctionType::Script,
             enclosing: None,
             object_depth: 0,
+            tail_call_pending: false,
+            in_tail_position: false,
+            tail_calls_emitted: 0,
         }
     }
 
@@ -202,6 +208,7 @@ impl<'a> Compiler<'a> {
         self.parser.advance()?;
 
         // Parse the entire expression
+        self.in_tail_position = true;
         self.parse_expr(0, memory_manager)?;
 
         // Validate that no unexpected tokens remain after parsing the expression
@@ -219,6 +226,7 @@ impl<'a> Compiler<'a> {
         min_bp: u8,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
+        let initial_tail_calls = self.tail_calls_emitted;
         // Parse left-hand side (prefix)
         self.parse_prefix(memory_manager)?;
 
@@ -240,6 +248,13 @@ impl<'a> Compiler<'a> {
                     break;
                 }
 
+                if self.tail_calls_emitted > initial_tail_calls {
+                    return Err(self.make_error(
+                        current.span.clone(),
+                        "'tailstrict' used in non-tail position".to_string(),
+                    ));
+                }
+
                 self.parse_postfix(memory_manager)?;
                 continue;
             }
@@ -250,6 +265,13 @@ impl<'a> Compiler<'a> {
                     break;
                 }
 
+                if self.tail_calls_emitted > initial_tail_calls {
+                    return Err(self.make_error(
+                        current.span.clone(),
+                        "'tailstrict' used in non-tail position".to_string(),
+                    ));
+                }
+
                 self.parse_infix(right_bp, memory_manager)?;
                 continue;
             } else {
@@ -258,6 +280,18 @@ impl<'a> Compiler<'a> {
         }
 
         Ok(())
+    }
+
+    fn parse_expr_notail(
+        &mut self,
+        min_bp: u8,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        let prev = self.in_tail_position;
+        self.in_tail_position = false;
+        let res = self.parse_expr(min_bp, memory_manager);
+        self.in_tail_position = prev;
+        res
     }
 
     fn parse_prefix(&mut self, memory_manager: &mut MemoryManager) -> Result<(), CompilerError> {
@@ -377,7 +411,7 @@ impl<'a> Compiler<'a> {
             }
             Token::Operator(op) if op == "-" => {
                 self.parser.advance()?; // consume the operator
-                self.parse_expr(PRECEDENCE_UNARY, memory_manager)?;
+                self.parse_expr_notail(PRECEDENCE_UNARY, memory_manager)?;
                 self.emit_opcode(Opcode::Neg, token.span);
                 // Unary minus: if operand was number, result is number; otherwise unknown
                 let operand_type = self.pop_type();
@@ -389,7 +423,7 @@ impl<'a> Compiler<'a> {
             }
             Token::Operator(op) if op == "+" => {
                 self.parser.advance()?; // consume the operator
-                self.parse_expr(PRECEDENCE_UNARY, memory_manager)?;
+                self.parse_expr_notail(PRECEDENCE_UNARY, memory_manager)?;
                 self.emit_opcode(Opcode::Pos, token.span);
                 // Unary plus: if operand was number, result is number; otherwise unknown
                 let operand_type = self.pop_type();
@@ -401,7 +435,7 @@ impl<'a> Compiler<'a> {
             }
             Token::Operator(op) if op == "!" => {
                 self.parser.advance()?; // consume the operator
-                self.parse_expr(PRECEDENCE_UNARY, memory_manager)?;
+                self.parse_expr_notail(PRECEDENCE_UNARY, memory_manager)?;
                 self.emit_opcode(Opcode::Not, token.span);
                 // Logical NOT always produces boolean
                 self.pop_type();
@@ -409,7 +443,7 @@ impl<'a> Compiler<'a> {
             }
             Token::Operator(op) if op == "~" => {
                 self.parser.advance()?; // consume the operator
-                self.parse_expr(PRECEDENCE_UNARY, memory_manager)?;
+                self.parse_expr_notail(PRECEDENCE_UNARY, memory_manager)?;
                 self.emit_opcode(Opcode::BitNot, token.span);
                 // Bitwise NOT: if operand was number, result is number; otherwise unknown
                 let operand_type = self.pop_type();
@@ -421,7 +455,7 @@ impl<'a> Compiler<'a> {
             }
             Token::LeftParen => {
                 self.parser.advance()?; // consume '('
-                self.parse_expr(0, memory_manager)?;
+                self.parse_expr_notail(0, memory_manager)?;
                 self.parser
                     .consume(Token::RightParen, "Expected closing parenthesis")?;
                 // Parentheses don't change the type
@@ -525,7 +559,7 @@ impl<'a> Compiler<'a> {
                     }
                     Token::LeftBracket => {
                         self.parser.advance()?; // consume '['
-                        self.parse_expr(0, memory_manager)?; // dynamic key
+                        self.parse_expr_notail(0, memory_manager)?; // dynamic key
                         self.parser
                             .consume(Token::RightBracket, "Expected ']' after 'super[expr]'")?;
                     }
@@ -560,6 +594,31 @@ impl<'a> Compiler<'a> {
                     );
                 }
                 self.push_type(ExpressionType::Object);
+            }
+            Token::TailStrict => {
+                if !self.in_tail_position {
+                    return Err(self.make_error(
+                        token.span.clone(),
+                        "'tailstrict' used in non-tail position".to_string(),
+                    ));
+                }
+                let ts_span = token.span.clone();
+                self.parser.advance()?; // consume 'tailstrict'
+                self.tail_call_pending = true;
+                self.tail_calls_emitted += 1;
+                // Parse the callee + call at postfix precedence so binary operators
+                // after the call are NOT greedily consumed.
+                self.parse_expr(PRECEDENCE_POSTFIX - 1, memory_manager)?;
+                if self.tail_call_pending {
+                    // No call was consumed — tailstrict was not followed by a function call
+                    self.tail_call_pending = false;
+                    self.tail_calls_emitted -= 1;
+                    return Err(self.make_error(
+                        ts_span,
+                        "'tailstrict' must be followed by a function call expression".to_string(),
+                    ));
+                }
+                self.push_type(ExpressionType::Unknown);
             }
             Token::Identifier(name) => {
                 let name_clone = name.clone();
@@ -622,7 +681,7 @@ impl<'a> Compiler<'a> {
         self.parser.advance()?; // consume operator
 
         if !is_short_circuit_op {
-            self.parse_expr(left_bp, memory_manager)?;
+            self.parse_expr_notail(left_bp, memory_manager)?;
         }
 
         match &token.token {
@@ -757,7 +816,7 @@ impl<'a> Compiler<'a> {
 
                 // Left is truthy: pop left and evaluate right: []
                 self.emit_opcode(Opcode::Pop, token.span.clone());
-                self.parse_expr(left_bp, memory_manager)?; // Parse right operand
+                self.parse_expr_notail(left_bp, memory_manager)?; // Parse right operand
                 let jump_end = self.emit_jump(Opcode::Jump, token.span.clone());
 
                 // Left is falsy: pop left and return false: []
@@ -787,7 +846,7 @@ impl<'a> Compiler<'a> {
 
                 // Left is falsy: pop left and evaluate right: []
                 self.emit_opcode(Opcode::Pop, token.span.clone());
-                self.parse_expr(left_bp, memory_manager)?; // Parse right operand
+                self.parse_expr_notail(left_bp, memory_manager)?; // Parse right operand
                 let jump_end = self.emit_jump(Opcode::Jump, token.span.clone());
 
                 // Left is truthy: pop left and return true: []
@@ -1132,7 +1191,7 @@ impl<'a> Compiler<'a> {
                 self.parser.advance()?; // consume '['
 
                 // Parse the expression inside brackets
-                self.parse_expr(0, memory_manager)?;
+                self.parse_expr_notail(0, memory_manager)?;
 
                 // Expect closing bracket
                 self.parser.consume(
@@ -1165,7 +1224,7 @@ impl<'a> Compiler<'a> {
                     if current.token != Token::RightParen {
                         loop {
                             // Parse argument expression
-                            self.parse_expr(0, memory_manager)?;
+                            self.parse_expr_notail(0, memory_manager)?;
                             arg_count += 1;
 
                             // Check for more arguments
@@ -1187,6 +1246,8 @@ impl<'a> Compiler<'a> {
                     .consume(Token::RightParen, "Expected ')' after arguments")?;
 
                 if let Some(id) = native_id {
+                    // tailstrict has no effect on native functions — clear the flag and emit normally
+                    self.tail_call_pending = false;
                     self.type_stack.pop();
                     // Emit StdCall opcode with native function ID and arg count
                     let span = token.span;
@@ -1194,11 +1255,16 @@ impl<'a> Compiler<'a> {
                         .write_opcode_u16(Opcode::StdCall, id as u16, span.clone());
                     self.compiling_chunk.write(arg_count, span);
                 } else {
-                    // Emit Call opcode with positional_count and named_count
-                    // For now, we only support positional arguments
+                    // Emit TailCall if tailstrict was pending, otherwise regular Call
+                    let is_tail_call = self.tail_call_pending;
+                    self.tail_call_pending = false;
                     let span = token.span;
-                    self.compiling_chunk
-                        .write_opcode(Opcode::Call, span.clone());
+                    let opcode = if is_tail_call {
+                        Opcode::TailCall
+                    } else {
+                        Opcode::Call
+                    };
+                    self.compiling_chunk.write_opcode(opcode, span.clone());
                     self.compiling_chunk.write(arg_count, span.clone()); // positional_count
                     self.compiling_chunk.write(0, span); // named_count (not yet supported)
                 }
@@ -1297,7 +1363,7 @@ impl<'a> Compiler<'a> {
                     self.declare_local("<closure>".to_string())?; // Slot 0
 
                     // Evaluate condition
-                    self.parse_expr(0, memory_manager)?;
+                    self.parse_expr_notail(0, memory_manager)?;
 
                     // Check for optional msg token
                     let has_msg_colon = if let Some(TokenInfo {
@@ -1315,7 +1381,7 @@ impl<'a> Compiler<'a> {
                     // Evaluate error msg (failure path)
                     if has_msg_colon {
                         self.parser.advance()?; // consume ':'
-                        self.parse_expr(0, memory_manager)?;
+                        self.parse_expr_notail(0, memory_manager)?;
                     } else {
                         self.emit_string_constant(
                             memory_manager
@@ -1410,7 +1476,7 @@ impl<'a> Compiler<'a> {
                     }
                     Token::LeftBracket => {
                         self.parser.advance()?; // consume '['
-                        self.parse_expr(0, memory_manager)?; // evaluate dynamic key expression
+                        self.parse_expr_notail(0, memory_manager)?; // evaluate dynamic key expression
                         self.parser.consume(
                             Token::RightBracket,
                             "Expected ']' after dynamic object key",
@@ -1464,7 +1530,11 @@ impl<'a> Compiler<'a> {
                 self.declare_local("$".to_string())?; // Slot 1
             }
 
+            let prev_tail = self.in_tail_position;
+            self.in_tail_position = true;
             self.parse_expr(0, memory_manager)?;
+            self.in_tail_position = prev_tail;
+
             self.emit_opcode(Opcode::Return, 0..0);
             self.end_scope();
 
@@ -1592,7 +1662,7 @@ impl<'a> Compiler<'a> {
         // during parsing. The buffered tokens are still valid lookahead that we'll use.
 
         // Regular array literal - parse first element
-        self.parse_expr(0, memory_manager)?;
+        self.parse_expr_notail(0, memory_manager)?;
         element_count += 1;
 
         // Regular array literal - continue parsing elements
@@ -1610,7 +1680,7 @@ impl<'a> Compiler<'a> {
                             }
                         }
                         // Parse next element
-                        self.parse_expr(0, memory_manager)?;
+                        self.parse_expr_notail(0, memory_manager)?;
                         element_count += 1;
                     }
                     Token::RightBracket => {
@@ -1884,7 +1954,7 @@ impl<'a> Compiler<'a> {
                 }
                 Token::LeftBracket => {
                     self.parser.advance()?;
-                    self.parse_expr(0, memory_manager)?;
+                    self.parse_expr_notail(0, memory_manager)?;
                     self.parser
                         .consume(Token::RightBracket, "Expected ']' after dynamic key")?;
                 }
@@ -1899,7 +1969,7 @@ impl<'a> Compiler<'a> {
 
             self.parser
                 .consume(Token::Operator(":".to_string()), "Expected ':' after key")?;
-            self.parse_expr(0, memory_manager)?;
+            self.parse_expr_notail(0, memory_manager)?;
 
             self.compiling_chunk.write_opcode_u8(
                 Opcode::ObjectInsert,
@@ -1919,7 +1989,7 @@ impl<'a> Compiler<'a> {
                 span: clause_span,
             } => {
                 self.parser.restore_checkpoint(source_checkpoint.clone());
-                self.parse_expr(0, memory_manager)?;
+                self.parse_expr_notail(0, memory_manager)?;
 
                 self.begin_scope();
 
@@ -2006,7 +2076,7 @@ impl<'a> Compiler<'a> {
                 span: clause_span,
             } => {
                 self.parser.restore_checkpoint(condition_checkpoint.clone());
-                self.parse_expr(0, memory_manager)?;
+                self.parse_expr_notail(0, memory_manager)?;
 
                 let jump_if_false = self.emit_jump(Opcode::JumpIfFalse, clause_span.clone());
 
@@ -2177,7 +2247,7 @@ impl<'a> Compiler<'a> {
             // All clauses emitted, now emit the body evaluation and append
             // Restore parser to body expression
             self.parser.restore_checkpoint(body_checkpoint);
-            self.parse_expr(0, memory_manager)?;
+            self.parse_expr_notail(0, memory_manager)?;
 
             // Append body_value to result
             self.compiling_chunk.write_opcode_u16(
@@ -2205,7 +2275,7 @@ impl<'a> Compiler<'a> {
             } => {
                 // Parse source array expression
                 self.parser.restore_checkpoint(source_checkpoint.clone());
-                self.parse_expr(0, memory_manager)?;
+                self.parse_expr_notail(0, memory_manager)?;
 
                 // Enter a scope for the loop state
                 self.begin_scope();
@@ -2310,7 +2380,7 @@ impl<'a> Compiler<'a> {
             } => {
                 // Restore parser to condition expression
                 self.parser.restore_checkpoint(condition_checkpoint.clone());
-                self.parse_expr(0, memory_manager)?;
+                self.parse_expr_notail(0, memory_manager)?;
 
                 // JumpIfFalse to skip this entire branch
                 let skip_jump = self.emit_jump(Opcode::JumpIfFalse, clause_span.clone());
@@ -2376,12 +2446,19 @@ impl<'a> Compiler<'a> {
                 "Expected '=' after variable name",
             )?;
 
-            // Parse binding expression
-            self.parse_expr(0, memory_manager)?;
-            // Expression leaves value on stack
-
-            // Declare the local (value is now on stack)
+            // Pre-reserve the local slot with null so the initializer expression can
+            // capture it as an upvalue (enabling self-referential/recursive bindings).
+            let slot_span = name_token.span.clone();
+            self.emit_opcode(Opcode::LoadNull, slot_span.clone());
             self.declare_local(var_name)?;
+            let reserved_slot = self.locals.last().unwrap().stack_slot;
+
+            // Parse binding expression — may capture the reserved slot via upvalue
+            self.parse_expr_notail(0, memory_manager)?;
+            // Expression result is now on top of stack
+
+            // Overwrite the placeholder slot with the real value
+            self.emit_store_var(reserved_slot, slot_span);
 
             // Check for comma (more bindings) or semicolon (end of bindings)
             if let Some(token) = self.parser.current_token() {
@@ -2564,6 +2641,7 @@ impl<'a> Compiler<'a> {
         // Reset for new function
         self.scope_depth = 0;
         self.function_type = FunctionType::Function;
+        self.tail_call_pending = false;
 
         (old_scope_depth, old_function_type)
     }
@@ -2619,6 +2697,7 @@ impl<'a> Compiler<'a> {
         // Restore other state
         self.scope_depth = old_scope_depth;
         self.function_type = old_function_type;
+        self.tail_call_pending = false;
 
         (function_chunk, function_upvalues)
     }
@@ -2697,7 +2776,10 @@ impl<'a> Compiler<'a> {
         }
 
         // Parse function body expression
+        let prev_tail = self.in_tail_position;
+        self.in_tail_position = true;
         self.parse_expr(0, memory_manager)?;
+        self.in_tail_position = prev_tail;
 
         // Emit implicit Return
         let return_span = self.current_span();
@@ -2724,7 +2806,7 @@ impl<'a> Compiler<'a> {
         self.parser.advance()?; // consume 'assert'
 
         // 1. Evaluate condition
-        self.parse_expr(0, memory_manager)?;
+        self.parse_expr_notail(0, memory_manager)?;
 
         // Check for optional msg token but don't parse the expression yet
         let has_msg_colon = if let Some(TokenInfo {
@@ -2749,7 +2831,7 @@ impl<'a> Compiler<'a> {
 
         if has_msg_colon {
             self.parser.advance()?; // consume ':'
-            self.parse_expr(0, memory_manager)?;
+            self.parse_expr_notail(0, memory_manager)?;
         } else {
             self.emit_string_constant(memory_manager.allocate_string("Assertion failed").index)?;
         }
@@ -2790,7 +2872,7 @@ impl<'a> Compiler<'a> {
         self.parser.advance()?;
 
         // Parse condition expression
-        self.parse_expr(0, memory_manager)?;
+        self.parse_expr_notail(0, memory_manager)?;
 
         // Expect 'then'
         self.parser

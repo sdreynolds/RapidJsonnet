@@ -1032,6 +1032,7 @@ pub enum Opcode {
     Call = 31,           // operands: u8 positional_count, u8 named_count
     Return = 32,
     BindDefault = 33, // operand: u16 param_name
+    TailCall = 34,    // operands: u8 positional_count, u8 named_count (same as Call)
 
     // Control Flow
     Jump = 40,        // operand: i32 offset
@@ -1113,6 +1114,7 @@ impl Opcode {
             31 => Some(Opcode::Call),
             32 => Some(Opcode::Return),
             33 => Some(Opcode::BindDefault),
+            34 => Some(Opcode::TailCall),
             40 => Some(Opcode::Jump),
             41 => Some(Opcode::JumpIfFalse),
             42 => Some(Opcode::JumpIfTrue),
@@ -1504,17 +1506,17 @@ impl<'a> Chunk<'a> {
                 // Calculate instruction size and end position
                 let instruction_size = match opcode {
                     Opcode::LoadConst | Opcode::Import | Opcode::ImportStr | Opcode::ImportBin => 3, // opcode + u16
-                    Opcode::LoadVar => 3,        // opcode + u16
-                    Opcode::CreateObject => 3,   // opcode + u16
-                    Opcode::ObjectInsert => 2,   // opcode + u8
-                    Opcode::CreateArray => 3,    // opcode + u16
-                    Opcode::FieldDef => 4,       // opcode + u16 + u8
-                    Opcode::CreateFunction => 6, // opcode + u8 + u32
-                    Opcode::Call => 3,           // opcode + u8 + u8
+                    Opcode::LoadVar => 3,                 // opcode + u16
+                    Opcode::CreateObject => 3,            // opcode + u16
+                    Opcode::ObjectInsert => 2,            // opcode + u8
+                    Opcode::CreateArray => 3,             // opcode + u16
+                    Opcode::FieldDef => 4,                // opcode + u16 + u8
+                    Opcode::CreateFunction => 6,          // opcode + u8 + u32
+                    Opcode::Call | Opcode::TailCall => 3, // opcode + u8 + u8
                     Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue => 5, // opcode + i32
-                    Opcode::LocalScope => 2,     // opcode + u8
-                    Opcode::StdCall => 4,        // opcode + u16 + u8
-                    Opcode::BindDefault => 3,    // opcode + u16
+                    Opcode::LocalScope => 2,              // opcode + u8
+                    Opcode::StdCall => 4,                 // opcode + u16 + u8
+                    Opcode::BindDefault => 3,             // opcode + u16
                     Opcode::Closure => {
                         // opcode + u16 (func_idx) + u8 (upvalue_count) + upvalue_count * 3
                         // Each upvalue is: u8 (is_local) + u16 (index)
