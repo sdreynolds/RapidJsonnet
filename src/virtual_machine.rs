@@ -1842,8 +1842,8 @@ impl VirtualMachine {
                         let source_id = self.current_chunk().source_id.to_string();
                         let o_val = args[0];
                         let f_val = args[1];
-                        let default_val = args[2];
-                        let inc_hidden_val = args[3];
+                        let default_val = args.get(2).copied().unwrap_or(Value::Null);
+                        let inc_hidden_val = args.get(3).copied().unwrap_or(Value::Null);
 
                         let o_idx = match o_val {
                             Value::Object(o) => o,
@@ -5245,6 +5245,57 @@ impl VirtualMachine {
                                 }
                                 let alloc = self.memory_manager.allocate_array(result);
                                 self.push(Value::Array(alloc.index))?;
+                                continue;
+                            }
+
+                            // Handle std.sort with keyF
+                            if id == chunk::NativeFuncId::Sort && args.len() == 2 {
+                                let arr_val = args[0];
+                                let key_f = args[1];
+                                let arr_idx = match arr_val {
+                                    Value::Array(a) => a,
+                                    _ => {
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: "std.sort() expected array as first argument"
+                                                .to_string(),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                };
+                                let elements: Vec<Value> =
+                                    self.memory_manager.load_array(arr_idx).elements.clone();
+
+                                // Compute keys for each element by calling keyF
+                                let mut keys: Vec<Value> = Vec::with_capacity(elements.len());
+                                for &elem in &elements {
+                                    // Root accumulated data before each call to protect from GC
+                                    let mut roots = Vec::from(self.stack.clone());
+                                    roots.extend_from_slice(&elements);
+                                    roots.extend_from_slice(&keys);
+                                    roots.push(key_f);
+                                    let mut open_upvalue_roots = Vec::new();
+                                    let mut upvalue = self.open_upvalues;
+                                    while let Some(uv_idx) = upvalue {
+                                        open_upvalue_roots.push(uv_idx);
+                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    }
+                                    self.memory_manager
+                                        .push_external_roots(roots, open_upvalue_roots);
+                                    let key = self.call_value_with_one_arg(key_f, elem);
+                                    self.memory_manager.pop_external_roots();
+                                    keys.push(key?);
+                                }
+
+                                // Sort elements by their computed keys
+                                let mut indexed: Vec<usize> = (0..elements.len()).collect();
+                                let mm = &self.memory_manager;
+                                indexed
+                                    .sort_by(|&a, &b| native::compare_values(keys[a], keys[b], mm));
+                                let sorted: Vec<Value> =
+                                    indexed.iter().map(|&i| elements[i]).collect();
+                                let arr_alloc = self.memory_manager.allocate_array(sorted);
+                                self.push(Value::Array(arr_alloc.index))?;
                                 continue;
                             }
 
