@@ -5,6 +5,7 @@ use chunk::{
 use compiler;
 use memory_manager::{MemoryManager, ObjectField};
 use scanner;
+use serialized_chunk;
 use std::ops::Range;
 
 use native::{self, call_native};
@@ -68,10 +69,12 @@ pub struct VirtualMachine {
 
 impl VirtualMachine {
     /// Create a new virtual machine with the given starting chunk and string pool
-    pub fn new(chunk: Chunk, mut memory_manager: MemoryManager) -> Self {
-        // Convert chunk to owned chunk for function storage
-        let owned_chunk = chunk.into_owned();
+    pub fn new(chunk: Chunk, memory_manager: MemoryManager) -> Self {
+        Self::new_from_owned(chunk.into_owned(), memory_manager)
+    }
 
+    /// Create a new virtual machine from a pre-compiled OwnedChunk
+    pub fn new_from_owned(owned_chunk: OwnedChunk, mut memory_manager: MemoryManager) -> Self {
         // Create a top-level function from the chunk
         let func_result = memory_manager.allocate_function(None, 0, 0, owned_chunk);
 
@@ -515,25 +518,6 @@ impl VirtualMachine {
                     .unwrap());
             }
 
-            // 2. Read the file
-            let content = match std::fs::read_to_string(&target_path_str) {
-                Ok(content) => content,
-                Err(e) => {
-                    self.memory_manager
-                        .load_import(import_idx)
-                        .evaluating
-                        .set(false);
-                    return Err(RuntimeError {
-                        span: self.get_current_span(),
-                        message: format!(
-                            "Failed to read imported file '{}': {}",
-                            target_path_str, e
-                        ),
-                        source_id: self.current_chunk().source_id.to_string(),
-                    });
-                }
-            };
-
             // Protect the current VM roots from GC during nested compilation and execution
             let mut roots = Vec::from(self.stack.clone());
             roots.push(val); // Protect the value we are currently forcing
@@ -551,34 +535,78 @@ impl VirtualMachine {
             self.memory_manager
                 .push_external_roots(roots, open_upvalue_roots);
 
-            // 3. Compile the file
-            let mut scanner = scanner::Scanner::new(&content, &target_path_str);
-            let compiler = compiler::Compiler::new(&mut scanner, &target_path_str);
-            let chunk = match compiler.compile(&mut self.memory_manager) {
-                Ok(chunk) => chunk,
-                Err(e) => {
-                    self.memory_manager.pop_external_roots();
-                    self.memory_manager
-                        .load_import(import_idx)
-                        .evaluating
-                        .set(false);
-                    return Err(RuntimeError {
-                        span: self.get_current_span(),
-                        message: format!(
-                            "Failed to compile imported file '{}': {:?}",
-                            target_path_str, e
-                        ),
-                        source_id: self.current_chunk().source_id.to_string(),
-                    });
+            // 2. Check for pre-compiled file, otherwise read source and compile
+            let compiled_path = format!("{}c", target_path_str);
+            let owned_chunk = if std::path::Path::new(&compiled_path).exists() {
+                // Load pre-compiled bytecode
+                let bytes = match std::fs::read(&compiled_path) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        self.memory_manager.pop_external_roots();
+                        self.memory_manager
+                            .load_import(import_idx)
+                            .evaluating
+                            .set(false);
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!(
+                                "Failed to read compiled file '{}': {}",
+                                compiled_path, e
+                            ),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+                };
+                serialized_chunk::deserialize_program(&bytes, &mut self.memory_manager)
+            } else {
+                // Read the source file and compile it
+                let content = match std::fs::read_to_string(&target_path_str) {
+                    Ok(content) => content,
+                    Err(e) => {
+                        self.memory_manager.pop_external_roots();
+                        self.memory_manager
+                            .load_import(import_idx)
+                            .evaluating
+                            .set(false);
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!(
+                                "Failed to read imported file '{}': {}",
+                                target_path_str, e
+                            ),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
+                };
+
+                let mut scanner = scanner::Scanner::new(&content, &target_path_str);
+                let compiler = compiler::Compiler::new(&mut scanner, &target_path_str);
+                match compiler.compile(&mut self.memory_manager) {
+                    Ok(chunk) => chunk.into_owned(),
+                    Err(e) => {
+                        self.memory_manager.pop_external_roots();
+                        self.memory_manager
+                            .load_import(import_idx)
+                            .evaluating
+                            .set(false);
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!(
+                                "Failed to compile imported file '{}': {:?}",
+                                target_path_str, e
+                            ),
+                            source_id: self.current_chunk().source_id.to_string(),
+                        });
+                    }
                 }
             };
 
-            // 4. Execute the chunk
+            // 3. Execute the chunk
             let dummy_memory_manager = memory_manager::MemoryManager::new();
             let actual_memory_manager =
                 std::mem::replace(&mut self.memory_manager, dummy_memory_manager);
 
-            let mut sub_vm = VirtualMachine::new(chunk, actual_memory_manager);
+            let mut sub_vm = VirtualMachine::new_from_owned(owned_chunk, actual_memory_manager);
             let result = sub_vm.interpret();
 
             self.memory_manager = sub_vm.memory_manager;
