@@ -254,7 +254,7 @@ impl VirtualMachine {
             Value::NativeFunction(id) => {
                 let span = self.get_current_span();
                 let source_id = self.current_chunk().source_id.to_string();
-                call_native(id, &[arg], &mut self.memory_manager, span, source_id)
+                self.call_native_checked(id, &[arg], span, source_id)
             }
             _ => Err(RuntimeError {
                 span: self.get_current_span(),
@@ -283,13 +283,43 @@ impl VirtualMachine {
             Value::NativeFunction(id) => {
                 let span = self.get_current_span();
                 let source_id = self.current_chunk().source_id.to_string();
-                call_native(id, &[arg1, arg2], &mut self.memory_manager, span, source_id)
+                self.call_native_checked(id, &[arg1, arg2], span, source_id)
             }
             _ => Err(RuntimeError {
                 span: self.get_current_span(),
                 message: "expected function as callback".to_string(),
                 source_id: self.current_chunk().source_id.to_string(),
             }),
+        }
+    }
+
+    /// Call a native function, intercepting `std.assertEqual` so it uses the VM's
+    /// `values_equal` (which evaluates thunks) instead of the native `values_equal`
+    /// (which compares raw closure references).
+    fn call_native_checked(
+        &mut self,
+        id: chunk::NativeFuncId,
+        args: &[Value],
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<Value, RuntimeError> {
+        if id == chunk::NativeFuncId::AssertEqual && args.len() == 2 {
+            if self.values_equal(&args[0], &args[1])? {
+                Ok(Value::Boolean(true))
+            } else {
+                let a_display = native::display_value(args[0], &self.memory_manager);
+                let b_display = native::display_value(args[1], &self.memory_manager);
+                Err(RuntimeError {
+                    span,
+                    message: format!(
+                        "Assertion failed: {} was not equal to {}",
+                        a_display, b_display
+                    ),
+                    source_id,
+                })
+            }
+        } else {
+            call_native(id, args, &mut self.memory_manager, span, source_id)
         }
     }
 
@@ -1018,7 +1048,7 @@ impl VirtualMachine {
                 Opcode::Lt => {
                     let b = self.pop_forced()?;
                     let a = self.pop_forced()?;
-                    let result = self.to_number(a)? < self.to_number(b)?;
+                    let result = self.compare_values(a, b)? == std::cmp::Ordering::Less;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -1026,7 +1056,7 @@ impl VirtualMachine {
                 Opcode::Le => {
                     let b = self.pop_forced()?;
                     let a = self.pop_forced()?;
-                    let result = self.to_number(a)? <= self.to_number(b)?;
+                    let result = self.compare_values(a, b)? != std::cmp::Ordering::Greater;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -1034,7 +1064,7 @@ impl VirtualMachine {
                 Opcode::Gt => {
                     let b = self.pop_forced()?;
                     let a = self.pop_forced()?;
-                    let result = self.to_number(a)? > self.to_number(b)?;
+                    let result = self.compare_values(a, b)? == std::cmp::Ordering::Greater;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -1042,7 +1072,7 @@ impl VirtualMachine {
                 Opcode::Ge => {
                     let b = self.pop_forced()?;
                     let a = self.pop_forced()?;
-                    let result = self.to_number(a)? >= self.to_number(b)?;
+                    let result = self.compare_values(a, b)? != std::cmp::Ordering::Less;
                     self.push(Value::Boolean(result))?;
                     self.advance_pc();
                 }
@@ -1686,6 +1716,57 @@ impl VirtualMachine {
                                 });
                             }
                         }
+                        Value::String(string_key) => {
+                            // String indexing with number - returns single character string
+                            if let Value::Number(index_num) = index_value {
+                                if index_num < 0.0 {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "String index cannot be negative, got {}",
+                                            index_num
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                                if index_num.fract() != 0.0 {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "String index must be an integer, got {}",
+                                            index_num
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                                let index = index_num as usize;
+                                let s = self.memory_manager.load_string(string_key).to_string();
+                                let chars: Vec<char> = s.chars().collect();
+                                if index >= chars.len() {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "String index {} out of bounds (length: {})",
+                                            index, chars.len()
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                                let ch = chars[index].to_string();
+                                let str_alloc = self.memory_manager.allocate_string(&ch);
+                                let str_idx = str_alloc.index;
+                                self.push(Value::String(str_idx))?;
+                            } else {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "String index must be a number, got {:?}",
+                                        index_value
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        }
                         _ => {
                             return Err(RuntimeError {
                                 span: self.get_current_span(),
@@ -1992,10 +2073,9 @@ impl VirtualMachine {
                             let new_obj_val = Value::Object(new_obj_alloc.index);
                             // Now call format with the new object
                             let new_args = vec![args[0], new_obj_val];
-                            let result = call_native(
+                            let result = self.call_native_checked(
                                 func_id,
                                 &new_args,
-                                &mut self.memory_manager,
                                 span,
                                 source_id,
                             )?;
@@ -2366,10 +2446,9 @@ impl VirtualMachine {
                                 .allocate_object_with_properties(properties);
                             let new_obj_val = Value::Object(new_obj_alloc.index);
                             let new_args = vec![new_obj_val];
-                            let result = call_native(
+                            let result = self.call_native_checked(
                                 func_id,
                                 &new_args,
-                                &mut self.memory_manager,
                                 span,
                                 source_id,
                             )?;
@@ -4273,7 +4352,7 @@ impl VirtualMachine {
                     let span = self.get_current_span();
                     let source_id = self.current_chunk().source_id.to_string();
                     let result =
-                        call_native(func_id, &args, &mut self.memory_manager, span, source_id)?;
+                        self.call_native_checked(func_id, &args, span, source_id)?;
 
                     self.push(result)?;
                 }
@@ -6045,7 +6124,7 @@ impl VirtualMachine {
                             let span = self.get_current_span();
                             let source_id = self.current_chunk().source_id.to_string();
                             let result =
-                                call_native(id, &args, &mut self.memory_manager, span, source_id)?;
+                                self.call_native_checked(id, &args, span, source_id)?;
                             self.push(result)?;
                         }
 
@@ -6264,7 +6343,7 @@ impl VirtualMachine {
                             let span = self.get_current_span();
                             let source_id = self.current_chunk().source_id.to_string();
                             let result =
-                                call_native(id, &args, &mut self.memory_manager, span, source_id)?;
+                                self.call_native_checked(id, &args, span, source_id)?;
                             self.push(result)?;
                         }
                         _ => {
@@ -6577,6 +6656,51 @@ impl VirtualMachine {
 
         self.memory_manager.external_roots.pop();
         result
+    }
+
+    /// Compare two values for ordering according to Jsonnet semantics.
+    /// Supports numbers, strings, and arrays. Returns an error for incomparable types.
+    fn compare_values(
+        &mut self,
+        a: Value,
+        b: Value,
+    ) -> Result<std::cmp::Ordering, RuntimeError> {
+        let a = self.force_value(a)?;
+        let b = self.force_value(b)?;
+        match (a, b) {
+            (Value::Number(a), Value::Number(b)) => {
+                Ok(a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal))
+            }
+            (Value::String(a), Value::String(b)) => {
+                let a_str = self.memory_manager.load_string(a).to_string();
+                let b_str = self.memory_manager.load_string(b).to_string();
+                Ok(a_str.cmp(&b_str))
+            }
+            (Value::Array(a_idx), Value::Array(b_idx)) => {
+                let a_len = self.memory_manager.load_array(a_idx).len();
+                let b_len = self.memory_manager.load_array(b_idx).len();
+                let min_len = a_len.min(b_len);
+                for i in 0..min_len {
+                    let a_elem = self.memory_manager.load_array(a_idx).elements[i];
+                    let b_elem = self.memory_manager.load_array(b_idx).elements[i];
+                    let a_elem = self.force_value(a_elem)?;
+                    let b_elem = self.force_value(b_elem)?;
+                    let ord = self.compare_values(a_elem, b_elem)?;
+                    if ord != std::cmp::Ordering::Equal {
+                        return Ok(ord);
+                    }
+                }
+                Ok(a_len.cmp(&b_len))
+            }
+            _ => Err(RuntimeError {
+                span: self.get_current_span(),
+                message: format!(
+                    "Cannot compare {:?} with {:?}",
+                    a, b
+                ),
+                source_id: self.current_chunk().source_id.to_string(),
+            }),
+        }
     }
 
     /// Helper to get all visible fields of an object with their evaluated values.

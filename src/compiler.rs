@@ -22,6 +22,13 @@ enum ComprehensionClause {
     },
 }
 
+// Object-local binding tracking for replay inside field/assert thunks
+#[derive(Debug, Clone)]
+struct ObjectLocalBinding {
+    checkpoint: ParserCheckpoint,
+    span: Range<usize>,
+}
+
 // Expression type tracking for compile-time optimizations
 #[derive(Debug, Clone, PartialEq)]
 enum ExpressionType {
@@ -226,7 +233,6 @@ impl<'a> Compiler<'a> {
         min_bp: u8,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
-        let initial_tail_calls = self.tail_calls_emitted;
         // Parse left-hand side (prefix)
         self.parse_prefix(memory_manager)?;
 
@@ -248,13 +254,6 @@ impl<'a> Compiler<'a> {
                     break;
                 }
 
-                if self.tail_calls_emitted > initial_tail_calls {
-                    return Err(self.make_error(
-                        current.span.clone(),
-                        "'tailstrict' used in non-tail position".to_string(),
-                    ));
-                }
-
                 self.parse_postfix(memory_manager)?;
                 continue;
             }
@@ -263,13 +262,6 @@ impl<'a> Compiler<'a> {
             if let Some((left_bp, right_bp)) = self.get_binding_power(&current.token) {
                 if left_bp <= min_bp {
                     break;
-                }
-
-                if self.tail_calls_emitted > initial_tail_calls {
-                    return Err(self.make_error(
-                        current.span.clone(),
-                        "'tailstrict' used in non-tail position".to_string(),
-                    ));
                 }
 
                 self.parse_infix(right_bp, memory_manager)?;
@@ -594,31 +586,6 @@ impl<'a> Compiler<'a> {
                     );
                 }
                 self.push_type(ExpressionType::Object);
-            }
-            Token::TailStrict => {
-                if !self.in_tail_position {
-                    return Err(self.make_error(
-                        token.span.clone(),
-                        "'tailstrict' used in non-tail position".to_string(),
-                    ));
-                }
-                let ts_span = token.span.clone();
-                self.parser.advance()?; // consume 'tailstrict'
-                self.tail_call_pending = true;
-                self.tail_calls_emitted += 1;
-                // Parse the callee + call at postfix precedence so binary operators
-                // after the call are NOT greedily consumed.
-                self.parse_expr(PRECEDENCE_POSTFIX - 1, memory_manager)?;
-                if self.tail_call_pending {
-                    // No call was consumed — tailstrict was not followed by a function call
-                    self.tail_call_pending = false;
-                    self.tail_calls_emitted -= 1;
-                    return Err(self.make_error(
-                        ts_span,
-                        "'tailstrict' must be followed by a function call expression".to_string(),
-                    ));
-                }
-                self.push_type(ExpressionType::Unknown);
             }
             Token::Identifier(name) => {
                 let name_clone = name.clone();
@@ -1245,8 +1212,21 @@ impl<'a> Compiler<'a> {
                 self.parser
                     .consume(Token::RightParen, "Expected ')' after arguments")?;
 
+                // Check for postfix `tailstrict` keyword.
+                // Accepted anywhere syntactically, but only emits TailCall in tail position.
+                let has_tailstrict = matches!(
+                    self.parser.current_token().map(|t| &t.token),
+                    Some(Token::TailStrict)
+                );
+                if has_tailstrict {
+                    self.parser.advance()?; // consume 'tailstrict'
+                    if self.in_tail_position {
+                        self.tail_calls_emitted += 1;
+                    }
+                }
+
                 if let Some(id) = native_id {
-                    // tailstrict has no effect on native functions — clear the flag and emit normally
+                    // tailstrict has no effect on native functions
                     self.tail_call_pending = false;
                     self.type_stack.pop();
                     // Emit StdCall opcode with native function ID and arg count
@@ -1255,8 +1235,8 @@ impl<'a> Compiler<'a> {
                         .write_opcode_u16(Opcode::StdCall, id as u16, span.clone());
                     self.compiling_chunk.write(arg_count, span);
                 } else {
-                    // Emit TailCall if tailstrict was pending, otherwise regular Call
-                    let is_tail_call = self.tail_call_pending;
+                    // Emit TailCall if tailstrict in tail position, otherwise regular Call
+                    let is_tail_call = self.tail_call_pending || (has_tailstrict && self.in_tail_position);
                     self.tail_call_pending = false;
                     let span = token.span;
                     let opcode = if is_tail_call {
@@ -1342,6 +1322,50 @@ impl<'a> Compiler<'a> {
             return res;
         }
 
+        // Pre-scan for object-local declarations
+        let mut object_locals: Vec<ObjectLocalBinding> = Vec::new();
+        {
+            let members_start = self.parser.save_checkpoint();
+            loop {
+                if let Some(current) = self.parser.current_token() {
+                    if current.token == Token::RightBrace {
+                        break;
+                    }
+                    if current.token == Token::Local {
+                        let span = current.span.clone();
+                        let checkpoint = self.parser.save_checkpoint();
+                        object_locals.push(ObjectLocalBinding { checkpoint, span });
+                        self.parser.advance()?; // 'local'
+                        self.parser.advance()?; // identifier
+                        self.skip_balanced_parens_if_present()?;
+                        self.parser.consume(
+                            Token::Operator("=".to_string()),
+                            "Expected '=' after local name",
+                        )?;
+                        self.skip_to_member_end()?;
+                    } else {
+                        // Skip non-local member (field or assert)
+                        self.skip_to_member_end()?;
+                    }
+                    // Consume comma if present
+                    if let Some(t) = self.parser.current_token() {
+                        if t.token == Token::Comma {
+                            self.parser.advance()?;
+                            // Check for trailing comma
+                            if let Some(next) = self.parser.current_token() {
+                                if next.token == Token::RightBrace {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            self.parser.restore_checkpoint(members_start);
+        }
+
         // Create the object immediately (with 0 initial fields)
         self.compiling_chunk
             .write_opcode_u16(Opcode::CreateObject, 0, start_token.span.clone());
@@ -1353,6 +1377,37 @@ impl<'a> Compiler<'a> {
                     break;
                 }
 
+                if key_token.token == Token::Local {
+                    // Skip: already recorded during pre-scan
+                    self.parser.advance()?; // 'local'
+                    self.parser.advance()?; // identifier
+                    self.skip_balanced_parens_if_present()?;
+                    self.parser.consume(
+                        Token::Operator("=".to_string()),
+                        "Expected '=' after local name",
+                    )?;
+                    self.skip_to_member_end()?;
+
+                    // Handle comma/brace trailing
+                    if let Some(current) = self.parser.current_token() {
+                        match &current.token {
+                            Token::Comma => {
+                                self.parser.advance()?;
+                                if let Some(next) = self.parser.current_token() {
+                                    if next.token == Token::RightBrace {
+                                        break;
+                                    }
+                                }
+                            }
+                            Token::RightBrace => {
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+
                 if key_token.token == Token::Assert {
                     let assert_start = key_token.span.start;
                     self.parser.advance()?; // consume 'assert'
@@ -1361,6 +1416,11 @@ impl<'a> Compiler<'a> {
                     let saved_state = self.begin_function();
                     self.begin_scope();
                     self.declare_local("<closure>".to_string())?; // Slot 0
+                    // Declare the implicit self/super args to keep slot numbering in sync
+                    self.declare_local("<self>".to_string())?; // Slot 1
+                    self.declare_local("<super>".to_string())?; // Slot 2
+
+                    self.inject_object_locals(&object_locals, memory_manager, 0)?;
 
                     // Evaluate condition
                     self.parse_expr_notail(0, memory_manager)?;
@@ -1523,12 +1583,17 @@ impl<'a> Compiler<'a> {
             let (saved_scope_depth, saved_function_type) = self.begin_function();
             self.begin_scope();
             self.declare_local("<closure>".to_string())?; // Slot 0
+            // Declare the implicit self/super args to keep slot numbering in sync
+            self.declare_local("<self>".to_string())?; // Slot 1
+            self.declare_local("<super>".to_string())?; // Slot 2
 
             if self.object_depth == 1 {
                 // local $ = self
                 self.emit_opcode(Opcode::LoadSelf, 0..0);
-                self.declare_local("$".to_string())?; // Slot 1
+                self.declare_local("$".to_string())?; // Slot 3
             }
+
+            self.inject_object_locals(&object_locals, memory_manager, 0)?;
 
             let prev_tail = self.in_tail_position;
             self.in_tail_position = true;
@@ -1763,13 +1828,179 @@ impl<'a> Compiler<'a> {
         Ok(skip_count)
     }
 
+    /// Advance the parser past a balanced expression, stopping at `,`, `}`, or `for`/`if`
+    /// at depth 0. Does NOT consume the terminator token.
+    /// Used during pre-scan of object members to skip over expressions.
+    fn skip_to_member_end(&mut self) -> Result<(), CompilerError> {
+        let mut depth = 0;
+        loop {
+            let current = self
+                .parser
+                .current_token()
+                .ok_or_else(|| self.unexpected_eof_error(self.current_span()))?;
+            match &current.token {
+                Token::LeftParen | Token::LeftBracket | Token::LeftBrace => {
+                    depth += 1;
+                    self.parser.advance()?;
+                }
+                Token::RightParen | Token::RightBracket => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                    self.parser.advance()?;
+                }
+                Token::RightBrace => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                    self.parser.advance()?;
+                }
+                Token::Comma if depth == 0 => break,
+                Token::For | Token::If if depth == 0 => break,
+                Token::Eof => {
+                    return Err(self.unexpected_eof_error(self.current_span()));
+                }
+                _ => {
+                    self.parser.advance()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Skip balanced parentheses if present at current position.
+    /// Used during pre-scan to skip function parameter lists.
+    fn skip_balanced_parens_if_present(&mut self) -> Result<(), CompilerError> {
+        if matches!(
+            self.parser.current_token().map(|t| &t.token),
+            Some(Token::LeftParen)
+        ) {
+            self.parser.advance()?; // consume '('
+            let mut paren_depth = 1;
+            while paren_depth > 0 {
+                let t = self
+                    .parser
+                    .current_token()
+                    .ok_or_else(|| self.unexpected_eof_error(self.current_span()))?;
+                match &t.token {
+                    Token::LeftParen => paren_depth += 1,
+                    Token::RightParen => paren_depth -= 1,
+                    _ => {}
+                }
+                self.parser.advance()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Inject object-local declarations into the current scope.
+    /// Called inside each field/assert thunk to replay local bindings.
+    /// Uses two passes: first pre-declares all names with null (for forward refs),
+    /// then parses init expressions and stores values.
+    ///
+    /// `stack_offset` accounts for anonymous values on the VM stack that aren't
+    /// tracked in `self.locals` (e.g., in comprehension base cases where the
+    /// result object copy and key are pushed but not declared as locals).
+    /// For thunks (field/assert), pass 0. For comprehension base cases, pass 2.
+    fn inject_object_locals(
+        &mut self,
+        object_locals: &[ObjectLocalBinding],
+        memory_manager: &mut MemoryManager,
+        stack_offset: usize,
+    ) -> Result<(), CompilerError> {
+        if object_locals.is_empty() {
+            return Ok(());
+        }
+
+        let resume_checkpoint = self.parser.save_checkpoint();
+
+        // Phase A: Pre-declare ALL locals with LoadNull
+        let mut local_slots: Vec<usize> = Vec::new();
+        for local_binding in object_locals {
+            self.parser
+                .restore_checkpoint(local_binding.checkpoint.clone());
+            self.parser.advance()?; // consume 'local'
+
+            let name = match self.parser.current_token() {
+                Some(t) => match &t.token {
+                    Token::Identifier(n) => n.clone(),
+                    _ => {
+                        return Err(self.make_error(
+                            t.span.clone(),
+                            "Expected identifier after 'local'".to_string(),
+                        ))
+                    }
+                },
+                None => return Err(self.unexpected_eof_error(self.current_span())),
+            };
+
+            let actual_slot = self.locals.len() + stack_offset;
+            self.emit_opcode(Opcode::LoadNull, local_binding.span.clone());
+            self.locals.push(Local {
+                name,
+                depth: self.scope_depth,
+                stack_slot: actual_slot,
+                is_captured: false,
+            });
+            local_slots.push(actual_slot);
+        }
+
+        // Phase B: Parse init expressions and store values.
+        // Process function-sugar bindings first (they create closures without
+        // evaluating the body), then non-function bindings. This ensures
+        // forward references work: function locals are available as closures
+        // before non-function inits try to call them.
+        for pass in 0..2 {
+            for (i, local_binding) in object_locals.iter().enumerate() {
+                self.parser
+                    .restore_checkpoint(local_binding.checkpoint.clone());
+                self.parser.advance()?; // consume 'local'
+                self.parser.advance()?; // consume identifier
+
+                let is_function = matches!(
+                    self.parser.current_token().map(|t| &t.token),
+                    Some(Token::LeftParen)
+                );
+
+                // Pass 0: function-sugar only; Pass 1: non-function only
+                if (pass == 0) != is_function {
+                    continue;
+                }
+
+                let slot = local_slots[i];
+                let span = local_binding.span.clone();
+
+                if is_function {
+                    let parameters = self.parse_parameter_list()?;
+                    self.parser.consume(
+                        Token::Operator("=".to_string()),
+                        "Expected '=' after parameters",
+                    )?;
+                    self.compile_function_body(parameters, memory_manager)?;
+                } else {
+                    self.parser.consume(
+                        Token::Operator("=".to_string()),
+                        "Expected '=' after variable name",
+                    )?;
+                    self.parse_expr_notail(0, memory_manager)?;
+                }
+
+                self.emit_store_var(slot, span);
+            }
+        }
+
+        self.parser.restore_checkpoint(resume_checkpoint);
+        Ok(())
+    }
+
     /// Parse array comprehension: [expr for var in source_array]
     /// Stack layout during loop: [source, result, counter, length]
     /// for_offset is the token offset where 'for' keyword is located (already found by caller)
     fn parse_object_comprehension(
         &mut self,
         start_token: &TokenInfo,
-        for_offset: usize,
+        _for_offset: usize,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
         let span = start_token.span.clone();
@@ -1798,12 +2029,51 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        let field_start_checkpoint = self.parser.save_checkpoint();
-
-        // Skip past the field to the first 'for'
-        for _ in 0..for_offset {
-            self.parser.advance()?;
+        // Pre-scan members before 'for' to separate locals from the field
+        let mut object_locals: Vec<ObjectLocalBinding> = Vec::new();
+        let mut field_start_checkpoint = self.parser.save_checkpoint();
+        loop {
+            if let Some(t) = self.parser.current_token().cloned() {
+                match &t.token {
+                    Token::For => break,
+                    Token::Local => {
+                        let cp = self.parser.save_checkpoint();
+                        object_locals.push(ObjectLocalBinding {
+                            checkpoint: cp,
+                            span: t.span.clone(),
+                        });
+                        self.parser.advance()?; // 'local'
+                        self.parser.advance()?; // identifier
+                        self.skip_balanced_parens_if_present()?;
+                        self.parser.consume(
+                            Token::Operator("=".to_string()),
+                            "Expected '=' after local name",
+                        )?;
+                        self.skip_to_member_end()?;
+                        if matches!(
+                            self.parser.current_token().map(|t| &t.token),
+                            Some(Token::Comma)
+                        ) {
+                            self.parser.advance()?;
+                        }
+                    }
+                    _ => {
+                        // This is the actual field
+                        field_start_checkpoint = self.parser.save_checkpoint();
+                        self.skip_to_member_end()?;
+                        if matches!(
+                            self.parser.current_token().map(|t| &t.token),
+                            Some(Token::Comma)
+                        ) {
+                            self.parser.advance()?;
+                        }
+                    }
+                }
+            } else {
+                return Err(self.unexpected_eof_error(span.clone()));
+            }
         }
+        // Parser is now positioned at 'for'
         let mut clauses = Vec::new();
 
         // Parse clauses until '}'
@@ -1888,6 +2158,7 @@ impl<'a> Compiler<'a> {
             &clauses,
             0,
             field_start_checkpoint,
+            &object_locals,
             result_slot,
             memory_manager,
             &span,
@@ -1909,6 +2180,7 @@ impl<'a> Compiler<'a> {
         clauses: &[ComprehensionClause],
         clause_idx: usize,
         field_start_checkpoint: ParserCheckpoint,
+        object_locals: &[ObjectLocalBinding],
         result_slot: usize,
         memory_manager: &mut MemoryManager,
         span: &Range<usize>,
@@ -1969,7 +2241,18 @@ impl<'a> Compiler<'a> {
 
             self.parser
                 .consume(Token::Operator(":".to_string()), "Expected ':' after key")?;
-            self.parse_expr_notail(0, memory_manager)?;
+
+            // Inject object-locals into scope for the value expression.
+            // stack_offset=2 because result_copy and key are on the VM stack
+            // but not tracked in self.locals.
+            if !object_locals.is_empty() {
+                self.begin_scope();
+                self.inject_object_locals(object_locals, memory_manager, 2)?;
+                self.parse_expr_notail(0, memory_manager)?;
+                self.end_scope();
+            } else {
+                self.parse_expr_notail(0, memory_manager)?;
+            }
 
             self.compiling_chunk.write_opcode_u8(
                 Opcode::ObjectInsert,
@@ -2044,6 +2327,7 @@ impl<'a> Compiler<'a> {
                     clauses,
                     clause_idx + 1,
                     field_start_checkpoint.clone(),
+                    object_locals,
                     result_slot,
                     memory_manager,
                     span,
@@ -2084,6 +2368,7 @@ impl<'a> Compiler<'a> {
                     clauses,
                     clause_idx + 1,
                     field_start_checkpoint.clone(),
+                    object_locals,
                     result_slot,
                     memory_manager,
                     span,
@@ -2419,57 +2704,149 @@ impl<'a> Compiler<'a> {
         // Enter new scope for these locals
         self.begin_scope();
 
-        // Parse comma-separated bindings
+        // Phase 1: Use lookahead to discover all binding names without consuming
+        // tokens, so we can pre-declare them all before compiling any RHS.
+        // This enables forward references (e.g., `local x = y, y = 3; x`).
+        let mut binding_names: Vec<(String, Range<usize>)> = Vec::new();
+        {
+            let mut lookahead_idx = 0;
+            loop {
+                // Expect identifier at lookahead_idx
+                let name_token = match self.parser.peek_ahead(lookahead_idx)? {
+                    Some(t) => t.clone(),
+                    None => break,
+                };
+                let var_name = match &name_token.token {
+                    Token::Identifier(name) => name.clone(),
+                    _ => break, // Not an identifier, stop scanning
+                };
+                binding_names.push((var_name, name_token.span.clone()));
+                lookahead_idx += 1; // past identifier
+
+                // Skip optional parameter list
+                let is_paren = matches!(
+                    self.parser.peek_ahead(lookahead_idx)?.map(|t| &t.token),
+                    Some(Token::LeftParen)
+                );
+                if is_paren {
+                    lookahead_idx += 1;
+                    let mut paren_depth = 1;
+                    while paren_depth > 0 {
+                        let tok = match self.parser.peek_ahead(lookahead_idx)? {
+                            Some(t) => t.token.clone(),
+                            None => break,
+                        };
+                        match &tok {
+                            Token::LeftParen => paren_depth += 1,
+                            Token::RightParen => paren_depth -= 1,
+                            _ => {}
+                        }
+                        lookahead_idx += 1;
+                    }
+                }
+
+                // Expect '='
+                lookahead_idx += 1; // skip '='
+
+                // Skip RHS expression until ',' or ';' at depth 0
+                let mut depth = 0;
+                loop {
+                    let tok = match self.parser.peek_ahead(lookahead_idx)? {
+                        Some(t) => t.token.clone(),
+                        None => break,
+                    };
+                    match &tok {
+                        Token::LeftParen | Token::LeftBracket | Token::LeftBrace => depth += 1,
+                        Token::RightParen | Token::RightBracket | Token::RightBrace => {
+                            if depth > 0 {
+                                depth -= 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        Token::Comma | Token::Semicolon if depth == 0 => break,
+                        Token::Eof => break,
+                        _ => {}
+                    }
+                    lookahead_idx += 1;
+                }
+
+                // Check if ',' (more bindings) or ';' (end)
+                let is_comma = matches!(
+                    self.parser.peek_ahead(lookahead_idx)?.map(|t| &t.token),
+                    Some(Token::Comma)
+                );
+                if is_comma {
+                    lookahead_idx += 1;
+                    continue;
+                } else {
+                    break; // ';' or other: done scanning
+                }
+            }
+        }
+
+        // Phase 2: Pre-declare ALL locals with null values
+        let mut slots: Vec<usize> = Vec::new();
+        for (name, span) in &binding_names {
+            self.emit_opcode(Opcode::LoadNull, span.clone());
+            self.declare_local(name.clone())?;
+            slots.push(self.locals.last().unwrap().stack_slot);
+        }
+
+        // Phase 3: Parse and compile bindings sequentially, consuming tokens
+        // normally. All names are already in scope so forward references
+        // resolve (to null initially, then updated via StoreVar).
+        let mut binding_idx = 0;
         loop {
-            // Expect identifier
             let name_token = self
                 .parser
                 .current_token()
                 .cloned()
                 .ok_or_else(|| self.unexpected_eof_error(self.current_span()))?;
 
-            let var_name = match &name_token.token {
-                Token::Identifier(name) => name.clone(),
+            match &name_token.token {
+                Token::Identifier(_) => {}
                 _ => {
                     return Err(self.make_error(
                         name_token.span,
                         "Expected variable name after 'local'".to_string(),
                     ));
                 }
-            };
+            }
 
             self.parser.advance()?; // consume identifier
 
-            // Expect '='
-            self.parser.consume(
-                Token::Operator("=".to_string()),
-                "Expected '=' after variable name",
-            )?;
+            let is_function =
+                matches!(self.parser.current_token().map(|t| &t.token), Some(Token::LeftParen));
 
-            // Pre-reserve the local slot with null so the initializer expression can
-            // capture it as an upvalue (enabling self-referential/recursive bindings).
-            let slot_span = name_token.span.clone();
-            self.emit_opcode(Opcode::LoadNull, slot_span.clone());
-            self.declare_local(var_name)?;
-            let reserved_slot = self.locals.last().unwrap().stack_slot;
+            if is_function {
+                let parameters = self.parse_parameter_list()?;
+                self.parser.consume(
+                    Token::Operator("=".to_string()),
+                    "Expected '=' after parameters",
+                )?;
+                self.compile_function_body(parameters, memory_manager)?;
+            } else {
+                self.parser.consume(
+                    Token::Operator("=".to_string()),
+                    "Expected '=' after variable name",
+                )?;
+                self.parse_expr_notail(0, memory_manager)?;
+            }
 
-            // Parse binding expression — may capture the reserved slot via upvalue
-            self.parse_expr_notail(0, memory_manager)?;
-            // Expression result is now on top of stack
-
-            // Overwrite the placeholder slot with the real value
-            self.emit_store_var(reserved_slot, slot_span);
+            self.emit_store_var(slots[binding_idx], binding_names[binding_idx].1.clone());
+            binding_idx += 1;
 
             // Check for comma (more bindings) or semicolon (end of bindings)
             if let Some(token) = self.parser.current_token() {
                 match &token.token {
                     Token::Comma => {
-                        self.parser.advance()?; // consume ','
-                        continue; // Parse next binding
+                        self.parser.advance()?;
+                        continue;
                     }
                     Token::Semicolon => {
-                        self.parser.advance()?; // consume ';'
-                        break; // Done with bindings
+                        self.parser.advance()?;
+                        break;
                     }
                     Token::Eof => {
                         return Err(self.unexpected_eof_error(token.span.clone()));
@@ -2488,13 +2865,14 @@ impl<'a> Compiler<'a> {
 
         // Parse body expression (with locals in scope)
         self.parse_expr(0, memory_manager)?;
-        // Body expression result stays on stack
 
         // Exit scope - emit Pop for each local
         self.end_scope();
 
         Ok(())
     }
+
+
 
     // Scope and Local Variable Management
 
@@ -2702,22 +3080,14 @@ impl<'a> Compiler<'a> {
         (function_chunk, function_upvalues)
     }
 
-    /// Parse a function expression: function(params) body
-    fn parse_function_expression(
-        &mut self,
-        memory_manager: &mut MemoryManager,
-    ) -> Result<(), CompilerError> {
-        // Consume 'function' keyword
-        self.parser.advance()?;
-
-        // Expect '(' for parameter list
+    /// Parse a parenthesized parameter list: (param1, param2, ...)
+    /// Consumes the opening '(' and closing ')'.
+    fn parse_parameter_list(&mut self) -> Result<Vec<String>, CompilerError> {
         self.parser
-            .consume(Token::LeftParen, "Expected '(' after 'function'")?;
+            .consume(Token::LeftParen, "Expected '(' for parameter list")?;
 
-        // Parse parameter list
         let mut parameters = Vec::new();
 
-        // Check if parameter list is empty
         let has_params = if let Some(token) = self.parser.current_token() {
             token.token != Token::RightParen
         } else {
@@ -2726,7 +3096,6 @@ impl<'a> Compiler<'a> {
 
         if has_params {
             loop {
-                // Expect parameter name (identifier)
                 if let Some(TokenInfo {
                     token: Token::Identifier(param_name),
                     ..
@@ -2740,10 +3109,9 @@ impl<'a> Compiler<'a> {
                     );
                 }
 
-                // Check for comma (more parameters) or end of list
                 if let Some(token) = self.parser.current_token() {
                     if token.token == Token::Comma {
-                        self.parser.advance()?; // consume comma
+                        self.parser.advance()?;
                     } else {
                         break;
                     }
@@ -2753,46 +3121,58 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        // Consume ')'
         self.parser
             .consume(Token::RightParen, "Expected ')' after parameters")?;
 
+        Ok(parameters)
+    }
+
+    /// Compile a function body given already-parsed parameters.
+    /// Sets up function scope, declares params, parses body expression,
+    /// emits Return, and emits the closure instruction.
+    fn compile_function_body(
+        &mut self,
+        parameters: Vec<String>,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
         let arity = parameters.len() as u8;
 
-        // Save current compilation state and begin function
         let saved_state = self.begin_function();
-
-        // Enter function scope and declare parameters as locals
         self.begin_scope();
 
         // Reserve slot 0 for the closure itself
-        // This ensures parameters start at slot 1
         self.declare_local("<closure>".to_string())?;
 
         for param_name in parameters {
-            // Parameters are implicitly on the stack (passed by caller)
-            // We just need to declare them as locals
             self.declare_local(param_name)?;
         }
 
-        // Parse function body expression
         let prev_tail = self.in_tail_position;
         self.in_tail_position = true;
         self.parse_expr(0, memory_manager)?;
         self.in_tail_position = prev_tail;
 
-        // Emit implicit Return
         let return_span = self.current_span();
         self.emit_opcode(Opcode::Return, return_span);
 
-        // End function scope
         self.end_scope();
 
-        // End function compilation and restore previous state
         let (chunk, upvalues) = self.end_function(saved_state);
-
-        // Emit closure instruction with the compiled function
         self.emit_closure(chunk, upvalues, arity, memory_manager)?;
+
+        Ok(())
+    }
+
+    /// Parse a function expression: function(params) body
+    fn parse_function_expression(
+        &mut self,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        // Consume 'function' keyword
+        self.parser.advance()?;
+
+        let parameters = self.parse_parameter_list()?;
+        self.compile_function_body(parameters, memory_manager)?;
 
         Ok(())
     }
@@ -3233,20 +3613,15 @@ mod tests {
     }
 
     #[test]
-    fn test_forward_reference_error() {
-        // local x = y + 1, y = 5; x (should fail)
+    fn test_forward_reference_in_local() {
+        // local x = y + 1, y = 5; x — forward references should compile
+        // (in Jsonnet, local bindings in the same group are mutually visible)
         let mut scanner = Scanner::new("local x = y + 1, y = 5; x", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let result = compiler.compile(&mut memory_manager);
 
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .message
-                .contains("Undefined variable 'y'")
-        );
+        assert!(result.is_ok(), "Forward reference should compile: {:?}", result.err());
     }
 
     #[test]
@@ -3426,5 +3801,57 @@ mod tests {
         // Tokens: x, in, [, if, true, then, 1, ,, for, i, in, [, ], ], ]
         // Note: the last ] is what it stops AT.
         assert_eq!(skip5, 14);
+    }
+
+    #[test]
+    fn test_local_function_sugar() {
+        // local f(x) = x + 1; f(5) should compile successfully
+        let mut scanner = Scanner::new("local f(x) = x + 1; f(5)", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager);
+        assert!(chunk.is_ok(), "Function sugar should compile: {:?}", chunk.err());
+    }
+
+    #[test]
+    fn test_local_function_sugar_multi_param() {
+        let mut scanner = Scanner::new("local f(x, y) = x + y; f(3, 4)", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager);
+        assert!(chunk.is_ok(), "Multi-param function sugar should compile: {:?}", chunk.err());
+    }
+
+    #[test]
+    fn test_local_function_sugar_no_params() {
+        let mut scanner = Scanner::new("local f() = 42; f()", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager);
+        assert!(chunk.is_ok(), "No-param function sugar should compile: {:?}", chunk.err());
+    }
+
+    #[test]
+    fn test_local_function_sugar_recursive() {
+        let mut scanner = Scanner::new(
+            "local fac(n) = if n <= 1 then 1 else n * fac(n - 1); fac(5)",
+            "test",
+        );
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager);
+        assert!(chunk.is_ok(), "Recursive function sugar should compile: {:?}", chunk.err());
+    }
+
+    #[test]
+    fn test_local_function_sugar_with_closure() {
+        let mut scanner = Scanner::new(
+            "local x = 10; local add_x(y) = x + y; add_x(5)",
+            "test",
+        );
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager);
+        assert!(chunk.is_ok(), "Function sugar with closure should compile: {:?}", chunk.err());
     }
 }

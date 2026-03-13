@@ -3261,7 +3261,7 @@ fn std_remove(
 }
 
 /// Format a value as a human-readable string for error messages (no allocation into mm)
-fn display_value(val: Value, memory_manager: &MemoryManager) -> String {
+pub fn display_value(val: Value, memory_manager: &MemoryManager) -> String {
     match val {
         Value::Null => "null".to_string(),
         Value::Boolean(b) => b.to_string(),
