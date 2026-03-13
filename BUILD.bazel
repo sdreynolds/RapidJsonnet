@@ -12,6 +12,7 @@ rust_binary(
         ":virtual_machine",
         ":scanner",
         "@crates//:ariadne",
+        "@crates//:serde_json",
     ],
     crate_features = [
         "stress_gc"

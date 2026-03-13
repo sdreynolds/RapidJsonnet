@@ -1,0 +1,34 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# Tests from the official Jsonnet test suite (google/jsonnet/test_suite).
+# Tests with .golden files compare output against expected.
+# Tests without .golden files expect output to be exactly "true".
+
+JSONNET_FILES = glob(["*.jsonnet"])
+
+GOLDEN_FILES = glob(["*.jsonnet.golden"])
+
+SUPPORT_FILES = glob([
+    "lib/**",
+    "this_file/**",
+    "*.jsonnet.in",
+])
+
+# Map from test file to its golden file (if it exists)
+GOLDEN_MAP = {f.replace(".golden", ""): f for f in GOLDEN_FILES}
+
+[
+    sh_test(
+        name = f.replace(".jsonnet", "").replace(".", "_") + "_test",
+        srcs = ["run_test.sh"],
+        args = [
+            "$(location //:main)",
+            "$(location %s)" % f,
+        ] + (["$(location %s)" % GOLDEN_MAP[f]] if f in GOLDEN_MAP else []),
+        data = [
+            "//:main",
+            f,
+        ] + ([GOLDEN_MAP[f]] if f in GOLDEN_MAP else []) + SUPPORT_FILES,
+    )
+    for f in JSONNET_FILES
+]
