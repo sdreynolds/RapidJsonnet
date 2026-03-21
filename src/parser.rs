@@ -1,4 +1,4 @@
-use scanner::{ScanError, Scanner, Token, TokenInfo};
+use scanner::{ScanError, Scanner, ScannerCheckpoint, Token, TokenInfo};
 
 // Using ScanError from scanner module instead of duplicate ParseError
 
@@ -168,9 +168,10 @@ impl<'a> Parser<'a> {
             previous_token: self.previous_token.clone(),
             current_token: self.current_token.clone(),
             buffer_position: self.buffer_position,
-            token_buffer: self.token_buffer.clone(), // Save buffer for full restore
+            token_buffer: self.token_buffer.clone(),
             had_error: self.had_error,
             panic_mode: self.panic_mode,
+            scanner_checkpoint: self.scanner.save_position(),
         }
     }
 
@@ -180,9 +181,10 @@ impl<'a> Parser<'a> {
         self.previous_token = checkpoint.previous_token;
         self.current_token = checkpoint.current_token;
         self.buffer_position = checkpoint.buffer_position;
-        self.token_buffer = checkpoint.token_buffer; // Restore buffer contents
+        self.token_buffer = checkpoint.token_buffer;
         self.had_error = checkpoint.had_error;
         self.panic_mode = checkpoint.panic_mode;
+        self.scanner.restore_position(checkpoint.scanner_checkpoint);
     }
 
     /// Clear the token buffer to free memory
@@ -199,9 +201,10 @@ pub struct ParserCheckpoint {
     previous_token: Option<TokenInfo>,
     current_token: Option<TokenInfo>,
     buffer_position: usize,
-    token_buffer: Vec<TokenInfo>, // Save buffer contents for full restore
+    token_buffer: Vec<TokenInfo>,
     had_error: bool,
     panic_mode: bool,
+    scanner_checkpoint: ScannerCheckpoint,
 }
 
 #[cfg(test)]
@@ -476,13 +479,12 @@ mod tests {
             Token::Number(1.0)
         ));
 
-        // Note: After restore, the scanner position is NOT restored (it's past the peeked tokens)
-        // So advancing will get the next unscanned token (2), not the peeked comma
-        // This is the expected behavior when buffer is fully restored
+        // After restore, the scanner position IS restored along with parser state,
+        // so advancing gives the comma that follows '1'
         parser.advance().unwrap();
         assert!(matches!(
             parser.current_token().unwrap().token,
-            Token::Number(2.0) // Scanner returns 2, not comma (which was already scanned into old buffer)
+            Token::Comma
         ));
     }
 

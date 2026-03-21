@@ -70,7 +70,6 @@ rust_library(
     ],
     crate_features = [
         "stress_gc",
-        "gc_debug",
     ]
 )
 
@@ -87,7 +86,6 @@ rust_library(
     ],
     crate_features = [
         "stress_gc",
-        "gc_debug",
     ]
 )
 
@@ -100,7 +98,6 @@ rust_library(
     ],
     crate_features = [
         "stress_gc",
-        "gc_debug",
     ]
 )
 

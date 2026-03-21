@@ -3,6 +3,40 @@ use memory_manager::{MemoryManager, ObjectField};
 use std::collections::HashSet;
 use std::ops::Range;
 
+/// Convert a string or array value to an array of values for set operations.
+/// Strings are treated as arrays of single-character strings (sorted).
+fn coerce_to_sorted_array(
+    val: Value,
+    func_name: &str,
+    arg_name: &str,
+    memory_manager: &mut MemoryManager,
+    span: &Range<usize>,
+    source_id: &str,
+) -> Result<Vec<Value>, RuntimeError> {
+    match val {
+        Value::Array(i) => Ok(memory_manager.load_array(i).elements.clone()),
+        Value::String(idx) => {
+            let s = memory_manager.load_string(idx).to_string();
+            let mut chars: Vec<String> = s.chars().map(|c| c.to_string()).collect();
+            chars.sort();
+            chars.dedup();
+            let values: Vec<Value> = chars
+                .into_iter()
+                .map(|c| {
+                    let interned = memory_manager.allocate_string(&c);
+                    Value::String(interned.index)
+                })
+                .collect();
+            Ok(values)
+        }
+        _ => Err(RuntimeError {
+            span: span.clone(),
+            message: format!("std.{}: {} must be an array or string", func_name, arg_name),
+            source_id: source_id.to_string(),
+        }),
+    }
+}
+
 /// Dispatches a native function call
 pub fn call_native(
     id: NativeFuncId,
@@ -422,28 +456,22 @@ pub fn call_native(
         NativeFuncId::SetInter => {
             let a_val = args[0];
             let b_val = args[1];
-            let a_idx = match a_val {
-                Value::Array(i) => i,
-                _ => {
-                    return Err(RuntimeError {
-                        span,
-                        message: "std.setInter: first argument must be an array".to_string(),
-                        source_id,
-                    });
-                }
-            };
-            let b_idx = match b_val {
-                Value::Array(i) => i,
-                _ => {
-                    return Err(RuntimeError {
-                        span,
-                        message: "std.setInter: second argument must be an array".to_string(),
-                        source_id,
-                    });
-                }
-            };
-            let a_elems = memory_manager.load_array(a_idx).elements.clone();
-            let b_elems = memory_manager.load_array(b_idx).elements.clone();
+            let a_elems = coerce_to_sorted_array(
+                a_val,
+                "setInter",
+                "first argument",
+                memory_manager,
+                &span,
+                &source_id,
+            )?;
+            let b_elems = coerce_to_sorted_array(
+                b_val,
+                "setInter",
+                "second argument",
+                memory_manager,
+                &span,
+                &source_id,
+            )?;
             let mut result: Vec<Value> = Vec::new();
             let mut i = 0;
             let mut j = 0;
@@ -465,28 +493,22 @@ pub fn call_native(
         NativeFuncId::SetDiff => {
             let a_val = args[0];
             let b_val = args[1];
-            let a_idx = match a_val {
-                Value::Array(i) => i,
-                _ => {
-                    return Err(RuntimeError {
-                        span,
-                        message: "std.setDiff: first argument must be an array".to_string(),
-                        source_id,
-                    });
-                }
-            };
-            let b_idx = match b_val {
-                Value::Array(i) => i,
-                _ => {
-                    return Err(RuntimeError {
-                        span,
-                        message: "std.setDiff: second argument must be an array".to_string(),
-                        source_id,
-                    });
-                }
-            };
-            let a_elems = memory_manager.load_array(a_idx).elements.clone();
-            let b_elems = memory_manager.load_array(b_idx).elements.clone();
+            let a_elems = coerce_to_sorted_array(
+                a_val,
+                "setDiff",
+                "first argument",
+                memory_manager,
+                &span,
+                &source_id,
+            )?;
+            let b_elems = coerce_to_sorted_array(
+                b_val,
+                "setDiff",
+                "second argument",
+                memory_manager,
+                &span,
+                &source_id,
+            )?;
             let mut result: Vec<Value> = Vec::new();
             let mut i = 0;
             let mut j = 0;
@@ -677,6 +699,7 @@ fn std_type(
         Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) => "function",
         Value::Import(_) => "import",
         Value::Binary(_) => "binary",
+        Value::Uninitialized => "uninitialized",
     };
 
     let allocation = memory_manager.allocate_string(type_str);
@@ -1321,12 +1344,13 @@ fn std_join(
 
     match sep_val {
         Value::String(sep_idx) => {
-            // String mode: join array of strings with separator
+            // String mode: join array of strings with separator (nulls skipped)
             let sep = memory_manager.load_string(sep_idx).to_string();
             let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
             let mut parts: Vec<String> = Vec::with_capacity(elements.len());
             for elem in &elements {
                 match elem {
+                    Value::Null => continue,
                     Value::String(s_idx) => {
                         parts.push(memory_manager.load_string(*s_idx).to_string());
                     }
@@ -1345,19 +1369,22 @@ fn std_join(
             Ok(Value::String(alloc.index))
         }
         Value::Array(sep_arr_idx) => {
-            // Array mode: interleave sep array between sub-arrays
+            // Array mode: interleave sep array between sub-arrays (nulls skipped)
             let sep_elements: Vec<Value> = memory_manager.load_array(sep_arr_idx).elements.clone();
             let outer_elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
             let mut result: Vec<Value> = Vec::new();
-            for (i, elem) in outer_elements.iter().enumerate() {
+            let mut first = true;
+            for elem in outer_elements.iter() {
                 match elem {
+                    Value::Null => continue,
                     Value::Array(sub_idx) => {
+                        if !first {
+                            result.extend(sep_elements.clone());
+                        }
+                        first = false;
                         let sub_elements: Vec<Value> =
                             memory_manager.load_array(*sub_idx).elements.clone();
                         result.extend(sub_elements);
-                        if i + 1 < outer_elements.len() {
-                            result.extend(sep_elements.clone());
-                        }
                     }
                     _ => {
                         return Err(RuntimeError {
@@ -1401,6 +1428,7 @@ fn std_lines(
     let mut result = String::new();
     for elem in &elements {
         match elem {
+            Value::Null => continue,
             Value::String(s_idx) => {
                 result.push_str(memory_manager.load_string(*s_idx));
                 result.push('\n');
@@ -1682,9 +1710,8 @@ fn std_find_substr(
             let s = memory_manager.load_string(str_idx).to_string();
 
             let indices: Vec<Value> = if pat.is_empty() {
-                // Empty pattern matches every codepoint position (0..=len_in_chars)
-                let char_count = s.chars().count();
-                (0..=char_count).map(|i| Value::Number(i as f64)).collect()
+                // Empty pattern returns empty array (official jsonnet behavior)
+                Vec::new()
             } else {
                 // Collect chars for codepoint-indexed sliding window scan
                 let s_chars: Vec<char> = s.chars().collect();
@@ -1696,10 +1723,8 @@ fn std_find_substr(
                 while i + pat_len <= s_len {
                     if s_chars[i..i + pat_len] == pat_chars[..] {
                         result.push(Value::Number(i as f64));
-                        i += pat_len; // non-overlapping: advance past match
-                    } else {
-                        i += 1;
                     }
+                    i += 1;
                 }
                 result
             };
@@ -1998,7 +2023,51 @@ fn value_to_format_string(val: Value, mm: &MemoryManager) -> String {
                 format!("{}", n)
             }
         }
+        Value::Array(a_idx) => {
+            let arr = mm.load_array(a_idx);
+            if arr.elements.is_empty() {
+                "[ ]".to_string()
+            } else {
+                let items: Vec<String> = arr
+                    .elements
+                    .iter()
+                    .map(|v| value_to_string_repr(*v, mm))
+                    .collect();
+                format!("[{}]", items.join(", "))
+            }
+        }
+        Value::Object(o_idx) => {
+            let obj = mm.load_object(o_idx);
+            let visible: Vec<_> = obj
+                .properties
+                .iter()
+                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                .collect();
+            if visible.is_empty() {
+                "{ }".to_string()
+            } else {
+                let items: Vec<String> = visible
+                    .iter()
+                    .map(|(k, f)| {
+                        let key = mm.load_string(**k);
+                        let val = value_to_string_repr(f.value, mm);
+                        format!("{}: {}", key, val)
+                    })
+                    .collect();
+                format!("{{ {} }}", items.join(", "))
+            }
+        }
+        Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) => {
+            "<function>".to_string()
+        }
         _ => "<value>".to_string(),
+    }
+}
+
+fn value_to_string_repr(val: Value, mm: &MemoryManager) -> String {
+    match val {
+        Value::String(idx) => format!("\"{}\"", mm.load_string(idx)),
+        _ => value_to_format_string(val, mm),
     }
 }
 
@@ -2103,23 +2172,47 @@ pub fn format_string(
             i += 1;
         }
 
-        // Parse width
+        // Parse width (* means take from args)
         let mut width: usize = 0;
-        while i < chars.len() && chars[i].is_ascii_digit() {
-            width = width * 10 + (chars[i] as usize - '0' as usize);
+        if i < chars.len() && chars[i] == '*' {
+            let w_val = vals.get_positional(pos_idx, span, source_id)?;
+            pos_idx += 1;
+            if let Value::Number(n) = w_val {
+                let w = n as i64;
+                if w < 0 {
+                    flags.push('-');
+                    width = (-w) as usize;
+                } else {
+                    width = w as usize;
+                }
+            }
             i += 1;
+        } else {
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                width = width * 10 + (chars[i] as usize - '0' as usize);
+                i += 1;
+            }
         }
 
-        // Parse .precision
+        // Parse .precision (* means take from args)
         let mut precision: Option<usize> = None;
         if i < chars.len() && chars[i] == '.' {
             i += 1;
-            let mut p: usize = 0;
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                p = p * 10 + (chars[i] as usize - '0' as usize);
+            if i < chars.len() && chars[i] == '*' {
+                let p_val = vals.get_positional(pos_idx, span, source_id)?;
+                pos_idx += 1;
+                if let Value::Number(n) = p_val {
+                    precision = Some(n as usize);
+                }
                 i += 1;
+            } else {
+                let mut p: usize = 0;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    p = p * 10 + (chars[i] as usize - '0' as usize);
+                    i += 1;
+                }
+                precision = Some(p);
             }
-            precision = Some(p);
         }
 
         if i >= chars.len() {
@@ -2130,8 +2223,35 @@ pub fn format_string(
             });
         }
 
+        // Skip C length modifiers (ignored in Jsonnet)
+        while i < chars.len() && "hlL".contains(chars[i]) {
+            i += 1;
+        }
+        if i >= chars.len() {
+            return Err(RuntimeError {
+                span: span.clone(),
+                message: "std.format: incomplete format specifier".to_string(),
+                source_id: source_id.to_string(),
+            });
+        }
+
         let conv = chars[i];
         i += 1;
+
+        // %% or %<flags>% → literal percent (no value consumed)
+        if conv == '%' {
+            let s = "%".to_string();
+            if width > 0 {
+                if flags.contains('-') {
+                    result.push_str(&format!("{:<width$}", s, width = width));
+                } else {
+                    result.push_str(&format!("{:>width$}", s, width = width));
+                }
+            } else {
+                result.push_str(&s);
+            }
+            continue;
+        }
 
         // Get the value to format
         let val = if let Some(ref key) = key_name {
@@ -2155,7 +2275,7 @@ pub fn format_string(
                 };
                 apply_width_align(&s, &flags, width)
             }
-            'd' | 'i' => {
+            'd' | 'i' | 'u' => {
                 let n = match val {
                     Value::Number(n) => n,
                     _ => {
@@ -2166,55 +2286,96 @@ pub fn format_string(
                         });
                     }
                 };
-                let s = format!("{}", n as i64);
-                apply_numeric_format(&s, &flags, width, zero_pad)
-            }
-            'o' => {
-                let n = match val {
-                    Value::Number(n) => n,
-                    _ => {
-                        return Err(RuntimeError {
-                            span: span.clone(),
-                            message: "std.format: %o requires a number".to_string(),
-                            source_id: source_id.to_string(),
-                        });
+                let int_val = n as i64;
+                let abs_str = format!("{}", int_val.unsigned_abs());
+                let s = if let Some(p) = precision {
+                    if p > abs_str.len() {
+                        let padded = format!("{:0>width$}", abs_str, width = p);
+                        if int_val < 0 {
+                            format!("-{}", padded)
+                        } else {
+                            padded
+                        }
+                    } else if p == 0 && int_val == 0 {
+                        String::new()
+                    } else {
+                        format!("{}", int_val)
                     }
-                };
-                let i = n as i64;
-                let s = if i < 0 {
-                    format!("-{:o}", -i)
                 } else {
-                    format!("{:o}", i)
+                    format!("{}", int_val)
                 };
-                apply_numeric_format(&s, &flags, width, zero_pad)
+                apply_numeric_format(&s, &flags, width, zero_pad && precision.is_none())
             }
-            'x' => {
+            'o' | 'x' | 'X' => {
                 let n = match val {
                     Value::Number(n) => n,
                     _ => {
                         return Err(RuntimeError {
                             span: span.clone(),
-                            message: "std.format: %x requires a number".to_string(),
+                            message: format!("std.format: %{} requires a number", conv),
                             source_id: source_id.to_string(),
                         });
                     }
                 };
-                let s = format!("{:x}", n as i64);
-                apply_numeric_format(&s, &flags, width, zero_pad)
-            }
-            'X' => {
-                let n = match val {
-                    Value::Number(n) => n,
-                    _ => {
-                        return Err(RuntimeError {
-                            span: span.clone(),
-                            message: "std.format: %X requires a number".to_string(),
-                            source_id: source_id.to_string(),
-                        });
-                    }
+                let int_val = n as i64;
+                let abs_digits = match conv {
+                    'o' => format!("{:o}", int_val.unsigned_abs()),
+                    'x' => format!("{:x}", int_val.unsigned_abs()),
+                    'X' => format!("{:X}", int_val.unsigned_abs()),
+                    _ => unreachable!(),
                 };
-                let s = format!("{:X}", n as i64);
-                apply_numeric_format(&s, &flags, width, zero_pad)
+                // Apply precision (minimum digits)
+                let abs_digits = if let Some(p) = precision {
+                    if p == 0 && int_val == 0 {
+                        String::new()
+                    } else if p > abs_digits.len() {
+                        format!("{:0>width$}", abs_digits, width = p)
+                    } else {
+                        abs_digits
+                    }
+                } else {
+                    abs_digits
+                };
+                // Build sign
+                let sign = if int_val < 0 {
+                    "-"
+                } else if flags.contains('+') {
+                    "+"
+                } else if flags.contains(' ') {
+                    " "
+                } else {
+                    ""
+                };
+                // Build prefix for # flag
+                let prefix = if flags.contains('#') && int_val != 0 {
+                    match conv {
+                        'o' => {
+                            if !abs_digits.starts_with('0') {
+                                "0"
+                            } else {
+                                ""
+                            }
+                        }
+                        'x' => "0x",
+                        'X' => "0X",
+                        _ => "",
+                    }
+                } else {
+                    ""
+                };
+                let content_len = sign.len() + prefix.len() + abs_digits.len();
+                if width == 0 || content_len >= width {
+                    format!("{}{}{}", sign, prefix, abs_digits)
+                } else {
+                    let padding = width - content_len;
+                    if flags.contains('-') {
+                        format!("{}{}{}{}", sign, prefix, abs_digits, " ".repeat(padding))
+                    } else if zero_pad && precision.is_none() {
+                        format!("{}{}{}{}", sign, prefix, "0".repeat(padding), abs_digits)
+                    } else {
+                        format!("{}{}{}{}", " ".repeat(padding), sign, prefix, abs_digits)
+                    }
+                }
             }
             'f' => {
                 let n = match val {
@@ -2228,40 +2389,34 @@ pub fn format_string(
                     }
                 };
                 let p = precision.unwrap_or(6);
-                let s = format!("{:.prec$}", n, prec = p);
+                let mut s = format!("{:.prec$}", n, prec = p);
+                if flags.contains('#') && !s.contains('.') {
+                    s.push('.');
+                }
                 apply_numeric_format(&s, &flags, width, zero_pad)
             }
-            'e' => {
+            'e' | 'E' => {
+                let upper = conv == 'E';
                 let n = match val {
                     Value::Number(n) => n,
                     _ => {
                         return Err(RuntimeError {
                             span: span.clone(),
-                            message: "std.format: %e requires a number".to_string(),
+                            message: format!("std.format: %{} requires a number", conv),
                             source_id: source_id.to_string(),
                         });
                     }
                 };
                 let p = precision.unwrap_or(6);
                 let s = format!("{:.prec$e}", n, prec = p);
-                // Rust uses 'e+2' style; Python/Jsonnet uses 'e+02'
-                let s = normalize_exp_notation(&s, false);
-                apply_numeric_format(&s, &flags, width, zero_pad)
-            }
-            'E' => {
-                let n = match val {
-                    Value::Number(n) => n,
-                    _ => {
-                        return Err(RuntimeError {
-                            span: span.clone(),
-                            message: "std.format: %E requires a number".to_string(),
-                            source_id: source_id.to_string(),
-                        });
+                let mut s = normalize_exp_notation(&s, upper);
+                // # flag: ensure decimal point is present
+                if flags.contains('#') && !s.contains('.') {
+                    let e_char = if upper { 'E' } else { 'e' };
+                    if let Some(pos) = s.find(e_char) {
+                        s.insert(pos, '.');
                     }
-                };
-                let p = precision.unwrap_or(6);
-                let s = format!("{:.prec$e}", n, prec = p);
-                let s = normalize_exp_notation(&s, true);
+                }
                 apply_numeric_format(&s, &flags, width, zero_pad)
             }
             'g' | 'G' => {
@@ -2275,8 +2430,13 @@ pub fn format_string(
                         });
                     }
                 };
+                let upper = conv == 'G';
                 let p = precision.unwrap_or(6).max(1);
-                let s = format_g(n, p, conv == 'G');
+                let s = if flags.contains('#') {
+                    format_g_alt(n, p, upper)
+                } else {
+                    format_g(n, p, upper)
+                };
                 apply_numeric_format(&s, &flags, width, zero_pad)
             }
             'c' => {
@@ -2374,6 +2534,52 @@ fn format_g(n: f64, prec: usize, upper: bool) -> String {
         } else {
             s
         }
+    }
+}
+
+/// Format a float using %#g/%#G semantics (keep trailing zeros, always show decimal point)
+fn format_g_alt(n: f64, prec: usize, upper: bool) -> String {
+    if n == 0.0 {
+        let p = if prec > 1 { prec - 1 } else { 0 };
+        let mut s = format!("{:.prec$}", 0.0, prec = p);
+        if !s.contains('.') {
+            s.push('.');
+        }
+        return s;
+    }
+    // Format using %e first to determine the exponent after rounding
+    let p = if prec > 0 { prec - 1 } else { 0 };
+    let e_str = format!("{:.prec$e}", n, prec = p);
+    let exp: i32 = e_str
+        .split('e')
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    if exp < -4 || exp >= prec as i32 {
+        let s = normalize_exp_notation(&e_str, upper);
+        // Ensure decimal point
+        let e_char = if upper { 'E' } else { 'e' };
+        if let Some(epos) = s.find(e_char) {
+            if !s[..epos].contains('.') {
+                let mut result = s[..epos].to_string();
+                result.push('.');
+                result.push_str(&s[epos..]);
+                return result;
+            }
+        }
+        s
+    } else {
+        let decimal_places = if prec as i32 > exp + 1 {
+            (prec as i32 - exp - 1) as usize
+        } else {
+            0
+        };
+        let mut s = format!("{:.prec$}", n, prec = decimal_places);
+        if !s.contains('.') {
+            s.push('.');
+        }
+        s
     }
 }
 
@@ -3093,10 +3299,12 @@ fn std_trim(
         }
     };
     let s = memory_manager.load_string(s_idx).to_string();
-    let whitespace: HashSet<char> = [' ', '\t', '\n', '\r', '\x0B', '\x0C']
-        .iter()
-        .copied()
-        .collect();
+    let whitespace: HashSet<char> = [
+        ' ', '\t', '\n', '\r', '\x0B', '\x0C', '\u{0085}', '\u{00A0}',
+    ]
+    .iter()
+    .copied()
+    .collect();
     let chars: Vec<char> = s.chars().collect();
     let start = chars
         .iter()

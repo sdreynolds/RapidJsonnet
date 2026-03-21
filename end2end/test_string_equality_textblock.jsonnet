@@ -1,4 +1,4 @@
-assert ("hello world" == 
+assert ("hello world\n" ==
 |||
     hello world
 |||

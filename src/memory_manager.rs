@@ -182,12 +182,16 @@ impl ManagedArray {
 pub struct ManagedFunction {
     /// Optional function name for debugging and error reporting
     pub name: Option<StringIndex>,
-    /// Number of parameters this function accepts
+    /// Number of parameters this function accepts (total, including those with defaults)
     pub arity: u8,
+    /// Number of required parameters (without defaults)
+    pub required_params: u8,
     /// Number of upvalues this function closes over
     pub upvalue_count: u8,
     /// The bytecode chunk containing the function's instructions
     pub chunk: OwnedChunk,
+    /// Parameter names for named argument binding (in order)
+    pub param_names: Vec<StringIndex>,
     /// GC marking flag
     marked: Cell<bool>,
 }
@@ -198,8 +202,10 @@ impl ManagedFunction {
         Self {
             name,
             arity,
+            required_params: arity,
             upvalue_count,
             chunk,
+            param_names: Vec::new(),
             marked: Cell::new(false),
         }
     }
@@ -275,6 +281,8 @@ pub struct ManagedClosure {
     pub function: FunctionIndex,
     /// Captured upvalues for this closure
     pub upvalues: Vec<UpvalueIndex>,
+    /// Whether this closure is a lazy thunk (local variable RHS)
+    pub is_thunk: bool,
     /// GC marking flag
     marked: Cell<bool>,
 }
@@ -285,6 +293,7 @@ impl ManagedClosure {
         Self {
             function,
             upvalues,
+            is_thunk: false,
             marked: Cell::new(false),
         }
     }
@@ -521,6 +530,21 @@ impl MemoryManager {
         }
     }
 
+    pub fn allocate_thunk(
+        &mut self,
+        function: FunctionIndex,
+        upvalues: Vec<UpvalueIndex>,
+    ) -> AllocationResult<ClosureIndex> {
+        let mut closure = ManagedClosure::new(function, upvalues);
+        closure.is_thunk = true;
+        self.allocated_bytes += closure.size();
+        let index = self.closures.insert(closure);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
     pub fn allocate_upvalue(&mut self, stack_location: usize) -> AllocationResult<UpvalueIndex> {
         let upvalue = ManagedUpvalue::new_open(stack_location);
         self.allocated_bytes += upvalue.size();
@@ -734,6 +758,11 @@ impl MemoryManager {
                                 values.push_back(Value::String(name_index));
                             }
 
+                            // Mark parameter name strings
+                            for &param_name in &managed_function.param_names {
+                                values.push_back(Value::String(param_name));
+                            }
+
                             // Mark all constants in the function's chunk
                             for constant in &managed_function.chunk.constants {
                                 values.push_back(*constant);
@@ -911,6 +940,20 @@ impl MemoryManager {
             }
         }
 
+        // Delete imports BEFORE strings, since import cleanup needs to
+        // load the path string to remove from import_lookup.
+        for import_idx in imports_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing Import {:?}", import_idx)
+            }
+            if let Some(import) = self.imports.get(import_idx) {
+                let path = self.load_string(import.path).to_string();
+                self.import_lookup.remove(&path);
+            }
+            self.imports.remove(import_idx);
+        }
+
         for string_idx in strings_to_delete {
             #[cfg(feature = "gc_debug")]
             {
@@ -959,18 +1002,6 @@ impl MemoryManager {
             self.upvalues.remove(upvalue_idx);
         }
 
-        for import_idx in imports_to_delete {
-            #[cfg(feature = "gc_debug")]
-            {
-                eprintln!("[MemoryManager] Removing Import {:?}", import_idx)
-            }
-            if let Some(import) = self.imports.get(import_idx) {
-                let path = self.load_string(import.path).to_string();
-                self.import_lookup.remove(&path);
-            }
-            self.imports.remove(import_idx);
-        }
-
         for binary_idx in binaries_to_delete {
             #[cfg(feature = "gc_debug")]
             {
@@ -1006,9 +1037,21 @@ impl MemoryManager {
             .expect(format!("Array not found in SlotMap: {:?}", key).as_str())
     }
 
+    pub fn load_array_mut(&mut self, key: ArrayIndex) -> &mut ManagedArray {
+        self.arrays
+            .get_mut(key)
+            .expect(format!("Array not found in SlotMap: {:?}", key).as_str())
+    }
+
     pub fn load_function(&self, key: FunctionIndex) -> &ManagedFunction {
         self.functions
             .get(key)
+            .expect(format!("Function not found in SlotMap: {:?}", key).as_str())
+    }
+
+    pub fn load_function_mut(&mut self, key: FunctionIndex) -> &mut ManagedFunction {
+        self.functions
+            .get_mut(key)
             .expect(format!("Function not found in SlotMap: {:?}", key).as_str())
     }
 

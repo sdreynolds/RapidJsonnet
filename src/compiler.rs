@@ -29,6 +29,15 @@ struct ObjectLocalBinding {
     span: Range<usize>,
 }
 
+/// A parsed function parameter, with optional default expression checkpoint
+#[derive(Debug, Clone)]
+struct FunctionParam {
+    name: String,
+    has_default: bool,
+    /// Parser checkpoint pointing to the default expression (if has_default)
+    default_checkpoint: Option<ParserCheckpoint>,
+}
+
 // Expression type tracking for compile-time optimizations
 #[derive(Debug, Clone, PartialEq)]
 enum ExpressionType {
@@ -68,6 +77,8 @@ struct EnclosingScope<'a> {
     enclosing: Option<Box<EnclosingScope<'a>>>,
     chunk: Chunk<'a>,
     constant_pool: HashMap<Value, u16>,
+    anon_stack_depth: usize,
+    type_stack: Vec<ExpressionType>,
 }
 
 impl<'a> EnclosingScope<'a> {
@@ -91,13 +102,14 @@ impl<'a> EnclosingScope<'a> {
     /// Returns the upvalue descriptor if found, None otherwise
     fn resolve_upvalue(&mut self, name: &str) -> Option<CompilerUpvalue> {
         // Try to find in this scope's locals
-        for (i, local) in self.locals.iter_mut().enumerate().rev() {
+        for local in self.locals.iter_mut().rev() {
             if local.name == name {
                 // Mark the local as captured
                 local.is_captured = true;
-                // Capture this local from the enclosing scope
+                // Capture this local using its stack_slot (not array index)
+                // because anon_stack_depth may shift slots from array positions
                 return Some(CompilerUpvalue {
-                    index: i as u8,
+                    index: local.stack_slot as u8,
                     is_local: true,
                 });
             }
@@ -156,6 +168,7 @@ pub struct Compiler<'a> {
     tail_call_pending: bool, // Whether the next call should be emitted as TailCall
     in_tail_position: bool, // Whether we are currently in a tail position
     tail_calls_emitted: usize, // Number of tail calls emitted so far
+    anon_stack_depth: usize, // Count of anonymous temporaries on VM stack not tracked as locals
 }
 
 impl<'a> Compiler<'a> {
@@ -177,6 +190,7 @@ impl<'a> Compiler<'a> {
             tail_call_pending: false,
             in_tail_position: false,
             tail_calls_emitted: 0,
+            anon_stack_depth: 0,
         }
     }
 
@@ -284,6 +298,126 @@ impl<'a> Compiler<'a> {
         let res = self.parse_expr(min_bp, memory_manager);
         self.in_tail_position = prev;
         res
+    }
+
+    /// Compile slice sugar: arr[start:end:step] → std.slice(arr, start, end, step)
+    /// When called, the array/object value is already on the stack.
+    /// If `has_start` is Some(()), the start expression is also already compiled (on type stack).
+    /// If `has_start` is None, start is omitted (will emit null).
+    /// The parser is positioned at the first ':'.
+    /// Compile slice sugar: arr[start:end:step] → std.slice(arr, start, end, step)
+    /// Stack has [..., arr]. Parser is positioned at the start expression or first ':'.
+    /// If `has_start` is true, the parser is at the start expression (before ':').
+    /// If false, it's at the first ':' (empty start → null).
+    fn compile_slice_sugar(
+        &mut self,
+        has_start: bool,
+        bracket_span: &std::ops::Range<usize>,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        let span = bracket_span.clone();
+
+        // Stack: [..., arr]
+        // Emit slice_func and swap under arr
+        let const_idx = self
+            .compiling_chunk
+            .add_constant(chunk::Value::NativeFunction(chunk::NativeFuncId::Slice));
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::LoadConst, const_idx as u16, span.clone());
+        self.emit_opcode(Opcode::Swap, span.clone());
+        // Stack: [..., slice_func, arr]
+        self.push_type(ExpressionType::Unknown); // func type
+
+        // Parse/emit start
+        if has_start {
+            self.anon_stack_depth += 2; // func + arr
+            self.parse_expr_notail(0, memory_manager)?;
+            self.anon_stack_depth -= 2;
+        } else {
+            self.emit_opcode(Opcode::LoadNull, span.clone());
+            self.push_type(ExpressionType::Unknown);
+        }
+
+        // Consume first ':' (or '::' which also consumes the second colon)
+        let first_colon_is_double = matches!(
+            self.parser.current_token().map(|t| &t.token),
+            Some(Token::Operator(op)) if op == "::"
+        );
+        if first_colon_is_double {
+            self.parser.advance()?; // consume '::'
+        } else {
+            self.parser
+                .consume(Token::Operator(":".to_string()), "Expected ':' in slice")?;
+        }
+
+        // If first colon was '::', end is omitted and second colon already consumed
+        let second_colon_consumed = first_colon_is_double;
+
+        // Parse end (or null if next is ':', '::', or ']', or if we had '::')
+        self.anon_stack_depth += 3; // func + arr + start
+        let end_omitted = second_colon_consumed
+            || matches!(
+                self.parser.current_token().map(|t| &t.token),
+                Some(Token::Operator(op)) if op == ":" || op == "::"
+            )
+            || matches!(
+                self.parser.current_token().map(|t| &t.token),
+                Some(Token::RightBracket)
+            );
+        if end_omitted {
+            self.emit_opcode(Opcode::LoadNull, span.clone());
+            self.push_type(ExpressionType::Unknown);
+        } else {
+            self.parse_expr_notail(0, memory_manager)?;
+        }
+        self.anon_stack_depth -= 3;
+
+        // Check for optional step (second ':')
+        self.anon_stack_depth += 4; // func + arr + start + end
+        let has_step_colon = second_colon_consumed
+            || matches!(
+                self.parser.current_token().map(|t| &t.token),
+                Some(Token::Operator(op)) if op == ":" || op == "::"
+            );
+        if has_step_colon {
+            if !second_colon_consumed {
+                self.parser.advance()?; // consume second ':'
+            }
+            let step_omitted = matches!(
+                self.parser.current_token().map(|t| &t.token),
+                Some(Token::RightBracket)
+            );
+            if step_omitted {
+                self.emit_opcode(Opcode::LoadNull, span.clone());
+                self.push_type(ExpressionType::Unknown);
+            } else {
+                self.parse_expr_notail(0, memory_manager)?;
+            }
+        } else {
+            self.emit_opcode(Opcode::LoadNull, span.clone());
+            self.push_type(ExpressionType::Unknown);
+        }
+        self.anon_stack_depth -= 4;
+
+        // Consume ']'
+        self.parser
+            .consume(Token::RightBracket, "Expected ']' after slice")?;
+
+        // Stack: [..., slice_func, arr, start, end, step]
+        self.compiling_chunk
+            .write_opcode(Opcode::Call, span.clone());
+        self.compiling_chunk.write(4u8, span.clone());
+        self.compiling_chunk.write(0u8, span);
+
+        // Type tracking: pop step, end, start, arr, func; push result
+        self.pop_type(); // step
+        self.pop_type(); // end
+        self.pop_type(); // start
+        self.pop_type(); // arr
+        self.pop_type(); // func
+        self.push_type(ExpressionType::Unknown);
+
+        Ok(())
     }
 
     fn parse_prefix(&mut self, memory_manager: &mut MemoryManager) -> Result<(), CompilerError> {
@@ -507,26 +641,35 @@ impl<'a> Compiler<'a> {
             }
             Token::Self_ => {
                 self.parser.advance()?;
-                self.emit_opcode(Opcode::LoadSelf, token.span);
+                // Try to resolve <self> as a local/upvalue first (works inside methods
+                // nested in field thunks). Fall back to LoadSelf for direct thunk context.
+                if let Some(slot) = self.resolve_local("<self>") {
+                    self.compiling_chunk
+                        .write_opcode_u16(Opcode::LoadVar, slot as u16, token.span);
+                } else if let Some(upvalue_slot) = self.resolve_upvalue("<self>") {
+                    self.compiling_chunk.write_opcode_u16(
+                        Opcode::GetUpvalue,
+                        upvalue_slot as u16,
+                        token.span,
+                    );
+                } else {
+                    self.emit_opcode(Opcode::LoadSelf, token.span);
+                }
                 self.push_type(ExpressionType::Object);
             }
             Token::Super => {
                 self.parser.advance()?;
-                // Expect '.' or '['
-                let next = self.parser.current_token().cloned().ok_or_else(|| {
-                    self.make_error(
-                        token.span.clone(),
-                        "Expected '.' or '[' after 'super'".to_string(),
-                    )
-                })?;
+                // Check what follows 'super'
+                let next = self.parser.current_token().cloned();
 
-                match next.token {
-                    Token::Dot => {
+                let mut bare_super = false;
+                match next.as_ref().map(|t| &t.token) {
+                    Some(Token::Dot) => {
                         self.parser.advance()?; // consume '.'
                         let field_token =
                             self.parser.current_token().cloned().ok_or_else(|| {
                                 self.make_error(
-                                    next.span.clone(),
+                                    next.as_ref().unwrap().span.clone(),
                                     "Expected field name after 'super.'".to_string(),
                                 )
                             })?;
@@ -549,22 +692,25 @@ impl<'a> Compiler<'a> {
                             ));
                         }
                     }
-                    Token::LeftBracket => {
+                    Some(Token::LeftBracket) => {
                         self.parser.advance()?; // consume '['
                         self.parse_expr_notail(0, memory_manager)?; // dynamic key
                         self.parser
                             .consume(Token::RightBracket, "Expected ']' after 'super[expr]'")?;
                     }
                     _ => {
-                        return Err(self.make_error(
-                            next.span,
-                            "Expected '.' or '[' after 'super'".to_string(),
-                        ));
+                        // Bare 'super' for use with 'in' operator (e.g., "field" in super)
+                        bare_super = true;
                     }
                 }
 
-                self.emit_opcode(Opcode::SuperIndex, token.span.clone());
-                self.push_type(ExpressionType::Unknown);
+                if bare_super {
+                    self.emit_opcode(Opcode::LoadSuper, token.span.clone());
+                    self.push_type(ExpressionType::Object);
+                } else {
+                    self.emit_opcode(Opcode::SuperIndex, token.span.clone());
+                    self.push_type(ExpressionType::Unknown);
+                }
             }
             Token::Operator(op) if op == "$" => {
                 self.parser.advance()?;
@@ -608,6 +754,9 @@ impl<'a> Compiler<'a> {
                     self.push_type(ExpressionType::Unknown);
                 } else if name_clone == "std" {
                     // Special case for std namespace
+                    // Always emit LoadStd so `std` has a value on the stack.
+                    // If followed by `.func`, the dot handler will pop it.
+                    self.emit_opcode(Opcode::LoadStd, span);
                     self.push_type(ExpressionType::StdNamespace);
                 } else {
                     // Variable not found
@@ -648,7 +797,10 @@ impl<'a> Compiler<'a> {
         self.parser.advance()?; // consume operator
 
         if !is_short_circuit_op {
+            // Left operand is an anonymous temp on the stack while we parse right operand
+            self.anon_stack_depth += 1;
             self.parse_expr_notail(left_bp, memory_manager)?;
+            self.anon_stack_depth -= 1;
         }
 
         match &token.token {
@@ -773,7 +925,6 @@ impl<'a> Compiler<'a> {
                 // If left is truthy, evaluate and return right
 
                 // At this point, left operand is on stack: [left_value]
-                // We need to consume the && token and conditionally parse right
 
                 // Dup left for testing: [left_value, left_value]
                 self.emit_opcode(Opcode::Dup, token.span.clone());
@@ -784,6 +935,7 @@ impl<'a> Compiler<'a> {
                 // Left is truthy: pop left and evaluate right: []
                 self.emit_opcode(Opcode::Pop, token.span.clone());
                 self.parse_expr_notail(left_bp, memory_manager)?; // Parse right operand
+                self.pop_type(); // right operand type (consumed by control flow merge)
                 let jump_end = self.emit_jump(Opcode::Jump, token.span.clone());
 
                 // Left is falsy: pop left and return false: []
@@ -793,7 +945,7 @@ impl<'a> Compiler<'a> {
 
                 self.patch_jump(jump_end);
 
-                // Type tracking
+                // Type tracking: replace left operand type with result type
                 self.pop_type(); // left operand
                 self.push_type(ExpressionType::Unknown); // Could be Boolean or right's type
             }
@@ -803,7 +955,6 @@ impl<'a> Compiler<'a> {
                 // If left is falsy, evaluate and return right
 
                 // At this point, left operand is on stack: [left_value]
-                // We need to consume the || token and conditionally parse right
 
                 // Dup left for testing: [left_value, left_value]
                 self.emit_opcode(Opcode::Dup, token.span.clone());
@@ -814,6 +965,7 @@ impl<'a> Compiler<'a> {
                 // Left is falsy: pop left and evaluate right: []
                 self.emit_opcode(Opcode::Pop, token.span.clone());
                 self.parse_expr_notail(left_bp, memory_manager)?; // Parse right operand
+                self.pop_type(); // right operand type (consumed by control flow merge)
                 let jump_end = self.emit_jump(Opcode::Jump, token.span.clone());
 
                 // Left is truthy: pop left and return true: []
@@ -823,9 +975,16 @@ impl<'a> Compiler<'a> {
 
                 self.patch_jump(jump_end);
 
-                // Type tracking
+                // Type tracking: replace left operand type with result type
                 self.pop_type(); // left operand
                 self.push_type(ExpressionType::Unknown); // Could be Boolean or right's type
+            }
+            // Membership test: key in object
+            Token::In => {
+                self.emit_opcode(Opcode::InOp, token.span);
+                self.pop_type(); // right operand (object)
+                self.pop_type(); // left operand (key)
+                self.push_type(ExpressionType::Boolean);
             }
             _ => return Err(self.invalid_expression_error(&token)),
         }
@@ -900,6 +1059,19 @@ impl<'a> Compiler<'a> {
         arity: u8,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
+        self.emit_closure_with_params(chunk, upvalues, arity, arity, Vec::new(), memory_manager)
+    }
+
+    /// Emit a Closure instruction with function metadata including parameter names and defaults
+    fn emit_closure_with_params(
+        &mut self,
+        chunk: chunk::Chunk,
+        upvalues: Vec<CompilerUpvalue>,
+        arity: u8,
+        required_params: u8,
+        param_names: Vec<StringIndex>,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
         let span = self.current_span();
 
         // Convert chunk to owned chunk for storage
@@ -908,6 +1080,14 @@ impl<'a> Compiler<'a> {
         // Allocate function in memory manager
         let func_result =
             memory_manager.allocate_function(None, arity, upvalues.len() as u8, owned_chunk);
+
+        // Set parameter metadata BEFORE GC so param_names are reachable
+        {
+            let func = memory_manager.load_function_mut(func_result.index);
+            func.required_params = required_params;
+            func.param_names = param_names;
+        }
+
         if func_result.should_garbage_collect {
             self.run_garbage_collect(memory_manager, &[Value::Function(func_result.index)]);
         }
@@ -935,6 +1115,53 @@ impl<'a> Compiler<'a> {
             self.compiling_chunk.write(index_bytes[1], span.clone());
         }
 
+        Ok(())
+    }
+
+    fn emit_thunk(
+        &mut self,
+        chunk: chunk::Chunk,
+        upvalues: Vec<CompilerUpvalue>,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        let span = self.current_span();
+        let owned_chunk = chunk.into_owned();
+        let func_result =
+            memory_manager.allocate_function(None, 0, upvalues.len() as u8, owned_chunk);
+        if func_result.should_garbage_collect {
+            self.run_garbage_collect(memory_manager, &[Value::Function(func_result.index)]);
+        }
+        let func_index = self.add_constant_pooled(Value::Function(func_result.index))?;
+        self.compiling_chunk
+            .write_opcode_u16(Opcode::MakeThunk, func_index, span.clone());
+        self.compiling_chunk
+            .write(upvalues.len() as u8, span.clone());
+        for upvalue in upvalues {
+            let is_local_byte = if upvalue.is_local { 1u8 } else { 0u8 };
+            self.compiling_chunk.write(is_local_byte, span.clone());
+            let index_bytes = (upvalue.index as u16).to_le_bytes();
+            self.compiling_chunk.write(index_bytes[0], span.clone());
+            self.compiling_chunk.write(index_bytes[1], span.clone());
+        }
+        Ok(())
+    }
+
+    /// Parse an expression and wrap it in a thunk for lazy evaluation.
+    /// Used for array elements and other lazy contexts.
+    fn parse_expr_as_thunk(
+        &mut self,
+        min_bp: u8,
+        memory_manager: &mut MemoryManager,
+    ) -> Result<(), CompilerError> {
+        let saved_state = self.begin_function();
+        self.begin_scope();
+        self.declare_local("<closure>".to_string())?;
+        self.parse_expr_notail(min_bp, memory_manager)?;
+        let return_span = self.current_span();
+        self.emit_opcode(Opcode::Return, return_span);
+        self.end_scope();
+        let (chunk, upvalues) = self.end_function(saved_state);
+        self.emit_thunk(chunk, upvalues, memory_manager)?;
         Ok(())
     }
 
@@ -1022,6 +1249,9 @@ impl<'a> Compiler<'a> {
                 Some((PRECEDENCE_COMPARISON, PRECEDENCE_COMPARISON + 1))
             }
 
+            // Membership test: expr in expr (same precedence as comparison)
+            Token::In => Some((PRECEDENCE_COMPARISON, PRECEDENCE_COMPARISON + 1)),
+
             // Equality (left associative)
             Token::Operator(op) if matches!(op.as_str(), "==" | "!=") => {
                 Some((PRECEDENCE_EQUALITY, PRECEDENCE_EQUALITY + 1))
@@ -1060,6 +1290,7 @@ impl<'a> Compiler<'a> {
             Token::Dot => Some(PRECEDENCE_POSTFIX),
             Token::LeftBracket => Some(PRECEDENCE_POSTFIX),
             Token::LeftParen => Some(PRECEDENCE_POSTFIX),
+            Token::LeftBrace => Some(PRECEDENCE_POSTFIX), // object apply: expr { ... }
             _ => None,
         }
     }
@@ -1092,6 +1323,8 @@ impl<'a> Compiler<'a> {
                         // Check if we are accessing a native function on 'std'
                         if let Some(ExpressionType::StdNamespace) = self.type_stack.last() {
                             self.type_stack.pop();
+                            // Pop the std object value that LoadStd pushed
+                            self.emit_opcode(Opcode::Pop, property_token.span.clone());
 
                             // Special handling for std.thisFile
                             if name == "thisFile" {
@@ -1143,7 +1376,10 @@ impl<'a> Compiler<'a> {
                         // Emit ObjectIndex opcode to access property
                         self.emit_opcode(Opcode::ObjectIndex, property_token.span);
 
-                        // Property access can return any type
+                        // Type tracking: ObjectIndex consumes object + field name, pushes result
+                        // The string constant doesn't get a type_stack entry (it's an internal
+                        // operand to ObjectIndex, not an expression result)
+                        self.pop_type(); // object type
                         self.push_type(ExpressionType::Unknown);
                     }
                     _ => {
@@ -1157,20 +1393,71 @@ impl<'a> Compiler<'a> {
             Token::LeftBracket => {
                 self.parser.advance()?; // consume '['
 
-                // Parse the expression inside brackets
-                self.parse_expr_notail(0, memory_manager)?;
+                // Check if this is slice syntax: [start:end] or [start:end:step]
+                // or [:end], [start:], [::], [::step], etc.
+                let is_slice_start = matches!(
+                    self.parser.current_token().map(|t| &t.token),
+                    Some(Token::Operator(op)) if op == ":" || op == "::"
+                );
 
-                // Expect closing bracket
-                self.parser.consume(
-                    Token::RightBracket,
-                    "Expected ']' after property expression",
-                )?;
+                if is_slice_start {
+                    // Empty start → null
+                    // Compile as std.slice(arr, start, end, step)
+                    self.compile_slice_sugar(false, &token.span, memory_manager)?;
+                } else {
+                    // Save checkpoint in case this is a slice with a start expression
+                    let checkpoint = self.parser.save_checkpoint();
+                    let type_depth = self.type_stack.len();
+                    let code_pos = self.compiling_chunk.code.len();
+                    let const_count = self.compiling_chunk.constants.len();
+                    let span_count = self.compiling_chunk.spans.len();
+                    let last_span_repeat =
+                        self.compiling_chunk.spans.last().map(|s| s.repeated_values);
+                    let constant_pool_snapshot = self.constant_pool.clone();
 
-                // Emit ArrayIndex opcode - handles both arrays and objects at runtime
-                self.emit_opcode(Opcode::ArrayIndex, token.span);
+                    // The array/object value is an anonymous temp while we parse the index
+                    self.anon_stack_depth += 1;
+                    // Parse the first expression inside brackets
+                    self.parse_expr_notail(0, memory_manager)?;
+                    self.anon_stack_depth -= 1;
 
-                // Property access can return any type
-                self.push_type(ExpressionType::Unknown);
+                    // Check if next token is ':' or '::' → slice syntax
+                    let is_slice = matches!(
+                        self.parser.current_token().map(|t| &t.token),
+                        Some(Token::Operator(op)) if op == ":" || op == "::"
+                    );
+
+                    if is_slice {
+                        // Backtrack: undo the start expression compilation
+                        self.parser.restore_checkpoint(checkpoint);
+                        self.type_stack.truncate(type_depth);
+                        self.compiling_chunk.code.truncate(code_pos);
+                        self.compiling_chunk.constants.truncate(const_count);
+                        self.compiling_chunk.spans.truncate(span_count);
+                        self.constant_pool = constant_pool_snapshot;
+                        if let Some(repeat) = last_span_repeat {
+                            if let Some(last) = self.compiling_chunk.spans.last_mut() {
+                                last.repeated_values = repeat;
+                            }
+                        }
+                        // Recompile as slice with start
+                        self.compile_slice_sugar(true, &token.span, memory_manager)?;
+                    } else {
+                        // Normal index: expect ']'
+                        self.parser.consume(
+                            Token::RightBracket,
+                            "Expected ']' after property expression",
+                        )?;
+
+                        // Emit ArrayIndex opcode - handles both arrays and objects at runtime
+                        self.emit_opcode(Opcode::ArrayIndex, token.span);
+
+                        // Type tracking: pop index type and object/array type, push result type
+                        self.pop_type(); // index
+                        self.pop_type(); // object/array
+                        self.push_type(ExpressionType::Unknown);
+                    }
+                }
             }
             Token::LeftParen => {
                 self.parser.advance()?; // consume '('
@@ -1183,21 +1470,78 @@ impl<'a> Compiler<'a> {
                         None
                     };
 
+                // Callee is an anonymous temp on the stack while we parse arguments
+                self.anon_stack_depth += 1;
+
                 // Parse argument list
-                let mut arg_count = 0u8;
+                let mut positional_count = 0u8;
+                let mut named_count = 0u8;
+                let mut in_named = false;
 
                 // Check for empty argument list
                 if let Some(current) = self.parser.current_token() {
                     if current.token != Token::RightParen {
                         loop {
-                            // Parse argument expression
-                            self.parse_expr_notail(0, memory_manager)?;
-                            arg_count += 1;
+                            // Check for named argument: identifier '='
+                            let is_named_arg = if let Some(TokenInfo {
+                                token: Token::Identifier(_),
+                                ..
+                            }) = self.parser.current_token()
+                            {
+                                matches!(
+                                    self.parser.peek_ahead(1)?.map(|t| &t.token),
+                                    Some(Token::Operator(op)) if op == "="
+                                )
+                            } else {
+                                false
+                            };
+
+                            if is_named_arg {
+                                in_named = true;
+                                // Push name string constant
+                                let name = if let Some(TokenInfo {
+                                    token: Token::Identifier(name),
+                                    ..
+                                }) = self.parser.current_token()
+                                {
+                                    name.clone()
+                                } else {
+                                    unreachable!()
+                                };
+                                self.parser.advance()?; // consume identifier
+                                self.parser.advance()?; // consume '='
+                                let name_idx = memory_manager.allocate_string(&name).index;
+                                self.emit_string_constant(name_idx)?;
+                                self.anon_stack_depth += 1; // name is temp
+                                // Parse value expression
+                                self.parse_expr_notail(0, memory_manager)?;
+                                self.anon_stack_depth += 1; // value is temp
+                                named_count += 1;
+                            } else {
+                                if in_named {
+                                    return Err(self.make_error(
+                                        self.current_span(),
+                                        "Positional argument cannot follow named argument"
+                                            .to_string(),
+                                    ));
+                                }
+                                // Parse positional argument expression
+                                self.parse_expr_notail(0, memory_manager)?;
+                                positional_count += 1;
+                                self.anon_stack_depth += 1; // arg is temp
+                            }
 
                             // Check for more arguments
                             if let Some(current) = self.parser.current_token() {
                                 if current.token == Token::Comma {
                                     self.parser.advance()?; // consume ','
+                                    // Allow trailing comma: if next token is ')', stop
+                                    if matches!(
+                                        self.parser.current_token().map(|t| &t.token),
+                                        Some(Token::RightParen)
+                                    ) {
+                                        break;
+                                    }
                                 } else {
                                     break;
                                 }
@@ -1207,6 +1551,10 @@ impl<'a> Compiler<'a> {
                         }
                     }
                 }
+
+                let arg_count = positional_count + named_count;
+                // Call/StdCall consumes callee + all args (+ name strings for named args)
+                self.anon_stack_depth -= 1 + positional_count as usize + (named_count as usize * 2);
 
                 // Expect closing paren
                 self.parser
@@ -1225,18 +1573,39 @@ impl<'a> Compiler<'a> {
                     }
                 }
 
+                // Pop argument types and callee type from type_stack
+                // (Call/StdCall consumes callee + args + named name strings, produces result)
+                for _ in 0..(positional_count as usize + named_count as usize * 2) {
+                    self.pop_type();
+                }
+                self.pop_type(); // callee
+
                 if let Some(id) = native_id {
                     // tailstrict has no effect on native functions
                     self.tail_call_pending = false;
-                    self.type_stack.pop();
-                    // Emit StdCall opcode with native function ID and arg count
-                    let span = token.span;
-                    self.compiling_chunk
-                        .write_opcode_u16(Opcode::StdCall, id as u16, span.clone());
-                    self.compiling_chunk.write(arg_count, span);
+                    if named_count > 0 {
+                        // Named args for native functions: emit Call opcode instead
+                        // of StdCall so the VM can resolve named args at runtime.
+                        let span = token.span;
+                        self.compiling_chunk
+                            .write_opcode(Opcode::Call, span.clone());
+                        self.compiling_chunk.write(positional_count, span.clone());
+                        self.compiling_chunk.write(named_count, span);
+                    } else {
+                        // Emit StdCall opcode with native function ID and arg count
+                        let span = token.span;
+                        self.compiling_chunk.write_opcode_u16(
+                            Opcode::StdCall,
+                            id as u16,
+                            span.clone(),
+                        );
+                        self.compiling_chunk
+                            .write(positional_count + named_count, span);
+                    }
                 } else {
                     // Emit TailCall if tailstrict in tail position, otherwise regular Call
-                    let is_tail_call = self.tail_call_pending || (has_tailstrict && self.in_tail_position);
+                    let is_tail_call =
+                        self.tail_call_pending || (has_tailstrict && self.in_tail_position);
                     self.tail_call_pending = false;
                     let span = token.span;
                     let opcode = if is_tail_call {
@@ -1245,12 +1614,31 @@ impl<'a> Compiler<'a> {
                         Opcode::Call
                     };
                     self.compiling_chunk.write_opcode(opcode, span.clone());
-                    self.compiling_chunk.write(arg_count, span.clone()); // positional_count
-                    self.compiling_chunk.write(0, span); // named_count (not yet supported)
+                    self.compiling_chunk.write(positional_count, span.clone());
+                    self.compiling_chunk.write(named_count, span);
                 }
 
                 // Function call can return any type
                 self.push_type(ExpressionType::Unknown);
+            }
+            Token::LeftBrace => {
+                // Object apply: expr { field: value } is sugar for expr + { field: value }
+                let left_type = self.pop_type();
+                // Left value is an anonymous temp on the stack during object literal parsing
+                self.anon_stack_depth += 1;
+                self.parse_object_literal(&token, memory_manager)?;
+                self.anon_stack_depth -= 1;
+                // parse_object_literal doesn't push a type, we handle it here
+
+                // Emit Add to merge the left expression with the object literal
+                self.emit_opcode(Opcode::Add, token.span);
+
+                // Result type depends on left operand
+                if left_type == ExpressionType::Object {
+                    self.push_type(ExpressionType::Object);
+                } else {
+                    self.push_type(ExpressionType::Unknown);
+                }
             }
             _ => {
                 return Err(self.make_error(
@@ -1371,8 +1759,12 @@ impl<'a> Compiler<'a> {
             .write_opcode_u16(Opcode::CreateObject, 0, start_token.span.clone());
 
         // Parse fields and assertions
+        let mut field_key_name: Option<String> = None;
+        let mut key_token_span: std::ops::Range<usize> = 0..0;
         loop {
+            field_key_name = None;
             if let Some(key_token) = self.parser.current_token().cloned() {
+                key_token_span = key_token.span.clone();
                 if key_token.token == Token::RightBrace {
                     break;
                 }
@@ -1507,6 +1899,7 @@ impl<'a> Compiler<'a> {
                 // Normal field
                 match &key_token.token {
                     Token::String(key_value) => {
+                        field_key_name = Some(key_value.clone());
                         let allocation_result = memory_manager.allocate_string(key_value);
                         if allocation_result.should_garbage_collect {
                             self.run_garbage_collect(
@@ -1521,6 +1914,7 @@ impl<'a> Compiler<'a> {
                         self.parser.advance()?; // consume the key
                     }
                     Token::Identifier(key_name) => {
+                        field_key_name = Some(key_name.clone());
                         let allocation_result = memory_manager.allocate_string(key_name);
                         if allocation_result.should_garbage_collect {
                             self.run_garbage_collect(
@@ -1552,6 +1946,33 @@ impl<'a> Compiler<'a> {
             } else {
                 return Err(self.unexpected_eof_error(start_token.span.clone()));
             }
+
+            // Check for method shorthand: f(params): expr => f: function(params) expr
+            let method_params = if let Some(current) = self.parser.current_token() {
+                if current.token == Token::LeftParen {
+                    Some(self.parse_parameter_list()?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Check for '+' before ':' (field override syntax: field+: value)
+            let is_override = if let Some(current) = self.parser.current_token() {
+                if let Token::Operator(op) = &current.token {
+                    if op == "+" {
+                        self.parser.advance()?; // consume '+'
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
 
             // Expect field separator after key
             let visibility = if let Some(current) = self.parser.current_token() {
@@ -1596,9 +2017,44 @@ impl<'a> Compiler<'a> {
             self.inject_object_locals(&object_locals, memory_manager, 0)?;
 
             let prev_tail = self.in_tail_position;
-            self.in_tail_position = true;
-            self.parse_expr(0, memory_manager)?;
+            self.in_tail_position = !is_override; // can't tail-call if we need to Add after
+            if let Some(params) = method_params {
+                // Method shorthand: compile as function value
+                self.compile_function_body(params, memory_manager)?;
+            } else {
+                self.parse_expr(0, memory_manager)?;
+            }
             self.in_tail_position = prev_tail;
+
+            if is_override {
+                // Emit: if field in super then super.field + value else value
+                // Stack currently has: [value]
+
+                // Check if super has this field
+                if let Some(ref key_name) = field_key_name {
+                    let alloc = memory_manager.allocate_string(key_name);
+                    self.emit_string_constant(alloc.index)?;
+                } else {
+                    self.emit_opcode(Opcode::LoadFieldName, key_token_span.clone());
+                }
+                self.emit_opcode(Opcode::SuperHasField, key_token_span.clone());
+                let jump_no_super = self.emit_jump(Opcode::JumpIfFalse, key_token_span.clone());
+
+                // Super has the field: emit super.field + value
+                if let Some(ref key_name) = field_key_name {
+                    let alloc = memory_manager.allocate_string(key_name);
+                    self.emit_string_constant(alloc.index)?;
+                } else {
+                    self.emit_opcode(Opcode::LoadFieldName, key_token_span.clone());
+                }
+                self.emit_opcode(Opcode::SuperIndex, key_token_span.clone());
+                // Stack: [value, super.field] — need [super.field, value] for Add
+                self.emit_opcode(Opcode::Swap, key_token_span.clone());
+                self.emit_opcode(Opcode::Add, key_token_span.clone());
+
+                // No super: value is already on stack, skip over
+                self.patch_jump(jump_no_super);
+            }
 
             self.emit_opcode(Opcode::Return, 0..0);
             self.end_scope();
@@ -1610,6 +2066,8 @@ impl<'a> Compiler<'a> {
             self.emit_closure(field_chunk, field_upvalues, 2, memory_manager)?;
 
             // Emit ObjectInsert with visibility operand
+            // ObjectInsert consumes the key string from the stack
+            self.pop_type(); // key type (String or dynamic expression type)
             self.compiling_chunk.write_opcode_u8(
                 Opcode::ObjectInsert,
                 visibility as u8,
@@ -1726,9 +2184,10 @@ impl<'a> Compiler<'a> {
         // For regular arrays, we don't commit - let the buffer be consumed naturally
         // during parsing. The buffered tokens are still valid lookahead that we'll use.
 
-        // Regular array literal - parse first element
-        self.parse_expr_notail(0, memory_manager)?;
+        // Regular array literal - parse first element as thunk for lazy evaluation
+        self.parse_expr_as_thunk(0, memory_manager)?;
         element_count += 1;
+        self.anon_stack_depth += 1; // element is anonymous temp during subsequent parsing
 
         // Regular array literal - continue parsing elements
         loop {
@@ -1744,9 +2203,10 @@ impl<'a> Compiler<'a> {
                                 break;
                             }
                         }
-                        // Parse next element
-                        self.parse_expr_notail(0, memory_manager)?;
+                        // Parse next element as thunk for lazy evaluation
+                        self.parse_expr_as_thunk(0, memory_manager)?;
                         element_count += 1;
+                        self.anon_stack_depth += 1; // element is anonymous temp
                     }
                     Token::RightBracket => {
                         break; // End of array
@@ -1770,7 +2230,12 @@ impl<'a> Compiler<'a> {
         self.parser
             .consume(Token::RightBracket, "Expected ']' to close array literal")?;
 
-        // Emit CreateArray opcode with element count
+        // CreateArray consumes all N elements from the stack
+        self.anon_stack_depth -= element_count as usize;
+        // Pop element types from type_stack (CreateArray consumes N elements, produces 1 array)
+        for _ in 0..element_count {
+            self.pop_type();
+        }
         self.compiling_chunk.write_opcode_u16(
             Opcode::CreateArray,
             element_count,
@@ -1857,7 +2322,7 @@ impl<'a> Compiler<'a> {
                     self.parser.advance()?;
                 }
                 Token::Comma if depth == 0 => break,
-                Token::For | Token::If if depth == 0 => break,
+                Token::For if depth == 0 => break,
                 Token::Eof => {
                     return Err(self.unexpected_eof_error(self.current_span()));
                 }
@@ -1929,7 +2394,7 @@ impl<'a> Compiler<'a> {
                         return Err(self.make_error(
                             t.span.clone(),
                             "Expected identifier after 'local'".to_string(),
-                        ))
+                        ));
                     }
                 },
                 None => return Err(self.unexpected_eof_error(self.current_span())),
@@ -2058,14 +2523,46 @@ impl<'a> Compiler<'a> {
                         }
                     }
                     _ => {
-                        // This is the actual field
+                        // This is the actual field — skip to 'for' at depth 0
+                        // We can't use skip_to_member_end here because it stops at 'if'
+                        // which may be an if/then/else expression inside the field value.
                         field_start_checkpoint = self.parser.save_checkpoint();
-                        self.skip_to_member_end()?;
-                        if matches!(
-                            self.parser.current_token().map(|t| &t.token),
-                            Some(Token::Comma)
-                        ) {
-                            self.parser.advance()?;
+                        let mut field_depth = 0;
+                        loop {
+                            let ft = self
+                                .parser
+                                .current_token()
+                                .ok_or_else(|| self.unexpected_eof_error(span.clone()))?;
+                            match &ft.token {
+                                Token::LeftParen | Token::LeftBracket | Token::LeftBrace => {
+                                    field_depth += 1;
+                                    self.parser.advance()?;
+                                }
+                                Token::RightParen | Token::RightBracket => {
+                                    if field_depth > 0 {
+                                        field_depth -= 1;
+                                    }
+                                    self.parser.advance()?;
+                                }
+                                Token::RightBrace => {
+                                    if field_depth == 0 {
+                                        break;
+                                    }
+                                    field_depth -= 1;
+                                    self.parser.advance()?;
+                                }
+                                Token::For if field_depth == 0 => break,
+                                Token::Comma if field_depth == 0 => {
+                                    self.parser.advance()?;
+                                    break;
+                                }
+                                Token::Eof => {
+                                    return Err(self.unexpected_eof_error(span.clone()));
+                                }
+                                _ => {
+                                    self.parser.advance()?;
+                                }
+                            }
                         }
                     }
                 }
@@ -2152,7 +2649,7 @@ impl<'a> Compiler<'a> {
         self.compiling_chunk
             .write_opcode_u16(Opcode::CreateObject, 0, span.clone());
         self.declare_local("__comp_result".to_string())?;
-        let result_slot = self.locals.len() - 1;
+        let result_slot = self.locals.last().unwrap().stack_slot;
 
         self.emit_object_comprehension_clauses(
             &clauses,
@@ -2242,18 +2739,33 @@ impl<'a> Compiler<'a> {
             self.parser
                 .consume(Token::Operator(":".to_string()), "Expected ':' after key")?;
 
-            // Inject object-locals into scope for the value expression.
-            // stack_offset=2 because result_copy and key are on the VM stack
-            // but not tracked in self.locals.
-            if !object_locals.is_empty() {
-                self.begin_scope();
-                self.inject_object_locals(object_locals, memory_manager, 2)?;
-                self.parse_expr_notail(0, memory_manager)?;
-                self.end_scope();
-            } else {
-                self.parse_expr_notail(0, memory_manager)?;
+            // Compile the value as a thunk (closure) so self/super/$ are available
+            let (saved_scope_depth, saved_function_type) = self.begin_function();
+            self.begin_scope();
+            self.declare_local("<closure>".to_string())?; // Slot 0
+            self.declare_local("<self>".to_string())?; // Slot 1
+            self.declare_local("<super>".to_string())?; // Slot 2
+
+            if self.object_depth == 1 {
+                // local $ = self
+                self.emit_opcode(Opcode::LoadSelf, 0..0);
+                self.declare_local("$".to_string())?; // Slot 3
             }
 
+            self.inject_object_locals(object_locals, memory_manager, 0)?;
+
+            self.parse_expr_notail(0, memory_manager)?;
+            self.emit_opcode(Opcode::Return, 0..0);
+            self.end_scope();
+
+            let (field_chunk, field_upvalues) =
+                self.end_function((saved_scope_depth, saved_function_type));
+
+            // Emit Closure with arity 2 (self, super)
+            self.emit_closure(field_chunk, field_upvalues, 2, memory_manager)?;
+
+            // ObjectInsert consumes the key string from the stack
+            self.pop_type(); // key type
             self.compiling_chunk.write_opcode_u8(
                 Opcode::ObjectInsert,
                 FieldVisibility::Visible as u8,
@@ -2277,7 +2789,7 @@ impl<'a> Compiler<'a> {
                 self.begin_scope();
 
                 self.declare_local("__comp_source".to_string())?;
-                let source_slot = self.locals.len() - 1;
+                let source_slot = self.locals.last().unwrap().stack_slot;
 
                 self.compiling_chunk.write_opcode_u16(
                     Opcode::LoadVar,
@@ -2286,11 +2798,11 @@ impl<'a> Compiler<'a> {
                 );
                 self.emit_opcode(Opcode::ArrayLength, clause_span.clone());
                 self.declare_local("__comp_length".to_string())?;
-                let length_slot = self.locals.len() - 1;
+                let length_slot = self.locals.last().unwrap().stack_slot;
 
                 self.emit_constant(0.0)?;
                 self.declare_local("__comp_counter".to_string())?;
-                let counter_slot = self.locals.len() - 1;
+                let counter_slot = self.locals.last().unwrap().stack_slot;
 
                 let loop_start = self.compiling_chunk.count();
 
@@ -2489,7 +3001,7 @@ impl<'a> Compiler<'a> {
         self.compiling_chunk
             .write_opcode_u16(Opcode::CreateArray, 0, span.clone());
         self.declare_local("__comp_result".to_string())?;
-        let result_slot = self.locals.len() - 1;
+        let result_slot = self.locals.last().unwrap().stack_slot;
         // Stack: [result]
 
         // Now emit the nested loops/conditions recursively
@@ -2566,7 +3078,7 @@ impl<'a> Compiler<'a> {
                 self.begin_scope();
 
                 self.declare_local("__comp_source".to_string())?;
-                let source_slot = self.locals.len() - 1;
+                let source_slot = self.locals.last().unwrap().stack_slot;
 
                 // Dup source and get length, declare as hidden local
                 self.compiling_chunk.write_opcode_u16(
@@ -2576,12 +3088,12 @@ impl<'a> Compiler<'a> {
                 );
                 self.emit_opcode(Opcode::ArrayLength, clause_span.clone());
                 self.declare_local("__comp_length".to_string())?;
-                let length_slot = self.locals.len() - 1;
+                let length_slot = self.locals.last().unwrap().stack_slot;
 
                 // Push initial counter = 0, declare as hidden local
                 self.emit_constant(0.0)?;
                 self.declare_local("__comp_counter".to_string())?;
-                let counter_slot = self.locals.len() - 1;
+                let counter_slot = self.locals.last().unwrap().stack_slot;
 
                 // LOOP_START:
                 let loop_start = self.compiling_chunk.count();
@@ -2816,8 +3328,10 @@ impl<'a> Compiler<'a> {
 
             self.parser.advance()?; // consume identifier
 
-            let is_function =
-                matches!(self.parser.current_token().map(|t| &t.token), Some(Token::LeftParen));
+            let is_function = matches!(
+                self.parser.current_token().map(|t| &t.token),
+                Some(Token::LeftParen)
+            );
 
             if is_function {
                 let parameters = self.parse_parameter_list()?;
@@ -2831,7 +3345,16 @@ impl<'a> Compiler<'a> {
                     Token::Operator("=".to_string()),
                     "Expected '=' after variable name",
                 )?;
-                self.parse_expr_notail(0, memory_manager)?;
+                // Wrap RHS in a thunk for lazy evaluation
+                let saved_state = self.begin_function();
+                self.begin_scope();
+                self.declare_local("<closure>".to_string())?;
+                self.parse_expr(0, memory_manager)?;
+                let return_span = self.current_span();
+                self.emit_opcode(Opcode::Return, return_span);
+                self.end_scope();
+                let (chunk, upvalues) = self.end_function(saved_state);
+                self.emit_thunk(chunk, upvalues, memory_manager)?;
             }
 
             self.emit_store_var(slots[binding_idx], binding_names[binding_idx].1.clone());
@@ -2871,8 +3394,6 @@ impl<'a> Compiler<'a> {
 
         Ok(())
     }
-
-
 
     // Scope and Local Variable Management
 
@@ -2927,9 +3448,10 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        // Stack slot is simply the current number of locals (0-indexed)
-        // All previous locals are on the stack below this one
-        let stack_slot = self.locals.len();
+        // Stack slot accounts for both declared locals and anonymous temporaries
+        // (expression values on the stack not tracked as locals, e.g. function
+        // callee during argument parsing, array literal elements, etc.).
+        let stack_slot = self.locals.len() + self.anon_stack_depth;
 
         self.locals.push(Local {
             name,
@@ -2976,13 +3498,19 @@ impl<'a> Compiler<'a> {
         let enclosing = self.enclosing.as_mut()?;
 
         // Try to find in enclosing function's locals
-        for (i, local) in enclosing.locals.iter_mut().enumerate().rev() {
+        let found_local = enclosing.locals.iter_mut().rev().find_map(|local| {
             if local.name == name {
-                // Mark the local as captured
                 local.is_captured = true;
-                // Add as upvalue capturing a local
-                return Some(self.add_upvalue(i as u8, true));
+                Some(local.stack_slot as u8)
+            } else {
+                None
             }
+        });
+
+        if let Some(slot) = found_local {
+            // Add as upvalue capturing a local — use stack_slot (not array index)
+            // since anon_stack_depth may shift slots from their array position
+            return Some(self.add_upvalue(slot, true));
         }
 
         // Try to find in enclosing function's upvalues (recursive)
@@ -3007,6 +3535,8 @@ impl<'a> Compiler<'a> {
             enclosing: self.enclosing.take(),
             chunk: std::mem::replace(&mut self.compiling_chunk, Chunk::new(source_id)),
             constant_pool: std::mem::take(&mut self.constant_pool),
+            anon_stack_depth: std::mem::replace(&mut self.anon_stack_depth, 0),
+            type_stack: std::mem::take(&mut self.type_stack),
         };
 
         // Set up enclosing chain
@@ -3071,6 +3601,8 @@ impl<'a> Compiler<'a> {
         self.locals = enclosing.locals;
         self.upvalues = enclosing.upvalues;
         self.enclosing = enclosing.enclosing;
+        self.anon_stack_depth = enclosing.anon_stack_depth;
+        self.type_stack = enclosing.type_stack;
 
         // Restore other state
         self.scope_depth = old_scope_depth;
@@ -3080,13 +3612,15 @@ impl<'a> Compiler<'a> {
         (function_chunk, function_upvalues)
     }
 
-    /// Parse a parenthesized parameter list: (param1, param2, ...)
+    /// Parse a parenthesized parameter list: (param1, param2=default, ...)
     /// Consumes the opening '(' and closing ')'.
-    fn parse_parameter_list(&mut self) -> Result<Vec<String>, CompilerError> {
+    /// For parameters with defaults, saves a parser checkpoint for re-compilation later.
+    fn parse_parameter_list(&mut self) -> Result<Vec<FunctionParam>, CompilerError> {
         self.parser
             .consume(Token::LeftParen, "Expected '(' for parameter list")?;
 
         let mut parameters = Vec::new();
+        let mut seen_default = false;
 
         let has_params = if let Some(token) = self.parser.current_token() {
             token.token != Token::RightParen
@@ -3101,8 +3635,39 @@ impl<'a> Compiler<'a> {
                     ..
                 }) = self.parser.current_token()
                 {
-                    parameters.push(param_name.clone());
+                    let name = param_name.clone();
                     self.parser.advance()?;
+
+                    // Check for default value: '='
+                    let has_default = matches!(
+                        self.parser.current_token().map(|t| &t.token),
+                        Some(Token::Operator(op)) if op == "="
+                    );
+
+                    let default_checkpoint = if has_default {
+                        seen_default = true;
+                        self.parser.advance()?; // consume '='
+                        // Save checkpoint before default expression
+                        let checkpoint = self.parser.save_checkpoint();
+                        // Skip over the default expression tokens
+                        self.skip_default_expression()?;
+                        Some(checkpoint)
+                    } else {
+                        if seen_default {
+                            return Err(self.make_error(
+                                self.current_span(),
+                                "Required parameter cannot follow parameter with default"
+                                    .to_string(),
+                            ));
+                        }
+                        None
+                    };
+
+                    parameters.push(FunctionParam {
+                        name,
+                        has_default,
+                        default_checkpoint,
+                    });
                 } else {
                     return Err(
                         self.make_error(self.current_span(), "Expected parameter name".to_string())
@@ -3112,6 +3677,13 @@ impl<'a> Compiler<'a> {
                 if let Some(token) = self.parser.current_token() {
                     if token.token == Token::Comma {
                         self.parser.advance()?;
+                        // Allow trailing comma before ')'
+                        if matches!(
+                            self.parser.current_token().map(|t| &t.token),
+                            Some(Token::RightParen)
+                        ) {
+                            break;
+                        }
                     } else {
                         break;
                     }
@@ -3127,15 +3699,65 @@ impl<'a> Compiler<'a> {
         Ok(parameters)
     }
 
+    /// Skip over a default expression in a parameter list.
+    /// Stops at ',' or ')' at depth 0.
+    fn skip_default_expression(&mut self) -> Result<(), CompilerError> {
+        let mut depth = 0;
+        loop {
+            let token = self.parser.current_token().cloned();
+            match token {
+                Some(t) => match &t.token {
+                    Token::LeftParen | Token::LeftBracket | Token::LeftBrace => {
+                        depth += 1;
+                        self.parser.advance()?;
+                    }
+                    Token::RightParen | Token::RightBracket | Token::RightBrace => {
+                        if depth == 0 {
+                            break; // End of default at closing paren
+                        }
+                        depth -= 1;
+                        self.parser.advance()?;
+                    }
+                    Token::Comma if depth == 0 => {
+                        break; // End of this default, next param
+                    }
+                    Token::Eof => {
+                        return Err(self.unexpected_eof_error(t.span.clone()));
+                    }
+                    _ => {
+                        self.parser.advance()?;
+                    }
+                },
+                None => {
+                    return Err(self.unexpected_eof_error(0..0));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Compile a function body given already-parsed parameters.
     /// Sets up function scope, declares params, parses body expression,
     /// emits Return, and emits the closure instruction.
     fn compile_function_body(
         &mut self,
-        parameters: Vec<String>,
+        parameters: Vec<FunctionParam>,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
         let arity = parameters.len() as u8;
+        let required_params = parameters.iter().filter(|p| !p.has_default).count() as u8;
+
+        // Intern parameter names for runtime named-arg matching.
+        // Root them as external roots to protect from GC during compilation.
+        let param_name_indices: Vec<StringIndex> = parameters
+            .iter()
+            .map(|p| memory_manager.allocate_string(&p.name).index)
+            .collect();
+        let param_roots: Vec<Value> = param_name_indices
+            .iter()
+            .map(|&idx| Value::String(idx))
+            .collect();
+        memory_manager.external_roots.push(param_roots);
 
         let saved_state = self.begin_function();
         self.begin_scope();
@@ -3143,9 +3765,48 @@ impl<'a> Compiler<'a> {
         // Reserve slot 0 for the closure itself
         self.declare_local("<closure>".to_string())?;
 
-        for param_name in parameters {
-            self.declare_local(param_name)?;
+        // Declare all parameters as locals
+        let mut param_slots = Vec::new();
+        for param in &parameters {
+            self.declare_local(param.name.clone())?;
+            param_slots.push(self.locals.last().unwrap().stack_slot);
         }
+
+        // Emit default-initialization preamble for params with defaults.
+        // For each param with a default: check if Uninitialized, if so compile default as thunk.
+        let after_checkpoint = self.parser.save_checkpoint();
+        for (i, param) in parameters.iter().enumerate() {
+            if let Some(default_cp) = &param.default_checkpoint {
+                let slot = param_slots[i];
+                let span = self.current_span();
+
+                // Load the parameter value to check if it's Uninitialized
+                self.compiling_chunk
+                    .write_opcode_u16(Opcode::LoadVar, slot as u16, span.clone());
+
+                // BindDefault: pops value, if not Uninitialized jumps forward (skip default)
+                let bind_default_offset = self.compiling_chunk.count();
+                self.compiling_chunk
+                    .write_opcode_u16(Opcode::BindDefault, 0, span.clone()); // placeholder jump
+
+                // Compile default expression as a lazy thunk (forced on first access via LoadVar)
+                self.parser.restore_checkpoint(default_cp.clone());
+                self.parse_expr_as_thunk(0, memory_manager)?;
+
+                // Store the thunk into the parameter slot
+                self.emit_store_var(slot, span.clone());
+
+                // Patch the BindDefault jump offset
+                let current_offset = self.compiling_chunk.count();
+                let jump_distance = current_offset - (bind_default_offset + 3); // 3 = opcode + u16
+                self.compiling_chunk.code[bind_default_offset + 1] =
+                    (jump_distance as u16).to_le_bytes()[0];
+                self.compiling_chunk.code[bind_default_offset + 2] =
+                    (jump_distance as u16).to_le_bytes()[1];
+            }
+        }
+        // Restore parser to after the parameter list
+        self.parser.restore_checkpoint(after_checkpoint);
 
         let prev_tail = self.in_tail_position;
         self.in_tail_position = true;
@@ -3158,7 +3819,17 @@ impl<'a> Compiler<'a> {
         self.end_scope();
 
         let (chunk, upvalues) = self.end_function(saved_state);
-        self.emit_closure(chunk, upvalues, arity, memory_manager)?;
+        self.emit_closure_with_params(
+            chunk,
+            upvalues,
+            arity,
+            required_params,
+            param_name_indices,
+            memory_manager,
+        )?;
+
+        // Pop the external roots we pushed for param name protection
+        memory_manager.external_roots.pop();
 
         Ok(())
     }
@@ -3187,6 +3858,7 @@ impl<'a> Compiler<'a> {
 
         // 1. Evaluate condition
         self.parse_expr_notail(0, memory_manager)?;
+        self.pop_type(); // Condition consumed by JumpIfFalse
 
         // Check for optional msg token but don't parse the expression yet
         let has_msg_colon = if let Some(TokenInfo {
@@ -3253,6 +3925,7 @@ impl<'a> Compiler<'a> {
 
         // Parse condition expression
         self.parse_expr_notail(0, memory_manager)?;
+        self.pop_type(); // Condition consumed by JumpIfFalse
 
         // Expect 'then'
         self.parser
@@ -3584,9 +4257,9 @@ mod tests {
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
 
-        // Should have constant for 5
+        // RHS is wrapped in a thunk (Function) for lazy evaluation
         assert_eq!(chunk.constants.len(), 1);
-        assert_eq!(chunk.constants[0], Value::Number(5.0));
+        assert!(matches!(chunk.constants[0], Value::Function(_)));
     }
 
     #[test]
@@ -3597,7 +4270,7 @@ mod tests {
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager).unwrap();
 
-        // Should have constants for 1 and 2
+        // Each RHS wrapped in a thunk
         assert_eq!(chunk.constants.len(), 2);
     }
 
@@ -3621,7 +4294,11 @@ mod tests {
         let mut memory_manager = MemoryManager::new();
         let result = compiler.compile(&mut memory_manager);
 
-        assert!(result.is_ok(), "Forward reference should compile: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Forward reference should compile: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -3810,7 +4487,11 @@ mod tests {
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager);
-        assert!(chunk.is_ok(), "Function sugar should compile: {:?}", chunk.err());
+        assert!(
+            chunk.is_ok(),
+            "Function sugar should compile: {:?}",
+            chunk.err()
+        );
     }
 
     #[test]
@@ -3819,7 +4500,11 @@ mod tests {
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager);
-        assert!(chunk.is_ok(), "Multi-param function sugar should compile: {:?}", chunk.err());
+        assert!(
+            chunk.is_ok(),
+            "Multi-param function sugar should compile: {:?}",
+            chunk.err()
+        );
     }
 
     #[test]
@@ -3828,7 +4513,11 @@ mod tests {
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager);
-        assert!(chunk.is_ok(), "No-param function sugar should compile: {:?}", chunk.err());
+        assert!(
+            chunk.is_ok(),
+            "No-param function sugar should compile: {:?}",
+            chunk.err()
+        );
     }
 
     #[test]
@@ -3840,18 +4529,23 @@ mod tests {
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager);
-        assert!(chunk.is_ok(), "Recursive function sugar should compile: {:?}", chunk.err());
+        assert!(
+            chunk.is_ok(),
+            "Recursive function sugar should compile: {:?}",
+            chunk.err()
+        );
     }
 
     #[test]
     fn test_local_function_sugar_with_closure() {
-        let mut scanner = Scanner::new(
-            "local x = 10; local add_x(y) = x + y; add_x(5)",
-            "test",
-        );
+        let mut scanner = Scanner::new("local x = 10; local add_x(y) = x + y; add_x(5)", "test");
         let compiler = Compiler::new(&mut scanner, "test");
         let mut memory_manager = MemoryManager::new();
         let chunk = compiler.compile(&mut memory_manager);
-        assert!(chunk.is_ok(), "Function sugar with closure should compile: {:?}", chunk.err());
+        assert!(
+            chunk.is_ok(),
+            "Function sugar with closure should compile: {:?}",
+            chunk.err()
+        );
     }
 }

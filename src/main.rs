@@ -27,6 +27,7 @@ impl std::error::Error for MainError {}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse flags before the filename argument
     let mut ext_strs: Vec<(String, String)> = Vec::new();
+    let mut ext_codes: Vec<(String, String)> = Vec::new();
     let mut quiet = false;
     let mut args_iter = env::args().skip(1).peekable();
     while let Some(arg) = args_iter.peek().cloned() {
@@ -46,6 +47,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ext_strs.push((k.to_string(), v.to_string()));
                 }
             }
+        } else if arg.starts_with("--ext-code=") {
+            let kv = arg.trim_start_matches("--ext-code=");
+            if let Some((k, v)) = kv.split_once('=') {
+                ext_codes.push((k.to_string(), v.to_string()));
+            }
+            args_iter.next();
+        } else if arg == "--ext-code" {
+            args_iter.next();
+            if let Some(kv) = args_iter.next() {
+                if let Some((k, v)) = kv.split_once('=') {
+                    ext_codes.push((k.to_string(), v.to_string()));
+                }
+            }
         } else {
             break;
         }
@@ -55,10 +69,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(filename) = file_arg {
         // File mode: read from file, compile, and execute
         let content = fs::read_to_string(&filename)?;
+        // Use just the filename (basename) as source_id.
+        // Import resolution uses the file's parent directory as cwd context.
+        let path = std::path::Path::new(&filename);
+        let source_name = path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(&filename)
+            .to_string();
+        // Change to the file's directory so that imports resolve correctly
+        if let Some(parent) = path.parent() {
+            if parent != std::path::Path::new("") {
+                std::env::set_current_dir(parent)?;
+            }
+        }
         if quiet {
-            compile_and_execute_quiet(&content, &filename, &ext_strs)?;
+            compile_and_execute_quiet(&content, &source_name, &ext_strs, &ext_codes)?;
         } else {
-            compile_and_execute(&content, &filename, &ext_strs)?;
+            compile_and_execute(&content, &source_name, &ext_strs, &ext_codes)?;
         }
     } else {
         // REPL mode: read from stdin, compile, and execute
@@ -66,6 +94,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Format an f64 to match C++ jsonnet's number output (%.17g equivalent).
+/// Integers print without a decimal point; others use 17 significant digits.
+fn format_double(f: f64) -> String {
+    if f.fract() == 0.0 && f.abs() < 1e15 {
+        format!("{}", f as i64)
+    } else {
+        // %.17g: 17 significant digits, "general" format (fixed or scientific).
+        // {:.16e} gives 16 decimal digits = 17 significant digits in scientific notation.
+        let s = format!("{:.16e}", f);
+        let (mantissa, exp_str) = s.split_once('e').unwrap();
+        let exp: i32 = exp_str.parse().unwrap();
+
+        // Trim trailing zeros from mantissa (like %g does)
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+
+        // %g uses fixed notation when -4 <= exp < precision (17), else scientific
+        if exp >= 0 && exp < 17 {
+            let digits: String = mantissa.replace('.', "");
+            let num_digits = digits.len();
+            let decimal_pos = 1 + exp as usize;
+
+            if decimal_pos >= num_digits {
+                format!("{}{}", digits, "0".repeat(decimal_pos - num_digits))
+            } else {
+                let (int_part, frac_part) = digits.split_at(decimal_pos);
+                let frac_trimmed = frac_part.trim_end_matches('0');
+                if frac_trimmed.is_empty() {
+                    int_part.to_string()
+                } else {
+                    format!("{}.{}", int_part, frac_trimmed)
+                }
+            }
+        } else if exp < 0 && exp >= -4 {
+            let digits: String = mantissa.replace('.', "");
+            let leading_zeros = (-exp - 1) as usize;
+            let frac = format!("{}{}", "0".repeat(leading_zeros), digits);
+            let frac_trimmed = frac.trim_end_matches('0');
+            format!("0.{}", frac_trimmed)
+        } else {
+            // Scientific notation: e+NN or e-NN (no leading + for positive exponent in %g)
+            if exp >= 0 {
+                format!("{}e+{:02}", mantissa, exp)
+            } else {
+                format!("{}e-{:02}", mantissa, -exp)
+            }
+        }
+    }
 }
 
 /// Format a serde_json::Value as Jsonnet-style JSON (3-space indent, sorted keys).
@@ -78,14 +155,8 @@ fn jsonnet_manifest_indent(value: &serde_json::Value, depth: usize) -> String {
         serde_json::Value::Null => "null".to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => {
-            // Match jsonnet number formatting
             if let Some(f) = n.as_f64() {
-                if f == f.floor() && f.abs() < 1e15 && !n.to_string().contains('e') {
-                    // Integer-like: no decimal point
-                    format!("{}", f as i64)
-                } else {
-                    n.to_string()
-                }
+                format_double(f)
             } else {
                 n.to_string()
             }
@@ -132,12 +203,13 @@ fn compile_and_execute_quiet(
     content: &str,
     source_id: &str,
     ext_strs: &[(String, String)],
+    ext_codes: &[(String, String)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut scanner = Scanner::new(content, source_id);
     let mut memory_manager = MemoryManager::new();
     let compiler = Compiler::new(&mut scanner, source_id);
     match compiler.compile(&mut memory_manager) {
-        Ok(chunk) => match execute_with_ext_vars(chunk, memory_manager, ext_strs) {
+        Ok(chunk) => match execute_with_ext_vars(chunk, memory_manager, ext_strs, ext_codes) {
             Ok(result) => {
                 // Format with 3-space indent to match official jsonnet output
                 println!("{}", jsonnet_manifest(&result));
@@ -177,6 +249,7 @@ fn compile_and_execute(
     content: &str,
     source_id: &str,
     ext_strs: &[(String, String)],
+    ext_codes: &[(String, String)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = Source::from(content);
 
@@ -198,7 +271,7 @@ fn compile_and_execute(
             debug_report.print((source_id, &source))?;
 
             // Execute the compiled chunk with ext vars
-            match execute_with_ext_vars(chunk, memory_manager, ext_strs) {
+            match execute_with_ext_vars(chunk, memory_manager, ext_strs, ext_codes) {
                 Ok(result) => {
                     println!("🎯 Execution result: {}", result);
                     Ok(())

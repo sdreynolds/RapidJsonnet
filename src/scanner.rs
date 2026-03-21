@@ -53,6 +53,13 @@ pub struct TokenInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct ScannerCheckpoint {
+    pub position: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct ScanError {
     pub span: Range<usize>,
     pub message: String,
@@ -109,6 +116,22 @@ impl<'a> Scanner<'a> {
     /// Get reference to all collected strings from scanning
     pub fn collected_strings(&self) -> &Vec<String> {
         &self.collected_strings
+    }
+
+    /// Save scanner position for backtracking
+    pub fn save_position(&self) -> ScannerCheckpoint {
+        ScannerCheckpoint {
+            position: self.position,
+            line: self.line,
+            column: self.column,
+        }
+    }
+
+    /// Restore scanner to a previously saved position
+    pub fn restore_position(&mut self, checkpoint: ScannerCheckpoint) {
+        self.position = checkpoint.position;
+        self.line = checkpoint.line;
+        self.column = checkpoint.column;
     }
 
     pub fn scan_all(&mut self) -> Result<Vec<TokenInfo>, Vec<ScanError>> {
@@ -366,7 +389,58 @@ impl<'a> Scanner<'a> {
                                 let hex_digits: String = (0..4).map(|_| self.advance()).collect();
 
                                 if let Ok(code_point) = u32::from_str_radix(&hex_digits, 16) {
-                                    if let Some(unicode_char) = char::from_u32(code_point) {
+                                    // Check for UTF-16 surrogate pair (high surrogate: D800-DBFF)
+                                    if (0xD800..=0xDBFF).contains(&code_point) {
+                                        // Expect \uXXXX low surrogate (DC00-DFFF)
+                                        if self.peek() == '\\' && self.peek_ahead(1) == Some('u') {
+                                            self.advance(); // consume '\'
+                                            self.advance(); // consume 'u'
+                                            let low_hex: String =
+                                                (0..4).map(|_| self.advance()).collect();
+                                            if let Ok(low_cp) = u32::from_str_radix(&low_hex, 16) {
+                                                if (0xDC00..=0xDFFF).contains(&low_cp) {
+                                                    let full_cp = 0x10000
+                                                        + ((code_point - 0xD800) << 10)
+                                                        + (low_cp - 0xDC00);
+                                                    if let Some(ch) = char::from_u32(full_cp) {
+                                                        value.push(ch);
+                                                    } else {
+                                                        return Err(self.make_error(
+                                                            hex_start - 2..self.position,
+                                                            format!(
+                                                                "Invalid surrogate pair: \\u{}\\u{}",
+                                                                hex_digits, low_hex
+                                                            ),
+                                                        ));
+                                                    }
+                                                } else {
+                                                    return Err(self.make_error(
+                                                        hex_start - 2..self.position,
+                                                        format!(
+                                                            "Expected low surrogate after \\u{}, got \\u{}",
+                                                            hex_digits, low_hex
+                                                        ),
+                                                    ));
+                                                }
+                                            } else {
+                                                return Err(self.make_error(
+                                                    hex_start - 2..self.position,
+                                                    format!(
+                                                        "Invalid unicode escape after surrogate: \\u{}",
+                                                        low_hex
+                                                    ),
+                                                ));
+                                            }
+                                        } else {
+                                            return Err(self.make_error(
+                                                hex_start - 2..self.position,
+                                                format!(
+                                                    "High surrogate \\u{} not followed by low surrogate",
+                                                    hex_digits
+                                                ),
+                                            ));
+                                        }
+                                    } else if let Some(unicode_char) = char::from_u32(code_point) {
                                         value.push(unicode_char);
                                     } else {
                                         return Err(self.make_error(
@@ -445,31 +519,19 @@ impl<'a> Scanner<'a> {
         }
         self.advance(); // newline
 
-        // Find indentation from first non-empty line
-        let indent_start = self.position;
-        let mut indent = String::new();
-        while self.peek() == ' ' || self.peek() == '\t' {
-            indent.push(self.advance());
-        }
-
-        if indent.is_empty() {
-            return Err(self.make_error(
-                indent_start..self.position,
-                "Text block requires indentation on first non-empty line".to_string(),
-            ));
-        }
-
-        let mut lines = Vec::new();
-        let _current_line = String::new();
-
-        // Reset to start of first line
-        self.position = indent_start;
+        // Collect raw lines and find the closing |||.
+        let mut raw_lines: Vec<String> = Vec::new();
 
         loop {
+            if self.is_at_end() {
+                return Err(
+                    self.make_error(start..self.position, "Unterminated text block".to_string())
+                );
+            }
+
             let line_start = self.position;
             let mut line = String::new();
 
-            // Read entire line
             while !self.is_at_end() && self.peek() != '\n' {
                 line.push(self.advance());
             }
@@ -478,29 +540,52 @@ impl<'a> Scanner<'a> {
                 self.advance(); // consume newline
             }
 
-            // Check if this is the end marker
-            let trimmed = line.trim();
-            if trimmed == "|||" {
+            // Check if this line contains the closing |||
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("|||") {
+                // Position scanner right after the ||| so tokens after it
+                // (like ;) can be scanned normally.
+                let leading_ws = line.len() - trimmed.len();
+                self.position = line_start + leading_ws + 3;
                 break;
             }
 
-            // Handle indentation
-            if line.trim().is_empty() {
+            raw_lines.push(line);
+        }
+
+        // Determine indentation from the first non-blank content line
+        let indent = raw_lines
+            .iter()
+            .find(|l| !l.trim().is_empty())
+            .map(|first_line| {
+                let trimmed = first_line.trim_start();
+                first_line[..first_line.len() - trimmed.len()].to_string()
+            })
+            .unwrap_or_default();
+
+        // Strip the base indentation from each content line
+        let mut lines: Vec<String> = Vec::new();
+        for raw_line in &raw_lines {
+            if raw_line.trim().is_empty() {
                 lines.push(String::new());
-            } else if line.starts_with(&indent) {
-                lines.push(line[indent.len()..].to_string());
+            } else if raw_line.starts_with(&indent) {
+                lines.push(raw_line[indent.len()..].to_string());
             } else {
                 return Err(self.make_error(
-                    line_start..self.position,
+                    start..self.position,
                     format!(
                         "Text block line doesn't start with expected indentation: '{}'",
-                        indent
+                        indent.escape_default()
                     ),
                 ));
             }
         }
 
+        // Build result: join with newlines, add trailing newline
         let mut result = lines.join("\n");
+        if !result.is_empty() {
+            result.push('\n');
+        }
         if strip_final_newline && result.ends_with('\n') {
             result.pop();
         }
@@ -608,6 +693,16 @@ impl<'a> Scanner<'a> {
                 break;
             }
 
+            // Don't consume '|' if it starts a ||| text block
+            if ch == '|' && self.peek_ahead(1) == Some('|') && self.peek_ahead(2) == Some('|') {
+                break;
+            }
+
+            // Don't consume '/' if it starts a comment (// or /*)
+            if ch == '/' && (self.peek_ahead(1) == Some('/') || self.peek_ahead(1) == Some('*')) {
+                break;
+            }
+
             let new_operator = format!("{}{}", operator, ch);
 
             // Check forbidden sequences
@@ -620,6 +715,11 @@ impl<'a> Scanner<'a> {
 
             // Check ending restrictions for multi-character operators
             if new_operator.len() > 1 && "+-~!$".contains(ch) {
+                break;
+            }
+
+            // Don't extend '+' with ':' — '+:' is field override syntax, not an operator
+            if operator == "+" && ch == ':' {
                 break;
             }
 

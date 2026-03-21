@@ -3,4 +3,4 @@ assert (|||
     with multiple lines
     and consistent indentation
 |||
-) == "This is a text block\nwith multiple lines\nand consistent indentation"; "This is a text block\nwith multiple lines\nand consistent indentation"
+) == "This is a text block\nwith multiple lines\nand consistent indentation\n"; "This is a text block\nwith multiple lines\nand consistent indentation\n"

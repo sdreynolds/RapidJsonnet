@@ -28,6 +28,8 @@ pub struct CallFrame {
     pub self_obj: Option<ObjectIndex>,
     /// The current super object for this frame
     pub super_obj: Option<ObjectIndex>,
+    /// The field name this thunk is being evaluated for (for dynamic +: overrides)
+    pub field_name: Option<StringIndex>,
 }
 
 impl CallFrame {
@@ -45,6 +47,7 @@ impl CallFrame {
             stack_base,
             self_obj,
             super_obj,
+            field_name: None,
         }
     }
 }
@@ -65,6 +68,10 @@ pub struct VirtualMachine {
     instruction_start_ip: usize,
     /// External variables set via --ext-str / --ext-code CLI flags
     pub ext_vars: std::collections::HashMap<String, Value>,
+    /// Pending field name for the next thunk call (consumed by call_closure)
+    pending_field_name: Option<StringIndex>,
+    /// Cached std object (created on first LoadStd, reused after)
+    std_object: Option<Value>,
 }
 
 impl VirtualMachine {
@@ -78,8 +85,13 @@ impl VirtualMachine {
         // Create a top-level function from the chunk
         let func_result = memory_manager.allocate_function(None, 0, 0, owned_chunk);
 
+        // Root the function so it survives GC during closure allocation
+        memory_manager.push_external_roots(vec![Value::Function(func_result.index)], Vec::new());
+
         // Create a closure wrapping the top-level function
         let closure_result = memory_manager.allocate_closure(func_result.index, Vec::new());
+
+        memory_manager.pop_external_roots();
 
         // Create initial frame with the top-level closure
         let initial_frame = CallFrame::new(closure_result.index, 0, 0, None, None);
@@ -95,6 +107,8 @@ impl VirtualMachine {
             memory_manager,
             instruction_start_ip: 0,
             ext_vars: std::collections::HashMap::new(),
+            pending_field_name: None,
+            std_object: None,
         }
     }
 
@@ -103,6 +117,40 @@ impl VirtualMachine {
         let alloc = self.memory_manager.allocate_string(value);
         self.ext_vars
             .insert(key.to_string(), Value::String(alloc.index));
+    }
+
+    /// Set an external variable from Jsonnet code (for --ext-code CLI flag).
+    /// Parses the code as a JSON value and converts it to a Jsonnet value.
+    pub fn set_ext_var_code(&mut self, key: &str, code: &str) -> Result<(), RuntimeError> {
+        // Try to parse as JSON first (covers most ext-code use cases)
+        match serde_json::from_str::<serde_json::Value>(code) {
+            Ok(json_val) => {
+                let val = self.json_to_jsonnet_value(&json_val)?;
+                self.ext_vars.insert(key.to_string(), val);
+                Ok(())
+            }
+            Err(_) => {
+                // Not valid JSON — try as a Jsonnet expression by writing to temp file
+                // and using the import mechanism
+                let temp_path = format!("/tmp/jsonnet_ext_code_{}.jsonnet", key);
+                std::fs::write(&temp_path, code).map_err(|e| RuntimeError {
+                    span: 0..0,
+                    message: format!("Failed to write ext-code temp file: {}", e),
+                    source_id: "<main>".to_string(),
+                })?;
+                let import_alloc = self.memory_manager.allocate_import(&temp_path);
+                let import_val = Value::Import(import_alloc.index);
+                self.ext_vars.insert(key.to_string(), import_val);
+                // Push as permanent external root so it survives compiler-triggered GC
+                // (the compiler's GC only roots compiler state + external_roots)
+                self.memory_manager
+                    .push_external_roots(vec![import_val], Vec::new());
+                if import_alloc.should_garbage_collect {
+                    self.run_garbage_collection();
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Get the current call frame
@@ -227,16 +275,110 @@ impl VirtualMachine {
     }
 
     /// Execute a thunk (field closure) synchronously and return its result.
+    /// Force all closure field values in an object to their evaluated results.
+    fn force_object_fields(&mut self, obj_idx: ObjectIndex) -> Result<(), RuntimeError> {
+        let obj = self.memory_manager.load_object(obj_idx);
+        let keys: Vec<_> = obj.properties.keys().cloned().collect();
+        for key in keys {
+            let field_val = self.memory_manager.load_object(obj_idx).properties[&key].value;
+            if let Value::Closure(ci) = field_val {
+                let result = self.execute_thunk_sync(ci, Some(obj_idx), None)?;
+                let obj = self.memory_manager.get_object_mut(obj_idx).unwrap();
+                obj.properties.get_mut(&key).unwrap().value = result;
+            }
+        }
+        Ok(())
+    }
+
+    /// Force a lazy thunk (0-arg closure from a local binding).
+    fn force_thunk(&mut self, closure_index: ClosureIndex) -> Result<Value, RuntimeError> {
+        self.push(Value::Closure(closure_index))?;
+        let target_frame_count = self.frame_count;
+        self.call_closure(closure_index, 0, None, None)?;
+        self.interpret_until(target_frame_count)
+    }
+
+    /// Check all assertions on an object. Each assertion is a closure that takes
+    /// (self, super) and should return a truthy value or error.
+    /// After checking, assertions are cleared so they only run once.
+    fn check_object_assertions(&mut self, obj_idx: chunk::ObjectIndex) -> Result<(), RuntimeError> {
+        let assertions = self.memory_manager.load_object(obj_idx).assertions.clone();
+        if assertions.is_empty() {
+            return Ok(());
+        }
+        // Clear assertions so they only run once
+        if let Some(obj) = self.memory_manager.get_object_mut(obj_idx) {
+            obj.assertions.clear();
+        }
+        for closure_idx in assertions {
+            self.execute_thunk_sync(closure_idx, Some(obj_idx), None)?;
+        }
+        Ok(())
+    }
+
+    /// Force a single array element if it's a thunk, caching the result.
+    fn force_array_element(
+        &mut self,
+        array_key: chunk::ArrayIndex,
+        index: usize,
+        element: Value,
+    ) -> Result<Value, RuntimeError> {
+        if let Value::Closure(ci) = element {
+            if self.memory_manager.load_closure(ci).is_thunk {
+                let result = self.force_thunk(ci)?;
+                // Cache the forced value back into the array
+                self.memory_manager.load_array_mut(array_key).elements[index] = result;
+                return Ok(result);
+            }
+        }
+        Ok(element)
+    }
+
+    /// Force all elements of an array, caching results.
+    /// Force all elements of an array, caching results. Recurses into nested arrays.
+    fn force_all_array_elements(
+        &mut self,
+        array_key: chunk::ArrayIndex,
+    ) -> Result<(), RuntimeError> {
+        // Root the array to protect from GC during thunk forcing
+        self.memory_manager
+            .external_roots
+            .push(vec![Value::Array(array_key)]);
+        let len = self.memory_manager.load_array(array_key).elements.len();
+        for i in 0..len {
+            let element = self.memory_manager.load_array(array_key).elements[i];
+            let forced = self.force_array_element(array_key, i, element)?;
+            // Recursively force nested arrays
+            if let Value::Array(nested_idx) = forced {
+                self.force_all_array_elements(nested_idx)?;
+            }
+        }
+        self.memory_manager.external_roots.pop();
+        Ok(())
+    }
+
     fn execute_thunk_sync(
         &mut self,
         closure_index: ClosureIndex,
         self_obj: Option<ObjectIndex>,
         super_obj: Option<ObjectIndex>,
     ) -> Result<Value, RuntimeError> {
+        self.execute_thunk_sync_with_field(closure_index, self_obj, super_obj, None)
+    }
+
+    /// Execute a thunk with an optional field name for LoadFieldName support.
+    fn execute_thunk_sync_with_field(
+        &mut self,
+        closure_index: ClosureIndex,
+        self_obj: Option<ObjectIndex>,
+        super_obj: Option<ObjectIndex>,
+        field_name: Option<StringIndex>,
+    ) -> Result<Value, RuntimeError> {
         self.push(Value::Closure(closure_index))?;
         self.push(self_obj.map(Value::Object).unwrap_or(Value::Null))?;
         self.push(super_obj.map(Value::Object).unwrap_or(Value::Null))?;
         let target_frame_count = self.frame_count;
+        self.pending_field_name = field_name;
         self.call_closure(closure_index, 2, self_obj, super_obj)?;
         self.interpret_until(target_frame_count)
     }
@@ -303,12 +445,71 @@ impl VirtualMachine {
         span: Range<usize>,
         source_id: String,
     ) -> Result<Value, RuntimeError> {
-        if id == chunk::NativeFuncId::AssertEqual && args.len() == 2 {
-            if self.values_equal(&args[0], &args[1])? {
+        // Root args to protect from GC — args may not be on the stack
+        self.memory_manager.external_roots.push(args.to_vec());
+
+        let result = self.call_native_checked_inner(id, args, span, source_id);
+
+        self.memory_manager.external_roots.pop();
+        result
+    }
+
+    fn call_native_checked_inner(
+        &mut self,
+        id: chunk::NativeFuncId,
+        args: &[Value],
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<Value, RuntimeError> {
+        if id == chunk::NativeFuncId::Trace && args.len() == 2 {
+            let msg = match args[0] {
+                Value::String(s) => self.memory_manager.load_string(s).to_string(),
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "std.trace() first argument must be a string".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            // Compute file:line from source_id and span
+            let filename = std::path::Path::new(&source_id)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| source_id.clone());
+            let line = std::fs::read_to_string(&source_id)
+                .map(|content| {
+                    content[..span.start.min(content.len())]
+                        .chars()
+                        .filter(|&c| c == '\n')
+                        .count()
+                        + 1
+                })
+                .unwrap_or(0);
+            if msg.is_empty() {
+                eprintln!("TRACE: {}:{} ", filename, line);
+            } else {
+                eprintln!("TRACE: {}:{} {}", filename, line, msg);
+            }
+            return Ok(args[1]);
+        } else if id == chunk::NativeFuncId::ToString && args.len() == 1 {
+            // Intercept std.toString so we can handle objects/arrays
+            // (requires VM to force thunks in object fields)
+            if matches!(args[0], Value::String(_)) {
+                return Ok(args[0]);
+            }
+            let s = self.value_to_string_for_concat(&args[0])?;
+            let alloc = self.memory_manager.allocate_string(&s);
+            Ok(Value::String(alloc.index))
+        } else if id == chunk::NativeFuncId::AssertEqual && args.len() == 2 {
+            // Force both args before comparing (they may be imports or thunks)
+            let a = self.force_value(args[0])?;
+            let b = self.force_value(args[1])?;
+            if self.values_equal(&a, &b)? {
                 Ok(Value::Boolean(true))
             } else {
-                let a_display = native::display_value(args[0], &self.memory_manager);
-                let b_display = native::display_value(args[1], &self.memory_manager);
+                let a_display = native::display_value(a, &self.memory_manager);
+                let b_display = native::display_value(b, &self.memory_manager);
                 Err(RuntimeError {
                     span,
                     message: format!(
@@ -318,9 +519,463 @@ impl VirtualMachine {
                     source_id,
                 })
             }
+        } else if id == chunk::NativeFuncId::Length && args.len() == 1 {
+            // Handle std.length for functions (returns arity)
+            match args[0] {
+                Value::Closure(c) => {
+                    let func_idx = self.memory_manager.load_closure(c).function;
+                    let arity = self.memory_manager.load_function(func_idx).arity;
+                    Ok(Value::Number(arity as f64))
+                }
+                Value::Function(f) => {
+                    let arity = self.memory_manager.load_function(f).arity;
+                    Ok(Value::Number(arity as f64))
+                }
+                Value::NativeFunction(id) => Ok(Value::Number(id.arity() as f64)),
+                _ => call_native(id, args, &mut self.memory_manager, span, source_id),
+            }
+        } else if id == chunk::NativeFuncId::MakeArray && args.len() == 2 {
+            // Handle MakeArray in the VM since it needs to call closures
+            let sz_val = args[0];
+            let func_val = args[1];
+            let sz = match sz_val {
+                Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: format!(
+                            "std.makeArray expected positive integer for size, got {:?}",
+                            sz_val
+                        ),
+                        source_id,
+                    });
+                }
+            };
+            let mut elements = Vec::with_capacity(sz);
+            for i in 0..sz {
+                let result = self.call_value_with_one_arg(func_val, Value::Number(i as f64))?;
+                elements.push(result);
+            }
+            // Root elements during allocation
+            self.memory_manager
+                .push_external_roots(elements.clone(), Vec::new());
+            let alloc = self.memory_manager.allocate_array(elements);
+            self.memory_manager.pop_external_roots();
+            Ok(Value::Array(alloc.index))
+        } else if id == chunk::NativeFuncId::ManifestYamlDoc && args.len() == 3 {
+            let value = args[0];
+            let indent_array_in_object = match args[1] {
+                Value::Boolean(b) => b,
+                Value::Null => false, // default
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "manifestYamlDoc: indent_array_in_object must be bool".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let quote_keys = match args[2] {
+                Value::Boolean(b) => b,
+                Value::Null => true, // default
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "manifestYamlDoc: quote_keys must be bool".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let result = self.manifest_yaml_doc(
+                value,
+                0,
+                indent_array_in_object,
+                quote_keys,
+                span,
+                source_id,
+            )?;
+            let idx = self.memory_manager.allocate_string(&result);
+            Ok(Value::String(idx.index))
+        } else if id == chunk::NativeFuncId::ManifestYamlStream && args.len() == 4 {
+            let value = args[0];
+            let indent_array_in_object = match args[1] {
+                Value::Boolean(b) => b,
+                Value::Null => false,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "manifestYamlStream: indent_array_in_object must be bool"
+                            .to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let c_document_end = match args[2] {
+                Value::Boolean(b) => b,
+                Value::Null => true,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "manifestYamlStream: c_document_end must be bool".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let quote_keys = match args[3] {
+                Value::Boolean(b) => b,
+                Value::Null => true,
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "manifestYamlStream: quote_keys must be bool".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let result = self.manifest_yaml_stream(
+                value,
+                indent_array_in_object,
+                c_document_end,
+                quote_keys,
+                span,
+                source_id,
+            )?;
+            let idx = self.memory_manager.allocate_string(&result);
+            Ok(Value::String(idx.index))
+        } else if id == chunk::NativeFuncId::ManifestJsonEx && args.len() >= 2 {
+            let value = args[0];
+            let indent_str = match args[1] {
+                Value::String(s) => self.memory_manager.load_string(s).to_string(),
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: "manifestJsonEx: indent must be string".to_string(),
+                        source_id,
+                    });
+                }
+            };
+            let newline = if args.len() > 2 {
+                match args[2] {
+                    Value::String(s) => self.memory_manager.load_string(s).to_string(),
+                    _ => "\n".to_string(),
+                }
+            } else {
+                "\n".to_string()
+            };
+            let key_val_sep = if args.len() > 3 {
+                match args[3] {
+                    Value::String(s) => self.memory_manager.load_string(s).to_string(),
+                    _ => ": ".to_string(),
+                }
+            } else {
+                ": ".to_string()
+            };
+            let result = self.manifest_json_value(
+                value,
+                &indent_str,
+                &newline,
+                &key_val_sep,
+                0,
+                span.clone(),
+                &source_id,
+            )?;
+            let idx = self.memory_manager.allocate_string(&result);
+            Ok(Value::String(idx.index))
+        } else if id == chunk::NativeFuncId::ManifestJson {
+            let value = args[0];
+            let mut result =
+                self.manifest_json_value(value, "   ", "\n", ": ", 0, span.clone(), &source_id)?;
+            let result = Self::fix_manifest_json_empties(&result);
+            let idx = self.memory_manager.allocate_string(&result);
+            Ok(Value::String(idx.index))
+        } else if id == chunk::NativeFuncId::ManifestJsonMinified {
+            let value = args[0];
+            let result =
+                self.manifest_json_value(value, "", "", ":", 0, span.clone(), &source_id)?;
+            let idx = self.memory_manager.allocate_string(&result);
+            Ok(Value::String(idx.index))
+        } else if matches!(
+            id,
+            chunk::NativeFuncId::MinArray | chunk::NativeFuncId::MaxArray
+        ) {
+            // MinArray/MaxArray need VM-level handling to call keyF
+            self.handle_min_max_array(id, args, span, source_id)
+        } else if id == chunk::NativeFuncId::ManifestIni
+            || id == chunk::NativeFuncId::ManifestPython
+            || id == chunk::NativeFuncId::ManifestPythonVars
+            || id == chunk::NativeFuncId::ManifestTomlEx
+            || id == chunk::NativeFuncId::ManifestXmlJsonml
+        {
+            // These manifest functions need VM-level handling for thunk forcing
+            // Route to the appropriate handler
+            self.handle_manifest_native(id, args, span, source_id)
         } else {
+            // Force thunks inside array arguments before passing to native code,
+            // except for functions that don't access array elements.
+            if !matches!(
+                id,
+                chunk::NativeFuncId::Length | chunk::NativeFuncId::Reverse
+            ) {
+                self.force_array_args(args)?;
+            }
             call_native(id, args, &mut self.memory_manager, span, source_id)
         }
+    }
+
+    /// Handle manifest native functions that need VM-level thunk forcing.
+    fn handle_min_max_array(
+        &mut self,
+        id: chunk::NativeFuncId,
+        args: &[Value],
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<Value, RuntimeError> {
+        let arr_val = args[0];
+        let key_f = args.get(1).copied();
+        let on_empty = args.get(2).copied();
+
+        let arr_idx = match arr_val {
+            Value::Array(a) => a,
+            other => {
+                return Err(RuntimeError {
+                    span,
+                    message: format!(
+                        "std.{} expected array, got {}",
+                        id.name(),
+                        other.type_name()
+                    ),
+                    source_id,
+                });
+            }
+        };
+
+        // Root args before forcing array elements (which may trigger GC)
+        let mut roots = vec![arr_val];
+        if let Some(kf) = key_f {
+            roots.push(kf);
+        }
+        if let Some(oe) = on_empty {
+            roots.push(oe);
+        }
+        self.memory_manager.external_roots.push(roots);
+        self.force_all_array_elements(arr_idx)?;
+        let elements: Vec<Value> = self.memory_manager.load_array(arr_idx).elements.clone();
+
+        if elements.is_empty() {
+            self.memory_manager.external_roots.pop();
+            match on_empty {
+                Some(v) if !matches!(v, Value::Null) => {
+                    return Ok(v);
+                }
+                _ => {
+                    return Err(RuntimeError {
+                        span,
+                        message: format!("std.{}: empty array", id.name()),
+                        source_id,
+                    });
+                }
+            }
+        }
+
+        // Check if keyF is null or absent
+        let effective_key_f = match key_f {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v),
+        };
+
+        let result = if let Some(key_f_val) = effective_key_f {
+            // keyF provided — apply it to each element, compare keys
+            let mut best_elem = elements[0];
+            let mut best_key = {
+                let mut roots = Vec::from(self.stack.clone());
+                roots.extend_from_slice(&elements);
+                roots.push(key_f_val);
+                let mut open_upvalue_roots = Vec::new();
+                let mut upvalue = self.open_upvalues;
+                while let Some(uv_idx) = upvalue {
+                    open_upvalue_roots.push(uv_idx);
+                    upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                }
+                self.memory_manager
+                    .push_external_roots(roots, open_upvalue_roots);
+                let k = self.call_value_with_one_arg(key_f_val, elements[0]);
+                self.memory_manager.pop_external_roots();
+                k?
+            };
+
+            for &elem in elements.iter().skip(1) {
+                let key = {
+                    let mut roots = Vec::from(self.stack.clone());
+                    roots.extend_from_slice(&elements);
+                    roots.push(key_f_val);
+                    roots.push(best_elem);
+                    roots.push(best_key);
+                    let mut open_upvalue_roots = Vec::new();
+                    let mut upvalue = self.open_upvalues;
+                    while let Some(uv_idx) = upvalue {
+                        open_upvalue_roots.push(uv_idx);
+                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                    }
+                    self.memory_manager
+                        .push_external_roots(roots, open_upvalue_roots);
+                    let k = self.call_value_with_one_arg(key_f_val, elem);
+                    self.memory_manager.pop_external_roots();
+                    k?
+                };
+                let ord = native::compare_values(key, best_key, &self.memory_manager);
+                let take = if id == chunk::NativeFuncId::MinArray {
+                    ord == std::cmp::Ordering::Less
+                } else {
+                    ord == std::cmp::Ordering::Greater
+                };
+                if take {
+                    best_key = key;
+                    best_elem = elem;
+                }
+            }
+            best_elem
+        } else {
+            // No keyF — compare elements directly
+            let mut best = elements[0];
+            for &elem in elements.iter().skip(1) {
+                let ord = native::compare_values(elem, best, &self.memory_manager);
+                let take = if id == chunk::NativeFuncId::MinArray {
+                    ord == std::cmp::Ordering::Less
+                } else {
+                    ord == std::cmp::Ordering::Greater
+                };
+                if take {
+                    best = elem;
+                }
+            }
+            best
+        };
+        self.memory_manager.external_roots.pop(); // pop args roots
+        Ok(result)
+    }
+
+    fn handle_manifest_native(
+        &mut self,
+        id: chunk::NativeFuncId,
+        args: &[Value],
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<Value, RuntimeError> {
+        match id {
+            chunk::NativeFuncId::ManifestIni => {
+                let result = self.manifest_ini(args[0], span, source_id)?;
+                let idx = self.memory_manager.allocate_string(&result);
+                Ok(Value::String(idx.index))
+            }
+            chunk::NativeFuncId::ManifestPython => {
+                let result = self.manifest_python_value(args[0], 0, span, source_id)?;
+                let idx = self.memory_manager.allocate_string(&result);
+                Ok(Value::String(idx.index))
+            }
+            chunk::NativeFuncId::ManifestPythonVars => {
+                let result = self.manifest_python_vars(args[0], span, source_id)?;
+                let idx = self.memory_manager.allocate_string(&result);
+                Ok(Value::String(idx.index))
+            }
+            chunk::NativeFuncId::ManifestTomlEx => {
+                let indent = match args[1] {
+                    Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
+                    _ => {
+                        return Err(RuntimeError {
+                            span,
+                            message: "manifestTomlEx: indent must be a string".to_string(),
+                            source_id,
+                        });
+                    }
+                };
+                let result = self.manifest_toml_ex(args[0], &indent, span, source_id)?;
+                let idx = self.memory_manager.allocate_string(&result);
+                Ok(Value::String(idx.index))
+            }
+            chunk::NativeFuncId::ManifestXmlJsonml => {
+                let result = self.manifest_xml_jsonml(args[0], span, source_id)?;
+                let idx = self.memory_manager.allocate_string(&result);
+                Ok(Value::String(idx.index))
+            }
+            _ => call_native(id, args, &mut self.memory_manager, span, source_id),
+        }
+    }
+
+    /// Force all thunk elements inside any array arguments.
+    /// Native functions can't force thunks, so we do it before the call.
+    fn force_array_args(&mut self, args: &[Value]) -> Result<(), RuntimeError> {
+        for arg in args.iter() {
+            if let Value::Array(arr_idx) = arg {
+                self.force_all_array_elements(*arr_idx)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Merge two objects (left + right) and return the resulting ObjectIndex.
+    /// Used to build full super chains during multi-level inheritance.
+    fn merge_objects(
+        &mut self,
+        left_key: ObjectIndex,
+        right_key: ObjectIndex,
+    ) -> Result<ObjectIndex, RuntimeError> {
+        // Clone everything up front to avoid borrow conflicts with self.merge_objects
+        let left_object = self.memory_manager.load_object(left_key);
+        let mut merged_properties = left_object.properties.clone();
+        let left_assertions = left_object.assertions.clone();
+
+        let right_object = self.memory_manager.load_object(right_key);
+        let right_props: Vec<_> = right_object
+            .properties
+            .iter()
+            .map(|(k, f)| (*k, f.clone()))
+            .collect();
+        let right_assertions = right_object.assertions.clone();
+
+        // Compute visibilities from left object (already cloned into merged_properties)
+        let left_visibilities: std::collections::HashMap<_, _> = merged_properties
+            .iter()
+            .map(|(k, f)| (*k, f.visibility))
+            .collect();
+
+        for (key, right_field) in right_props {
+            let visibility = if right_field.visibility == FieldVisibility::Visible {
+                left_visibilities
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(FieldVisibility::Visible)
+            } else {
+                right_field.visibility
+            };
+
+            let super_obj = match right_field.super_obj {
+                Some(existing_super) => {
+                    let merged_super = self.merge_objects(left_key, existing_super)?;
+                    Some(merged_super)
+                }
+                None => Some(left_key),
+            };
+
+            merged_properties.insert(
+                key,
+                ObjectField {
+                    value: right_field.value.clone(),
+                    super_obj,
+                    visibility,
+                },
+            );
+        }
+
+        let mut merged_assertions = left_assertions;
+        merged_assertions.extend(right_assertions);
+
+        // Don't trigger GC here — intermediate merge results aren't rooted on the stack.
+        // The caller (Opcode::Add) will push the final result and can GC then.
+        let allocation = self
+            .memory_manager
+            .allocate_object_full(merged_properties, merged_assertions);
+
+        Ok(allocation.index)
     }
 
     /// Call a closure with the given number of arguments and optional object context.
@@ -336,17 +991,33 @@ impl VirtualMachine {
         let closure = self.memory_manager.load_closure(closure_index);
         let function = self.memory_manager.load_function(closure.function);
 
-        // Validate arity
-        if arg_count != function.arity as usize {
-            return Err(RuntimeError {
-                span: self.get_current_span(),
-                message: format!(
-                    "Function expects {} arguments, got {}",
-                    function.arity, arg_count
-                ),
-                source_id: self.current_chunk().source_id.to_string(),
-            });
+        // Validate arity: arg_count must be between required_params and arity
+        let arity = function.arity as usize;
+        let required = function.required_params as usize;
+        if arg_count < required || arg_count > arity {
+            if required == arity {
+                return Err(RuntimeError {
+                    span: self.get_current_span(),
+                    message: format!("Function expects {} argument(s), got {}", arity, arg_count),
+                    source_id: self.current_chunk().source_id.to_string(),
+                });
+            } else {
+                return Err(RuntimeError {
+                    span: self.get_current_span(),
+                    message: format!(
+                        "Function expects {}-{} argument(s), got {}",
+                        required, arity, arg_count
+                    ),
+                    source_id: self.current_chunk().source_id.to_string(),
+                });
+            }
         }
+
+        // Pad missing optional arguments with Uninitialized
+        for _ in arg_count..arity {
+            self.push(Value::Uninitialized)?;
+        }
+        let arg_count = arity; // Now we have the full arity on the stack
 
         // Check stack depth
         if self.frame_count >= MAX_FRAMES {
@@ -366,7 +1037,10 @@ impl VirtualMachine {
         let stack_base = self.stack.len() - arg_count - 1;
 
         // Create new call frame
-        let new_frame = CallFrame::new(closure_index, 0, stack_base, self_obj, super_obj);
+        let mut new_frame = CallFrame::new(closure_index, 0, stack_base, self_obj, super_obj);
+
+        // Consume pending field name if set (for dynamic +: override thunks)
+        new_frame.field_name = self.pending_field_name.take();
 
         // Push frame
         if self.frame_count < self.frames.len() {
@@ -554,6 +1228,10 @@ impl VirtualMachine {
             for i in 0..self.frame_count {
                 roots.push(Value::Closure(self.frames[i].closure));
             }
+            // Also root ext_vars so compiler GC doesn't collect them
+            for ext_val in self.ext_vars.values() {
+                roots.push(*ext_val);
+            }
 
             let mut open_upvalue_roots = Vec::new();
             let mut upvalue = self.open_upvalues;
@@ -644,10 +1322,13 @@ impl VirtualMachine {
 
             match result {
                 Ok(evaluated_value) => {
+                    // Recursively force the result (e.g. if the imported file itself
+                    // returns an import or a thunk)
+                    let forced = self.force_value(evaluated_value)?;
                     let import = self.memory_manager.load_import_mut(import_idx);
-                    import.cached_result = Some(evaluated_value);
+                    import.cached_result = Some(forced);
                     import.evaluating.set(false);
-                    Ok(evaluated_value)
+                    Ok(forced)
                 }
                 Err(e) => {
                     self.memory_manager
@@ -711,6 +1392,63 @@ impl VirtualMachine {
                     self.advance_pc();
                 }
 
+                Opcode::LoadFieldName => {
+                    let field_name =
+                        self.current_frame()
+                            .field_name
+                            .ok_or_else(|| RuntimeError {
+                                span: self.get_current_span(),
+                                message: "LoadFieldName used outside of field thunk context"
+                                    .to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            })?;
+                    self.push(Value::String(field_name))?;
+                    self.advance_pc();
+                }
+
+                Opcode::InOp => {
+                    // Membership test: key in object
+                    // Stack: [key, object] -> [bool]
+                    let object_val = self.pop_forced()?;
+                    let key_val = self.pop_forced()?;
+
+                    match (key_val, object_val) {
+                        (Value::String(key), Value::Object(obj_idx)) => {
+                            let obj = self.memory_manager.load_object(obj_idx);
+                            let has_field = obj.get_field(&key).is_some();
+                            self.push(Value::Boolean(has_field))?;
+                        }
+                        (key, obj) => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!(
+                                    "'in' operator requires (string, object), got ({:?}, {:?})",
+                                    key, obj
+                                ),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+                    self.advance_pc();
+                }
+
+                Opcode::SuperHasField => {
+                    let field_name = self.pop_forced()?;
+                    let super_obj_key = self.current_frame().super_obj;
+
+                    let has_field = if let (Value::String(field_key), Some(super_key)) =
+                        (field_name, super_obj_key)
+                    {
+                        let obj = self.memory_manager.load_object(super_key);
+                        obj.get_field(&field_key).is_some()
+                    } else {
+                        false
+                    };
+
+                    self.push(Value::Boolean(has_field))?;
+                    self.advance_pc();
+                }
+
                 Opcode::SuperIndex => {
                     let field_name = self.pop_forced()?; // Pop property name
 
@@ -745,6 +1483,8 @@ impl VirtualMachine {
                                     let super_val =
                                         field.super_obj.map(Value::Object).unwrap_or(Value::Null);
                                     self.push(super_val)?;
+                                    // Set field name for LoadFieldName opcode
+                                    self.pending_field_name = Some(field_key);
                                     self.call_closure(
                                         closure_idx,
                                         2,
@@ -822,8 +1562,23 @@ impl VirtualMachine {
                     }
 
                     // Copy value from slot to top of stack
-                    let value = self.stack[stack_slot].clone();
-                    self.push(value)?;
+                    let value = self.stack[stack_slot];
+
+                    // Force thunks: if the value is a closure marked as a thunk,
+                    // evaluate it and cache the result back in the slot.
+                    // Set Null sentinel before forcing to handle recursive references.
+                    if let Value::Closure(closure_index) = value {
+                        if self.memory_manager.load_closure(closure_index).is_thunk {
+                            self.stack[stack_slot] = Value::Null;
+                            let result = self.force_thunk(closure_index)?;
+                            self.stack[stack_slot] = result;
+                            self.push(result)?;
+                        } else {
+                            self.push(value)?;
+                        }
+                    } else {
+                        self.push(value)?;
+                    }
                 }
 
                 // Binary arithmetic operations
@@ -832,67 +1587,15 @@ impl VirtualMachine {
                     let a = self.pop_forced()?;
 
                     // Check for different addition types
+                    // String concat is checked first (except for obj+obj and arr+arr)
+                    // because Jsonnet implicitly stringifies when either operand is a string.
                     match (&a, &b) {
                         // Object merging (according to Jsonnet spec)
                         (Value::Object(left_key), Value::Object(right_key)) => {
                             let left_key = *left_key;
                             let right_key = *right_key;
-                            let (left_object, right_object) = (
-                                self.memory_manager.load_object(left_key),
-                                self.memory_manager.load_object(right_key),
-                            );
-                            // Create merged properties starting with left object
-                            let mut merged_properties = left_object.properties.clone();
-
-                            // Override/add properties from right object
-                            for (key, right_field) in &right_object.properties {
-                                // Visibility inheritance: if right visibility is ':', inherit from left if it exists
-                                let visibility =
-                                    if right_field.visibility == FieldVisibility::Visible {
-                                        if let Some(left_field) = left_object.get_field(key) {
-                                            left_field.visibility
-                                        } else {
-                                            FieldVisibility::Visible
-                                        }
-                                    } else {
-                                        right_field.visibility
-                                    };
-
-                                merged_properties.insert(
-                                    *key,
-                                    ObjectField {
-                                        value: right_field.value.clone(),
-                                        super_obj: Some(left_key), // Field's super is the left object
-                                        visibility,
-                                    },
-                                );
-                            }
-
-                            // Concatenate assertions: left then right
-                            let mut merged_assertions = left_object.assertions.clone();
-                            merged_assertions.extend(right_object.assertions.clone());
-
-                            let merged_allocation = self
-                                .memory_manager
-                                .allocate_object_full(merged_properties, merged_assertions);
-                            self.push(Value::Object(merged_allocation.index))?;
-                            if merged_allocation.should_garbage_collect {
-                                #[cfg(feature = "gc_debug")]
-                                {
-                                    eprintln!(
-                                        "[VirtualMachine] Running GC at PC={} (Object merge in Concat)",
-                                        self.current_frame().ip
-                                    );
-                                }
-                                self.run_garbage_collection();
-                            }
-                        }
-                        (Value::Object(_), _) | (_, Value::Object(_)) => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Must concatenate objects with other objects".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            let merged_key = self.merge_objects(left_key, right_key)?;
+                            self.push(Value::Object(merged_key))?;
                         }
                         // Array concatenation
                         (Value::Array(left_key), Value::Array(right_key)) => {
@@ -923,41 +1626,12 @@ impl VirtualMachine {
                                 self.run_garbage_collection();
                             }
                         }
-                        (Value::Array(_), _) | (_, Value::Array(_)) => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Must concatenate arrays with other arrays".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
-                        }
                         // String concatenation if either operand is a string
+                        // Must be before object/array error cases since Jsonnet
+                        // implicitly stringifies when either operand is a string.
                         (Value::String(_), _) | (_, Value::String(_)) => {
-                            let a_str = match &a {
-                                Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
-                                Value::Number(n) => n.to_string(),
-                                Value::Boolean(b) => b.to_string(),
-                                Value::Null => "null".to_string(),
-                                Value::Object(_)
-                                | Value::Array(_)
-                                | Value::Function(_)
-                                | Value::Closure(_)
-                                | Value::NativeFunction(_)
-                                | Value::Import(_)
-                                | Value::Binary(_) => unreachable!(),
-                            };
-                            let b_str = match &b {
-                                Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
-                                Value::Number(n) => n.to_string(),
-                                Value::Boolean(b) => b.to_string(),
-                                Value::Null => "null".to_string(),
-                                Value::Object(_)
-                                | Value::Array(_)
-                                | Value::Function(_)
-                                | Value::Closure(_)
-                                | Value::NativeFunction(_)
-                                | Value::Import(_)
-                                | Value::Binary(_) => unreachable!(),
-                            };
+                            let a_str = self.value_to_string_for_concat(&a)?;
+                            let b_str = self.value_to_string_for_concat(&b)?;
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
                             self.push(Value::String(interned.index))?;
@@ -971,6 +1645,20 @@ impl VirtualMachine {
                                 }
                                 self.run_garbage_collection();
                             }
+                        }
+                        (Value::Array(_), _) | (_, Value::Array(_)) => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Must concatenate arrays with other arrays".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                        (Value::Object(_), _) | (_, Value::Object(_)) => {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Must concatenate objects with other objects".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
                         }
                         // Numeric addition for all other cases
                         _ => {
@@ -1018,6 +1706,13 @@ impl VirtualMachine {
                     let a = self.pop_forced()?;
                     // If LHS is a string, treat % as string formatting (Python-style)
                     if matches!(a, Value::String(_)) {
+                        // Force all thunks in arguments before passing to format
+                        if let Value::Object(obj_idx) = b {
+                            self.force_object_fields(obj_idx)?;
+                        }
+                        if let Value::Array(arr_idx) = b {
+                            self.force_all_array_elements(arr_idx)?;
+                        }
                         let span = self.get_current_span();
                         let source_id = self.current_chunk().source_id.to_string();
                         let result = native::std_format_public(
@@ -1137,6 +1832,7 @@ impl VirtualMachine {
                                 Value::Closure(_) => "{closure}".to_string(),
                                 Value::Import(_) => "{import}".to_string(),
                                 Value::Binary(_) => "{binary}".to_string(),
+                                Value::Uninitialized => "{uninitialized}".to_string(),
                             };
                             let b_str = match &b {
                                 Value::String(s) => self.memory_manager.load_string(*s).to_owned(),
@@ -1151,6 +1847,7 @@ impl VirtualMachine {
                                 Value::Closure(_) => "{closure}".to_string(),
                                 Value::Import(_) => "{import}".to_string(),
                                 Value::Binary(_) => "{binary}".to_string(),
+                                Value::Uninitialized => "{uninitialized}".to_string(),
                             };
                             let result_str = format!("{}{}", a_str, b_str);
                             let interned = self.memory_manager.allocate_string(&result_str);
@@ -1297,6 +1994,22 @@ impl VirtualMachine {
                     // No need to call advance_pc() here
                 }
 
+                Opcode::BindDefault => {
+                    // Pops top of stack. If the value is NOT Uninitialized,
+                    // skip forward by u16 offset (argument was provided, no default needed).
+                    // If Uninitialized, fall through to the default initialization code.
+                    let jump_offset = self.read_u16_operand()? as usize;
+                    let value = self.pop()?;
+                    if !matches!(value, Value::Uninitialized) {
+                        // Argument was provided — push it back and skip default code
+                        // Actually we don't need to push it back since StoreVar at the end
+                        // of the default code would overwrite anyway. But we need to keep
+                        // the slot as-is (it already has the value from the caller).
+                        self.current_frame_mut().ip += jump_offset;
+                    }
+                    // If Uninitialized, fall through to compile and store the default thunk
+                }
+
                 Opcode::CreateObject => {
                     let field_count = self.read_u16_operand()?;
 
@@ -1357,19 +2070,16 @@ impl VirtualMachine {
 
                     match (closure_val, object_val) {
                         (Value::Closure(closure_idx), Value::Object(obj_idx)) => {
-                            // Attach the assertion to the object
+                            // Attach the assertion to the object for deferred checking.
+                            // Assertions are checked when the object is manifested or a field is accessed,
+                            // not at construction time, because they may reference self fields
+                            // that haven't been added yet.
                             if let Some(obj) = self.memory_manager.get_object_mut(obj_idx) {
                                 obj.assertions.push(closure_idx);
                             }
 
-                            // Push object back onto stack (it's the result of this opcode)
+                            // Push object back onto stack
                             self.push(Value::Object(obj_idx))?;
-
-                            // Execute assertion immediately for early failure detection.
-                            // Object assertions in Jsonnet are conceptually checked during manifestation,
-                            // but in an eager VM, construction is effectively the beginning of manifestation.
-                            // We use execute_thunk_sync which correctly passes self and super.
-                            self.execute_thunk_sync(closure_idx, Some(obj_idx), None)?;
                         }
                         (c, o) => {
                             return Err(RuntimeError {
@@ -1515,6 +2225,8 @@ impl VirtualMachine {
                                             .map(Value::Object)
                                             .unwrap_or(Value::Null);
                                         self.push(super_val)?; // super
+                                        // Set field name for LoadFieldName opcode
+                                        self.pending_field_name = Some(field_key);
                                         self.call_closure(
                                             closure_idx,
                                             2,
@@ -1603,7 +2315,10 @@ impl VirtualMachine {
                                     });
                                 }
 
-                                self.push(array.elements[index])?;
+                                let element = array.elements[index];
+                                // Force thunks lazily - only evaluate the accessed element
+                                let forced = self.force_array_element(array_key, index, element)?;
+                                self.push(forced)?;
                             } else {
                                 return Err(RuntimeError {
                                     span: self.get_current_span(),
@@ -1671,6 +2386,8 @@ impl VirtualMachine {
                             }
                         }
                         Value::Object(object_key) => {
+                            // Check deferred assertions before field access
+                            self.check_object_assertions(object_key)?;
                             // Object indexing with string
                             if let Value::String(field_key) = index_value {
                                 let field = self
@@ -1747,7 +2464,8 @@ impl VirtualMachine {
                                         span: self.get_current_span(),
                                         message: format!(
                                             "String index {} out of bounds (length: {})",
-                                            index, chars.len()
+                                            index,
+                                            chars.len()
                                         ),
                                         source_id: self.current_chunk().source_id.to_string(),
                                     });
@@ -2073,12 +2791,8 @@ impl VirtualMachine {
                             let new_obj_val = Value::Object(new_obj_alloc.index);
                             // Now call format with the new object
                             let new_args = vec![args[0], new_obj_val];
-                            let result = self.call_native_checked(
-                                func_id,
-                                &new_args,
-                                span,
-                                source_id,
-                            )?;
+                            let result =
+                                self.call_native_checked(func_id, &new_args, span, source_id)?;
                             self.push(result)?;
                             continue;
                         }
@@ -2241,10 +2955,21 @@ impl VirtualMachine {
                             }
                         };
 
+                        // Root args before forcing array elements (which may trigger GC)
+                        let mut roots = vec![arr_val];
+                        if let Some(kf) = key_f {
+                            roots.push(kf);
+                        }
+                        if let Some(oe) = on_empty {
+                            roots.push(oe);
+                        }
+                        self.memory_manager.external_roots.push(roots);
+                        self.force_all_array_elements(arr_idx)?;
                         let elements: Vec<Value> =
                             self.memory_manager.load_array(arr_idx).elements.clone();
 
                         if elements.is_empty() {
+                            self.memory_manager.external_roots.pop();
                             match on_empty {
                                 Some(v) => {
                                     self.push(v)?;
@@ -2333,6 +3058,7 @@ impl VirtualMachine {
                                     best = elem;
                                 }
                             }
+                            self.memory_manager.external_roots.pop(); // pop args roots
                             self.push(best)?;
                             continue;
                         }
@@ -2353,6 +3079,11 @@ impl VirtualMachine {
                                 });
                             }
                         };
+                        // Root keyF before force_all_array_elements which may trigger GC
+                        self.memory_manager
+                            .external_roots
+                            .push(vec![key_f, arr_val]);
+                        self.force_all_array_elements(arr_idx)?;
                         let elements: Vec<Value> =
                             self.memory_manager.load_array(arr_idx).elements.clone();
 
@@ -2386,6 +3117,7 @@ impl VirtualMachine {
                             last_key = Some(key);
                             result.push(elem);
                         }
+                        self.memory_manager.external_roots.pop(); // pop keyF/arrVal roots
                         let arr_alloc = self.memory_manager.allocate_array(result);
                         self.push(Value::Array(arr_alloc.index))?;
                         continue;
@@ -2446,27 +3178,22 @@ impl VirtualMachine {
                                 .allocate_object_with_properties(properties);
                             let new_obj_val = Value::Object(new_obj_alloc.index);
                             let new_args = vec![new_obj_val];
-                            let result = self.call_native_checked(
-                                func_id,
-                                &new_args,
-                                span,
-                                source_id,
-                            )?;
+                            let result =
+                                self.call_native_checked(func_id, &new_args, span, source_id)?;
                             self.push(result)?;
                             continue;
                         }
                     }
 
-                    // Handle std.toString for Array/Object via manifest_json_value
-                    if func_id == chunk::NativeFuncId::ToString
-                        && matches!(args[0], Value::Array(_) | Value::Object(_))
-                    {
-                        let span = self.get_current_span();
-                        let source_id = self.current_chunk().source_id.to_string();
-                        let json = self
-                            .manifest_json_value(args[0], "   ", "\n", ": ", 0, span, &source_id)?;
-                        let idx = self.memory_manager.allocate_string(&json);
-                        self.push(Value::String(idx.index))?;
+                    // Handle std.toString via compact single-line format
+                    if func_id == chunk::NativeFuncId::ToString {
+                        if matches!(args[0], Value::String(_)) {
+                            self.push(args[0])?;
+                        } else {
+                            let s = self.value_to_string_for_concat(&args[0])?;
+                            let alloc = self.memory_manager.allocate_string(&s);
+                            self.push(Value::String(alloc.index))?;
+                        }
                         continue;
                     }
 
@@ -2500,20 +3227,25 @@ impl VirtualMachine {
                                         });
                                     }
                                 };
-                                let n = match args[2] {
-                                    Value::String(s_idx) => {
-                                        self.memory_manager.load_string(s_idx).to_string()
+                                let n = if args.len() > 2 {
+                                    match args[2] {
+                                        Value::String(s_idx) => {
+                                            self.memory_manager.load_string(s_idx).to_string()
+                                        }
+                                        _ => {
+                                            return Err(RuntimeError {
+                                                span,
+                                                message:
+                                                    "std.manifestJsonEx: newline must be a string"
+                                                        .to_string(),
+                                                source_id,
+                                            });
+                                        }
                                     }
-                                    _ => {
-                                        return Err(RuntimeError {
-                                            span,
-                                            message: "std.manifestJsonEx: newline must be a string"
-                                                .to_string(),
-                                            source_id,
-                                        });
-                                    }
+                                } else {
+                                    "\n".to_string()
                                 };
-                                let k =
+                                let k = if args.len() > 3 {
                                     match args[3] {
                                         Value::String(s_idx) => {
                                             self.memory_manager.load_string(s_idx).to_string()
@@ -2525,13 +3257,16 @@ impl VirtualMachine {
                                                     .to_string(),
                                             source_id,
                                         }),
-                                    };
+                                    }
+                                } else {
+                                    ": ".to_string()
+                                };
                                 (i, n, k)
                             }
                             _ => unreachable!(),
                         };
                         let value = args[0];
-                        let json = self.manifest_json_value(
+                        let mut json = self.manifest_json_value(
                             value,
                             &indent,
                             &newline,
@@ -2540,6 +3275,10 @@ impl VirtualMachine {
                             span.clone(),
                             &source_id,
                         )?;
+                        // manifestJson uses "[ ]" and "{ }" for empty collections
+                        if func_id == chunk::NativeFuncId::ManifestJson {
+                            json = Self::fix_manifest_json_empties(&json);
+                        }
                         let idx = self.memory_manager.allocate_string(&json);
                         self.push(Value::String(idx.index))?;
                         continue;
@@ -3416,13 +4155,7 @@ impl VirtualMachine {
                             }
                         };
                         let s = self.memory_manager.load_string(s_idx).to_string();
-                        let parsed: serde_json::Value =
-                            serde_json::from_str(&s).map_err(|e| RuntimeError {
-                                span: span.clone(),
-                                message: format!("std.parseJson: {}", e),
-                                source_id: source_id.clone(),
-                            })?;
-                        let result = self.json_to_jsonnet_value(&parsed)?;
+                        let result = self.parse_json_value(&s, span.clone(), &source_id)?;
                         self.push(result)?;
                         continue;
                     }
@@ -3456,6 +4189,9 @@ impl VirtualMachine {
                             }
                             chunk::NativeFuncId::Set => {
                                 let arr_val = args[0];
+                                if let Value::Array(a) = arr_val {
+                                    self.force_all_array_elements(a)?;
+                                }
                                 let sorted = crate::native::call_native(
                                     chunk::NativeFuncId::Sort,
                                     &[arr_val],
@@ -3471,7 +4207,10 @@ impl VirtualMachine {
                                 let a_val = args[0];
                                 let b_val = args[1];
                                 let a_idx = match a_val {
-                                    Value::Array(i) => i,
+                                    Value::Array(i) => {
+                                        self.force_all_array_elements(i)?;
+                                        i
+                                    }
                                     _ => {
                                         return Err(RuntimeError {
                                             span,
@@ -3483,7 +4222,10 @@ impl VirtualMachine {
                                     }
                                 };
                                 let b_idx = match b_val {
-                                    Value::Array(i) => i,
+                                    Value::Array(i) => {
+                                        self.force_all_array_elements(i)?;
+                                        i
+                                    }
                                     _ => {
                                         return Err(RuntimeError {
                                             span,
@@ -3553,19 +4295,23 @@ impl VirtualMachine {
                         let span = self.get_current_span();
                         let source_id = self.current_chunk().source_id.to_string();
                         let value = args[0];
-                        let indent_array_in_object = match args[1] {
+                        let indent_array_in_object =
+                            match args.get(1).copied().unwrap_or(Value::Null) {
+                                Value::Boolean(b) => b,
+                                Value::Null => false,
+                                _ => {
+                                    return Err(RuntimeError {
+                                        span,
+                                        message:
+                                            "manifestYamlDoc: indent_array_in_object must be bool"
+                                                .to_string(),
+                                        source_id,
+                                    });
+                                }
+                            };
+                        let quote_keys = match args.get(2).copied().unwrap_or(Value::Null) {
                             Value::Boolean(b) => b,
-                            _ => {
-                                return Err(RuntimeError {
-                                    span,
-                                    message: "manifestYamlDoc: indent_array_in_object must be bool"
-                                        .to_string(),
-                                    source_id,
-                                });
-                            }
-                        };
-                        let quote_keys = match args[2] {
-                            Value::Boolean(b) => b,
+                            Value::Null => true,
                             _ => {
                                 return Err(RuntimeError {
                                     span,
@@ -3592,20 +4338,23 @@ impl VirtualMachine {
                         let span = self.get_current_span();
                         let source_id = self.current_chunk().source_id.to_string();
                         let value = args[0];
-                        let indent_array_in_object = match args[1] {
-                            Value::Boolean(b) => b,
-                            _ => {
-                                return Err(RuntimeError {
+                        let indent_array_in_object =
+                            match args.get(1).copied().unwrap_or(Value::Null) {
+                                Value::Boolean(b) => b,
+                                Value::Null => false,
+                                _ => {
+                                    return Err(RuntimeError {
                                     span,
                                     message:
                                         "manifestYamlStream: indent_array_in_object must be bool"
                                             .to_string(),
                                     source_id,
                                 });
-                            }
-                        };
-                        let c_document_end = match args[2] {
+                                }
+                            };
+                        let c_document_end = match args.get(2).copied().unwrap_or(Value::Null) {
                             Value::Boolean(b) => b,
+                            Value::Null => true,
                             _ => {
                                 return Err(RuntimeError {
                                     span,
@@ -3615,8 +4364,9 @@ impl VirtualMachine {
                                 });
                             }
                         };
-                        let quote_keys = match args[3] {
+                        let quote_keys = match args.get(3).copied().unwrap_or(Value::Null) {
                             Value::Boolean(b) => b,
+                            Value::Null => true,
                             _ => {
                                 return Err(RuntimeError {
                                     span,
@@ -3653,13 +4403,7 @@ impl VirtualMachine {
                                 });
                             }
                         };
-                        let yaml_val: serde_yaml::Value =
-                            serde_yaml::from_str(&s).map_err(|e| RuntimeError {
-                                span: span.clone(),
-                                message: format!("parseYaml: {}", e),
-                                source_id: source_id.clone(),
-                            })?;
-                        let result = self.serde_yaml_to_jsonnet_value(yaml_val, span, source_id)?;
+                        let result = self.parse_yaml_multi_doc(&s, span, source_id)?;
                         self.push(result)?;
                         continue;
                     }
@@ -3996,9 +4740,15 @@ impl VirtualMachine {
                                 });
                             }
                         };
+                        // Root keyF before forcing array elements (which may trigger GC)
+                        self.memory_manager
+                            .external_roots
+                            .push(vec![key_f, arr_val]);
+                        self.force_all_array_elements(arr_idx)?;
                         let elements: Vec<Value> =
                             self.memory_manager.load_array(arr_idx).elements.clone();
                         if elements.is_empty() {
+                            self.memory_manager.external_roots.pop();
                             return Err(RuntimeError {
                                 span: self.get_current_span(),
                                 message: format!("std.{}: array must not be empty", func_id.name()),
@@ -4050,6 +4800,7 @@ impl VirtualMachine {
                                 best_elem = elem;
                             }
                         }
+                        self.memory_manager.external_roots.pop(); // pop keyF/arrVal roots
                         self.push(best_elem)?;
                         continue;
                     }
@@ -4351,8 +5102,7 @@ impl VirtualMachine {
                     // Call native function
                     let span = self.get_current_span();
                     let source_id = self.current_chunk().source_id.to_string();
-                    let result =
-                        self.call_native_checked(func_id, &args, span, source_id)?;
+                    let result = self.call_native_checked(func_id, &args, span, source_id)?;
 
                     self.push(result)?;
                 }
@@ -4545,94 +5295,246 @@ impl VirtualMachine {
                     let named_count = chunk.code[frame.ip + 2] as usize;
                     self.current_frame_mut().ip += 3; // opcode + 2 bytes
 
-                    // For now, only support positional arguments
-                    if named_count > 0 {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Named arguments not yet implemented".to_string(),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
-                    }
+                    // Total stack items for args: positional + named*2 (name+value pairs)
+                    let total_stack_items = positional_count + named_count * 2;
 
-                    let arg_count = positional_count;
-
-                    // Get callee from stack (it's at position: stack.len() - arg_count - 1)
-                    let callee_position = self.stack.len() - arg_count - 1;
-                    if callee_position >= self.stack.len() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!(
-                                "Invalid stack access for callee at position {} (stack size: {})",
-                                callee_position,
-                                self.stack.len()
-                            ),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
-                    }
+                    // Get callee from stack
+                    let callee_position = self.stack.len() - total_stack_items - 1;
 
                     let mut callee = self.stack[callee_position];
                     callee = self.force_value(callee)?;
-                    self.stack[callee_position] = callee; // update stack
+                    self.stack[callee_position] = callee;
 
-                    match callee {
-                        Value::Closure(closure_index) => {
+                    if named_count > 0 {
+                        if let Value::Closure(closure_index) = callee {
+                            // Resolve named arguments using function's param_names
+                            let func_index =
+                                self.memory_manager.load_closure(closure_index).function;
+                            let function = self.memory_manager.load_function(func_index);
+                            let arity = function.arity as usize;
+                            let param_names = function.param_names.clone();
+
+                            // Collect named args from stack (name, value pairs)
+                            let mut named_args: Vec<(StringIndex, Value)> = Vec::new();
+                            for _ in 0..named_count {
+                                let value = self.pop()?;
+                                let name_val = self.pop()?;
+                                if let Value::String(name_idx) = name_val {
+                                    named_args.push((name_idx, value));
+                                } else {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: "Named argument name must be a string".to_string(),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            }
+
+                            // Collect positional args
+                            let mut positional_args: Vec<Value> = Vec::new();
+                            for _ in 0..positional_count {
+                                positional_args.push(self.pop()?);
+                            }
+                            positional_args.reverse();
+
+                            // Pop callee
+                            self.pop()?;
+
+                            // Build full argument array
+                            let mut args = vec![Value::Uninitialized; arity];
+
+                            // Fill positional args
+                            for (i, val) in positional_args.into_iter().enumerate() {
+                                if i < arity {
+                                    args[i] = val;
+                                }
+                            }
+
+                            // Fill named args by matching param names
+                            for (name_idx, val) in named_args {
+                                let pos = param_names.iter().position(|&pn| pn == name_idx);
+                                if let Some(pos) = pos {
+                                    if !matches!(args[pos], Value::Uninitialized) {
+                                        let name_str =
+                                            self.memory_manager.load_string(name_idx).to_string();
+                                        return Err(RuntimeError {
+                                            span: self.get_current_span(),
+                                            message: format!(
+                                                "Argument '{}' already provided positionally",
+                                                name_str,
+                                            ),
+                                            source_id: self.current_chunk().source_id.to_string(),
+                                        });
+                                    }
+                                    args[pos] = val;
+                                } else {
+                                    let name_str =
+                                        self.memory_manager.load_string(name_idx).to_string();
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "Function has no parameter named '{}'",
+                                            name_str,
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            }
+
+                            // Push callee and args back onto stack
+                            self.push(Value::Closure(closure_index))?;
+                            let arg_count = args.len();
+                            for val in args {
+                                self.push(val)?;
+                            }
                             self.call_closure(closure_index, arg_count, None, None)?;
-                        }
-                        Value::NativeFunction(id) => {
-                            // Extract arguments from stack
-                            let args = self.stack[self.stack.len() - arg_count..].to_vec();
-                            // Pop arguments and callee
-                            for _ in 0..=arg_count {
+                        } else if let Value::NativeFunction(id) = callee {
+                            // Resolve named arguments for native functions
+                            let native_param_names = id.param_names();
+                            let arity = id.arity() as usize;
+
+                            let mut named_args: Vec<(StringIndex, Value)> = Vec::new();
+                            for _ in 0..named_count {
+                                let value = self.pop()?;
+                                let name_val = self.pop()?;
+                                if let Value::String(name_idx) = name_val {
+                                    named_args.push((name_idx, value));
+                                } else {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: "Named argument name must be a string".to_string(),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            }
+
+                            let mut positional_args: Vec<Value> = Vec::new();
+                            for _ in 0..positional_count {
+                                positional_args.push(self.pop()?);
+                            }
+                            positional_args.reverse();
+                            self.pop()?; // pop callee
+
+                            let mut args = vec![Value::Null; arity];
+                            for (i, val) in positional_args.into_iter().enumerate() {
+                                if i < arity {
+                                    args[i] = val;
+                                }
+                            }
+                            for (name_idx, val) in named_args {
+                                let name_str =
+                                    self.memory_manager.load_string(name_idx).to_string();
+                                if let Some(pos) =
+                                    native_param_names.iter().position(|&pn| pn == name_str)
+                                {
+                                    args[pos] = val;
+                                } else {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: format!(
+                                            "std.{} has no parameter named '{}'",
+                                            id.name(),
+                                            name_str,
+                                        ),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            }
+
+                            // Push resolved args back onto stack as positional call
+                            self.push(Value::NativeFunction(id))?;
+                            let resolved_arg_count = args.len();
+                            for val in args {
+                                self.push(val)?;
+                            }
+                            // Fall through to the positional NativeFunction handler below
+                            // by extracting args from stack
+                            let args = self.stack[self.stack.len() - resolved_arg_count..].to_vec();
+                            for _ in 0..=resolved_arg_count {
                                 self.pop()?;
                             }
 
-                            if matches!(
-                                id,
-                                chunk::NativeFuncId::MergePatch
-                                    | chunk::NativeFuncId::Prune
-                                    | chunk::NativeFuncId::Uniq
-                                    | chunk::NativeFuncId::Set
-                                    | chunk::NativeFuncId::SetUnion
-                            ) {
-                                let span = self.get_current_span();
-                                let source_id = self.current_chunk().source_id.to_string();
+                            // Delegate to the same handling as positional native calls
+                            // (handles special cases like MakeArray, Map, etc.)
+                            let span = self.get_current_span();
+                            let source_id = self.current_chunk().source_id.to_string();
+                            let result = self.call_native_checked(id, &args, span, source_id)?;
+                            self.push(result)?;
+                        } else {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Named arguments only supported for functions".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    } else {
+                        let arg_count = positional_count;
+                        match callee {
+                            Value::Closure(closure_index) => {
+                                self.call_closure(closure_index, arg_count, None, None)?;
+                            }
+                            Value::NativeFunction(id) => {
+                                // Extract arguments from stack
+                                let args = self.stack[self.stack.len() - arg_count..].to_vec();
+                                // Pop arguments and callee
+                                for _ in 0..=arg_count {
+                                    self.pop()?;
+                                }
 
-                                match id {
-                                    chunk::NativeFuncId::MergePatch => {
-                                        let result = self.merge_patch_value(args[0], args[1])?;
-                                        self.push(result)?;
-                                        continue;
-                                    }
-                                    chunk::NativeFuncId::Prune => {
-                                        let result = self.prune_value(args[0])?;
-                                        self.push(result)?;
-                                        continue;
-                                    }
-                                    chunk::NativeFuncId::Uniq => {
-                                        let result =
-                                            self.uniq_value(args[0], args.get(1).copied())?;
-                                        self.push(result)?;
-                                        continue;
-                                    }
-                                    chunk::NativeFuncId::Set => {
-                                        let arr_val = args[0];
-                                        let sorted = crate::native::call_native(
-                                            chunk::NativeFuncId::Sort,
-                                            &[arr_val],
-                                            &mut self.memory_manager,
-                                            span.clone(),
-                                            source_id.clone(),
-                                        )?;
-                                        let result =
-                                            self.uniq_value(sorted, args.get(1).copied())?;
-                                        self.push(result)?;
-                                        continue;
-                                    }
-                                    chunk::NativeFuncId::SetUnion => {
-                                        let a_val = args[0];
-                                        let b_val = args[1];
-                                        let a_idx = match a_val {
-                                            Value::Array(i) => i,
+                                if matches!(
+                                    id,
+                                    chunk::NativeFuncId::MergePatch
+                                        | chunk::NativeFuncId::Prune
+                                        | chunk::NativeFuncId::Uniq
+                                        | chunk::NativeFuncId::Set
+                                        | chunk::NativeFuncId::SetUnion
+                                ) {
+                                    let span = self.get_current_span();
+                                    let source_id = self.current_chunk().source_id.to_string();
+
+                                    match id {
+                                        chunk::NativeFuncId::MergePatch => {
+                                            let result =
+                                                self.merge_patch_value(args[0], args[1])?;
+                                            self.push(result)?;
+                                            continue;
+                                        }
+                                        chunk::NativeFuncId::Prune => {
+                                            let result = self.prune_value(args[0])?;
+                                            self.push(result)?;
+                                            continue;
+                                        }
+                                        chunk::NativeFuncId::Uniq => {
+                                            let result =
+                                                self.uniq_value(args[0], args.get(1).copied())?;
+                                            self.push(result)?;
+                                            continue;
+                                        }
+                                        chunk::NativeFuncId::Set => {
+                                            let arr_val = args[0];
+                                            if let Value::Array(a) = arr_val {
+                                                self.force_all_array_elements(a)?;
+                                            }
+                                            let sorted = crate::native::call_native(
+                                                chunk::NativeFuncId::Sort,
+                                                &[arr_val],
+                                                &mut self.memory_manager,
+                                                span.clone(),
+                                                source_id.clone(),
+                                            )?;
+                                            let result =
+                                                self.uniq_value(sorted, args.get(1).copied())?;
+                                            self.push(result)?;
+                                            continue;
+                                        }
+                                        chunk::NativeFuncId::SetUnion => {
+                                            let a_val = args[0];
+                                            let b_val = args[1];
+                                            let a_idx = match a_val {
+                                            Value::Array(i) => {
+                                                self.force_all_array_elements(i)?;
+                                                i
+                                            }
                                             _ => return Err(RuntimeError {
                                                 span,
                                                 message:
@@ -4641,8 +5543,11 @@ impl VirtualMachine {
                                                 source_id,
                                             }),
                                         };
-                                        let b_idx = match b_val {
-                                            Value::Array(i) => i,
+                                            let b_idx = match b_val {
+                                            Value::Array(i) => {
+                                                self.force_all_array_elements(i)?;
+                                                i
+                                            }
                                             _ => return Err(RuntimeError {
                                                 span,
                                                 message:
@@ -4651,298 +5556,319 @@ impl VirtualMachine {
                                                 source_id,
                                             }),
                                         };
-                                        let mut combined =
-                                            self.memory_manager.load_array(a_idx).elements.clone();
-                                        combined.extend_from_slice(
-                                            &self.memory_manager.load_array(b_idx).elements.clone(),
-                                        );
-                                        let alloc = self.memory_manager.allocate_array(combined);
-                                        let sorted = crate::native::call_native(
-                                            chunk::NativeFuncId::Sort,
-                                            &[Value::Array(alloc.index)],
-                                            &mut self.memory_manager,
-                                            span.clone(),
-                                            source_id.clone(),
-                                        )?;
-                                        let result =
-                                            self.uniq_value(sorted, args.get(2).copied())?;
-                                        self.push(result)?;
-                                        continue;
+                                            let mut combined = self
+                                                .memory_manager
+                                                .load_array(a_idx)
+                                                .elements
+                                                .clone();
+                                            combined.extend_from_slice(
+                                                &self
+                                                    .memory_manager
+                                                    .load_array(b_idx)
+                                                    .elements
+                                                    .clone(),
+                                            );
+                                            let alloc =
+                                                self.memory_manager.allocate_array(combined);
+                                            let sorted = crate::native::call_native(
+                                                chunk::NativeFuncId::Sort,
+                                                &[Value::Array(alloc.index)],
+                                                &mut self.memory_manager,
+                                                span.clone(),
+                                                source_id.clone(),
+                                            )?;
+                                            let result =
+                                                self.uniq_value(sorted, args.get(2).copied())?;
+                                            self.push(result)?;
+                                            continue;
+                                        }
+                                        _ => unreachable!(),
                                     }
-                                    _ => unreachable!(),
                                 }
-                            }
 
-                            // Handle manifestIni
-                            if id == chunk::NativeFuncId::ManifestIni {
-                                let span = self.get_current_span();
-                                let source_id = self.current_chunk().source_id.to_string();
-                                let value = args[0];
-                                let result = self.manifest_ini(value, span, source_id)?;
-                                let idx = self.memory_manager.allocate_string(&result);
-                                self.push(Value::String(idx.index))?;
-                                continue;
-                            }
+                                // Handle manifestIni
+                                if id == chunk::NativeFuncId::ManifestIni {
+                                    let span = self.get_current_span();
+                                    let source_id = self.current_chunk().source_id.to_string();
+                                    let value = args[0];
+                                    let result = self.manifest_ini(value, span, source_id)?;
+                                    let idx = self.memory_manager.allocate_string(&result);
+                                    self.push(Value::String(idx.index))?;
+                                    continue;
+                                }
 
-                            // Handle manifestPython
-                            if id == chunk::NativeFuncId::ManifestPython {
-                                let span = self.get_current_span();
-                                let source_id = self.current_chunk().source_id.to_string();
-                                let value = args[0];
-                                let result =
-                                    self.manifest_python_value(value, 0, span, source_id)?;
-                                let idx = self.memory_manager.allocate_string(&result);
-                                self.push(Value::String(idx.index))?;
-                                continue;
-                            }
+                                // Handle manifestPython
+                                if id == chunk::NativeFuncId::ManifestPython {
+                                    let span = self.get_current_span();
+                                    let source_id = self.current_chunk().source_id.to_string();
+                                    let value = args[0];
+                                    let result =
+                                        self.manifest_python_value(value, 0, span, source_id)?;
+                                    let idx = self.memory_manager.allocate_string(&result);
+                                    self.push(Value::String(idx.index))?;
+                                    continue;
+                                }
 
-                            // Handle manifestPythonVars
-                            if id == chunk::NativeFuncId::ManifestPythonVars {
-                                let span = self.get_current_span();
-                                let source_id = self.current_chunk().source_id.to_string();
-                                let value = args[0];
-                                let result = self.manifest_python_vars(value, span, source_id)?;
-                                let idx = self.memory_manager.allocate_string(&result);
-                                self.push(Value::String(idx.index))?;
-                                continue;
-                            }
+                                // Handle manifestPythonVars
+                                if id == chunk::NativeFuncId::ManifestPythonVars {
+                                    let span = self.get_current_span();
+                                    let source_id = self.current_chunk().source_id.to_string();
+                                    let value = args[0];
+                                    let result =
+                                        self.manifest_python_vars(value, span, source_id)?;
+                                    let idx = self.memory_manager.allocate_string(&result);
+                                    self.push(Value::String(idx.index))?;
+                                    continue;
+                                }
 
-                            // Handle manifestYamlDoc
-                            if id == chunk::NativeFuncId::ManifestYamlDoc {
-                                let span = self.get_current_span();
-                                let source_id = self.current_chunk().source_id.to_string();
-                                let value = args[0];
-                                let indent_array_in_object = match args[1] {
-                                    Value::Boolean(b) => b,
-                                    _ => {
-                                        return Err(RuntimeError {
+                                // Handle manifestYamlDoc
+                                if id == chunk::NativeFuncId::ManifestYamlDoc {
+                                    let span = self.get_current_span();
+                                    let source_id = self.current_chunk().source_id.to_string();
+                                    let value = args[0];
+                                    let indent_array_in_object = match args
+                                        .get(1)
+                                        .copied()
+                                        .unwrap_or(Value::Null)
+                                    {
+                                        Value::Boolean(b) => b,
+                                        Value::Null => false,
+                                        _ => {
+                                            return Err(RuntimeError {
                                             span,
                                             message:
                                                 "manifestYamlDoc: indent_array_in_object must be bool"
                                                     .to_string(),
                                             source_id,
                                         });
-                                    }
-                                };
-                                let quote_keys = match args[2] {
-                                    Value::Boolean(b) => b,
-                                    _ => {
-                                        return Err(RuntimeError {
-                                            span,
-                                            message: "manifestYamlDoc: quote_keys must be bool"
-                                                .to_string(),
-                                            source_id,
-                                        });
-                                    }
-                                };
-                                let result = self.manifest_yaml_doc(
-                                    value,
-                                    0,
-                                    indent_array_in_object,
-                                    quote_keys,
-                                    span,
-                                    source_id,
-                                )?;
-                                let idx = self.memory_manager.allocate_string(&result);
-                                self.push(Value::String(idx.index))?;
-                                continue;
-                            }
+                                        }
+                                    };
+                                    let quote_keys =
+                                        match args.get(2).copied().unwrap_or(Value::Null) {
+                                            Value::Boolean(b) => b,
+                                            Value::Null => true,
+                                            _ => {
+                                                return Err(RuntimeError {
+                                                    span,
+                                                    message:
+                                                        "manifestYamlDoc: quote_keys must be bool"
+                                                            .to_string(),
+                                                    source_id,
+                                                });
+                                            }
+                                        };
+                                    let result = self.manifest_yaml_doc(
+                                        value,
+                                        0,
+                                        indent_array_in_object,
+                                        quote_keys,
+                                        span,
+                                        source_id,
+                                    )?;
+                                    let idx = self.memory_manager.allocate_string(&result);
+                                    self.push(Value::String(idx.index))?;
+                                    continue;
+                                }
 
-                            // Handle manifestYamlStream
-                            if id == chunk::NativeFuncId::ManifestYamlStream {
-                                let span = self.get_current_span();
-                                let source_id = self.current_chunk().source_id.to_string();
-                                let value = args[0];
-                                let indent_array_in_object = match args[1] {
-                                    Value::Boolean(b) => b,
-                                    _ => {
-                                        return Err(RuntimeError {
+                                // Handle manifestYamlStream
+                                if id == chunk::NativeFuncId::ManifestYamlStream {
+                                    let span = self.get_current_span();
+                                    let source_id = self.current_chunk().source_id.to_string();
+                                    let value = args[0];
+                                    let indent_array_in_object = match args
+                                        .get(1)
+                                        .copied()
+                                        .unwrap_or(Value::Null)
+                                    {
+                                        Value::Boolean(b) => b,
+                                        Value::Null => false,
+                                        _ => {
+                                            return Err(RuntimeError {
                                             span,
                                             message: "manifestYamlStream: indent_array_in_object must be bool".to_string(),
                                             source_id,
                                         });
-                                    }
-                                };
-                                let c_document_end = match args[2] {
-                                    Value::Boolean(b) => b,
-                                    _ => {
-                                        return Err(RuntimeError {
+                                        }
+                                    };
+                                    let c_document_end =
+                                        match args.get(2).copied().unwrap_or(Value::Null) {
+                                            Value::Boolean(b) => b,
+                                            Value::Null => true,
+                                            _ => {
+                                                return Err(RuntimeError {
                                             span,
                                             message:
                                                 "manifestYamlStream: c_document_end must be bool"
                                                     .to_string(),
                                             source_id,
                                         });
-                                    }
-                                };
-                                let quote_keys = match args[3] {
-                                    Value::Boolean(b) => b,
-                                    _ => {
-                                        return Err(RuntimeError {
-                                            span,
-                                            message: "manifestYamlStream: quote_keys must be bool"
-                                                .to_string(),
-                                            source_id,
-                                        });
-                                    }
-                                };
-                                let result = self.manifest_yaml_stream(
-                                    value,
-                                    indent_array_in_object,
-                                    c_document_end,
-                                    quote_keys,
-                                    span,
-                                    source_id,
-                                )?;
-                                let idx = self.memory_manager.allocate_string(&result);
-                                self.push(Value::String(idx.index))?;
-                                continue;
-                            }
+                                            }
+                                        };
+                                    let quote_keys =
+                                        match args.get(3).copied().unwrap_or(Value::Null) {
+                                            Value::Boolean(b) => b,
+                                            Value::Null => true,
+                                            _ => {
+                                                return Err(RuntimeError {
+                                                span,
+                                                message:
+                                                    "manifestYamlStream: quote_keys must be bool"
+                                                        .to_string(),
+                                                source_id,
+                                            });
+                                            }
+                                        };
+                                    let result = self.manifest_yaml_stream(
+                                        value,
+                                        indent_array_in_object,
+                                        c_document_end,
+                                        quote_keys,
+                                        span,
+                                        source_id,
+                                    )?;
+                                    let idx = self.memory_manager.allocate_string(&result);
+                                    self.push(Value::String(idx.index))?;
+                                    continue;
+                                }
 
-                            // Handle parseYaml
-                            if id == chunk::NativeFuncId::ParseYaml {
-                                let span = self.get_current_span();
-                                let source_id = self.current_chunk().source_id.to_string();
-                                let s = match args[0] {
-                                    Value::String(idx) => {
-                                        self.memory_manager.load_string(idx).to_string()
-                                    }
-                                    _ => {
-                                        return Err(RuntimeError {
-                                            span,
-                                            message: "parseYaml: argument must be a string"
-                                                .to_string(),
-                                            source_id,
-                                        });
-                                    }
-                                };
-                                let yaml_val: serde_yaml::Value = serde_yaml::from_str(&s)
-                                    .map_err(|e| RuntimeError {
-                                        span: span.clone(),
-                                        message: format!("parseYaml: {}", e),
-                                        source_id: source_id.clone(),
-                                    })?;
-                                let result =
-                                    self.serde_yaml_to_jsonnet_value(yaml_val, span, source_id)?;
-                                self.push(result)?;
-                                continue;
-                            }
-
-                            // Handle manifestXmlJsonml
-                            if id == chunk::NativeFuncId::ManifestXmlJsonml {
-                                let span = self.get_current_span();
-                                let source_id = self.current_chunk().source_id.to_string();
-                                let value = args[0];
-                                let result = self.manifest_xml_jsonml(value, span, source_id)?;
-                                let idx = self.memory_manager.allocate_string(&result);
-                                self.push(Value::String(idx.index))?;
-                                continue;
-                            }
-
-                            // Handle manifestTomlEx
-                            if id == chunk::NativeFuncId::ManifestTomlEx {
-                                let span = self.get_current_span();
-                                let source_id = self.current_chunk().source_id.to_string();
-                                let value = args[0];
-                                let indent = match args[1] {
-                                    Value::String(idx) => {
-                                        self.memory_manager.load_string(idx).to_string()
-                                    }
-                                    _ => {
-                                        return Err(RuntimeError {
-                                            span,
-                                            message: "manifestTomlEx: indent must be a string"
-                                                .to_string(),
-                                            source_id,
-                                        });
-                                    }
-                                };
-                                let result =
-                                    self.manifest_toml_ex(value, &indent.clone(), span, source_id)?;
-                                let idx = self.memory_manager.allocate_string(&result);
-                                self.push(Value::String(idx.index))?;
-                                continue;
-                            }
-
-                            // Handle std.minArray / std.maxArray with optional keyF and onEmpty
-                            if matches!(
-                                id,
-                                chunk::NativeFuncId::MinArray | chunk::NativeFuncId::MaxArray
-                            ) && args.len() >= 2
-                            {
-                                let arr_val = args[0];
-                                let key_f = args.get(1).copied();
-                                let on_empty = args.get(2).copied();
-
-                                let arr_idx = match arr_val {
-                                    Value::Array(a) => a,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "std.{} expected array, got {}",
-                                                id.name(),
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-
-                                let elements: Vec<Value> =
-                                    self.memory_manager.load_array(arr_idx).elements.clone();
-
-                                if elements.is_empty() {
-                                    match on_empty {
-                                        Some(v) => {
-                                            self.push(v)?;
-                                            continue;
+                                // Handle parseYaml
+                                if id == chunk::NativeFuncId::ParseYaml {
+                                    let span = self.get_current_span();
+                                    let source_id = self.current_chunk().source_id.to_string();
+                                    let s = match args[0] {
+                                        Value::String(idx) => {
+                                            self.memory_manager.load_string(idx).to_string()
                                         }
-                                        None => {
+                                        _ => {
+                                            return Err(RuntimeError {
+                                                span,
+                                                message: "parseYaml: argument must be a string"
+                                                    .to_string(),
+                                                source_id,
+                                            });
+                                        }
+                                    };
+                                    let result = self.parse_yaml_multi_doc(&s, span, source_id)?;
+                                    self.push(result)?;
+                                    continue;
+                                }
+
+                                // Handle manifestXmlJsonml
+                                if id == chunk::NativeFuncId::ManifestXmlJsonml {
+                                    let span = self.get_current_span();
+                                    let source_id = self.current_chunk().source_id.to_string();
+                                    let value = args[0];
+                                    let result =
+                                        self.manifest_xml_jsonml(value, span, source_id)?;
+                                    let idx = self.memory_manager.allocate_string(&result);
+                                    self.push(Value::String(idx.index))?;
+                                    continue;
+                                }
+
+                                // Handle manifestTomlEx
+                                if id == chunk::NativeFuncId::ManifestTomlEx {
+                                    let span = self.get_current_span();
+                                    let source_id = self.current_chunk().source_id.to_string();
+                                    let value = args[0];
+                                    let indent = match args[1] {
+                                        Value::String(idx) => {
+                                            self.memory_manager.load_string(idx).to_string()
+                                        }
+                                        _ => {
+                                            return Err(RuntimeError {
+                                                span,
+                                                message: "manifestTomlEx: indent must be a string"
+                                                    .to_string(),
+                                                source_id,
+                                            });
+                                        }
+                                    };
+                                    let result = self.manifest_toml_ex(
+                                        value,
+                                        &indent.clone(),
+                                        span,
+                                        source_id,
+                                    )?;
+                                    let idx = self.memory_manager.allocate_string(&result);
+                                    self.push(Value::String(idx.index))?;
+                                    continue;
+                                }
+
+                                // Handle std.minArray / std.maxArray with optional keyF and onEmpty
+                                if matches!(
+                                    id,
+                                    chunk::NativeFuncId::MinArray | chunk::NativeFuncId::MaxArray
+                                ) && args.len() >= 2
+                                {
+                                    let arr_val = args[0];
+                                    let key_f = args.get(1).copied();
+                                    let on_empty = args.get(2).copied();
+
+                                    let arr_idx = match arr_val {
+                                        Value::Array(a) => a,
+                                        other => {
                                             return Err(RuntimeError {
                                                 span: self.get_current_span(),
-                                                message: format!("std.{}: empty array", id.name()),
+                                                message: format!(
+                                                    "std.{} expected array, got {}",
+                                                    id.name(),
+                                                    other.type_name()
+                                                ),
                                                 source_id: self
                                                     .current_chunk()
                                                     .source_id
                                                     .to_string(),
                                             });
                                         }
-                                    }
-                                }
-
-                                let effective_key_f = match key_f {
-                                    None | Some(Value::Null) => None,
-                                    Some(v) => Some(v),
-                                };
-
-                                if let Some(key_f_val) = effective_key_f {
-                                    let mut best_elem = elements[0];
-                                    let mut best_key = {
-                                        let mut roots = Vec::from(self.stack.clone());
-                                        roots.extend_from_slice(&elements);
-                                        roots.push(key_f_val);
-                                        let mut open_upvalue_roots = Vec::new();
-                                        let mut upvalue = self.open_upvalues;
-                                        while let Some(uv_idx) = upvalue {
-                                            open_upvalue_roots.push(uv_idx);
-                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                        }
-                                        self.memory_manager
-                                            .push_external_roots(roots, open_upvalue_roots);
-                                        let k =
-                                            self.call_value_with_one_arg(key_f_val, elements[0]);
-                                        self.memory_manager.pop_external_roots();
-                                        k?
                                     };
 
-                                    for &elem in elements.iter().skip(1) {
-                                        let key = {
+                                    // Root args before forcing array elements (which may trigger GC)
+                                    let mut roots = vec![arr_val];
+                                    if let Some(kf) = key_f {
+                                        roots.push(kf);
+                                    }
+                                    if let Some(oe) = on_empty {
+                                        roots.push(oe);
+                                    }
+                                    self.memory_manager.external_roots.push(roots);
+                                    self.force_all_array_elements(arr_idx)?;
+                                    let elements: Vec<Value> =
+                                        self.memory_manager.load_array(arr_idx).elements.clone();
+
+                                    if elements.is_empty() {
+                                        self.memory_manager.external_roots.pop();
+                                        match on_empty {
+                                            Some(v) => {
+                                                self.push(v)?;
+                                                continue;
+                                            }
+                                            None => {
+                                                return Err(RuntimeError {
+                                                    span: self.get_current_span(),
+                                                    message: format!(
+                                                        "std.{}: empty array",
+                                                        id.name()
+                                                    ),
+                                                    source_id: self
+                                                        .current_chunk()
+                                                        .source_id
+                                                        .to_string(),
+                                                });
+                                            }
+                                        }
+                                    }
+
+                                    let effective_key_f = match key_f {
+                                        None | Some(Value::Null) => None,
+                                        Some(v) => Some(v),
+                                    };
+
+                                    if let Some(key_f_val) = effective_key_f {
+                                        let mut best_elem = elements[0];
+                                        let mut best_key = {
                                             let mut roots = Vec::from(self.stack.clone());
                                             roots.extend_from_slice(&elements);
                                             roots.push(key_f_val);
-                                            roots.push(best_elem);
-                                            roots.push(best_key);
                                             let mut open_upvalue_roots = Vec::new();
                                             let mut upvalue = self.open_upvalues;
                                             while let Some(uv_idx) = upvalue {
@@ -4952,335 +5878,161 @@ impl VirtualMachine {
                                             }
                                             self.memory_manager
                                                 .push_external_roots(roots, open_upvalue_roots);
-                                            let k = self.call_value_with_one_arg(key_f_val, elem);
+                                            let k = self
+                                                .call_value_with_one_arg(key_f_val, elements[0]);
                                             self.memory_manager.pop_external_roots();
                                             k?
                                         };
-                                        let ord = native::compare_values(
-                                            key,
-                                            best_key,
-                                            &self.memory_manager,
-                                        );
-                                        let take = if id == chunk::NativeFuncId::MinArray {
-                                            ord == std::cmp::Ordering::Less
-                                        } else {
-                                            ord == std::cmp::Ordering::Greater
-                                        };
-                                        if take {
-                                            best_key = key;
-                                            best_elem = elem;
-                                        }
-                                    }
-                                    self.push(best_elem)?;
-                                    continue;
-                                } else {
-                                    let mut best = elements[0];
-                                    for &elem in elements.iter().skip(1) {
-                                        let ord = native::compare_values(
-                                            elem,
-                                            best,
-                                            &self.memory_manager,
-                                        );
-                                        let take = if id == chunk::NativeFuncId::MinArray {
-                                            ord == std::cmp::Ordering::Less
-                                        } else {
-                                            ord == std::cmp::Ordering::Greater
-                                        };
-                                        if take {
-                                            best = elem;
-                                        }
-                                    }
-                                    self.push(best)?;
-                                    continue;
-                                }
-                            }
 
-                            // Handle std.extVar
-                            if id == chunk::NativeFuncId::ExtVar {
-                                let span = self.get_current_span();
-                                let source_id = self.current_chunk().source_id.to_string();
-                                let key = match args[0] {
-                                    Value::String(idx) => {
-                                        self.memory_manager.load_string(idx).to_string()
-                                    }
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span,
-                                            message: format!(
-                                                "std.extVar: argument must be a string, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id,
-                                        });
-                                    }
-                                };
-                                match self.ext_vars.get(&key).copied() {
-                                    Some(val) => {
-                                        self.push(val)?;
+                                        for &elem in elements.iter().skip(1) {
+                                            let key = {
+                                                let mut roots = Vec::from(self.stack.clone());
+                                                roots.extend_from_slice(&elements);
+                                                roots.push(key_f_val);
+                                                roots.push(best_elem);
+                                                roots.push(best_key);
+                                                let mut open_upvalue_roots = Vec::new();
+                                                let mut upvalue = self.open_upvalues;
+                                                while let Some(uv_idx) = upvalue {
+                                                    open_upvalue_roots.push(uv_idx);
+                                                    upvalue = self
+                                                        .memory_manager
+                                                        .load_upvalue(uv_idx)
+                                                        .next;
+                                                }
+                                                self.memory_manager
+                                                    .push_external_roots(roots, open_upvalue_roots);
+                                                let k =
+                                                    self.call_value_with_one_arg(key_f_val, elem);
+                                                self.memory_manager.pop_external_roots();
+                                                k?
+                                            };
+                                            let ord = native::compare_values(
+                                                key,
+                                                best_key,
+                                                &self.memory_manager,
+                                            );
+                                            let take = if id == chunk::NativeFuncId::MinArray {
+                                                ord == std::cmp::Ordering::Less
+                                            } else {
+                                                ord == std::cmp::Ordering::Greater
+                                            };
+                                            if take {
+                                                best_key = key;
+                                                best_elem = elem;
+                                            }
+                                        }
+                                        self.memory_manager.external_roots.pop(); // pop args roots
+                                        self.push(best_elem)?;
+                                        continue;
+                                    } else {
+                                        let mut best = elements[0];
+                                        for &elem in elements.iter().skip(1) {
+                                            let ord = native::compare_values(
+                                                elem,
+                                                best,
+                                                &self.memory_manager,
+                                            );
+                                            let take = if id == chunk::NativeFuncId::MinArray {
+                                                ord == std::cmp::Ordering::Less
+                                            } else {
+                                                ord == std::cmp::Ordering::Greater
+                                            };
+                                            if take {
+                                                best = elem;
+                                            }
+                                        }
+                                        self.memory_manager.external_roots.pop(); // pop args roots
+                                        self.push(best)?;
                                         continue;
                                     }
-                                    None => {
-                                        return Err(RuntimeError {
-                                            span,
-                                            message: format!(
-                                                "Undefined external variable: '{}'",
-                                                key
-                                            ),
-                                            source_id,
-                                        });
-                                    }
                                 }
-                            }
 
-                            // Handle set operations with keyF (3-arg forms)
-                            if id == chunk::NativeFuncId::SetInter && args.len() == 3 {
-                                let a_val = args[0];
-                                let b_val = args[1];
-                                let key_f = args[2];
-                                let a_idx = match a_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "setInter: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let b_idx = match b_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "setInter: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let a_elems: Vec<Value> =
-                                    self.memory_manager.load_array(a_idx).elements.clone();
-                                let b_elems: Vec<Value> =
-                                    self.memory_manager.load_array(b_idx).elements.clone();
-                                let mut a_keys: Vec<Value> = Vec::with_capacity(a_elems.len());
-                                for &elem in &a_elems {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&a_elems);
-                                    roots.extend_from_slice(&b_elems);
-                                    roots.extend_from_slice(&a_keys);
-                                    roots.push(key_f);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    a_keys.push(key?);
-                                }
-                                let mut b_keys: Vec<Value> = Vec::with_capacity(b_elems.len());
-                                for &elem in &b_elems {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&a_elems);
-                                    roots.extend_from_slice(&b_elems);
-                                    roots.extend_from_slice(&a_keys);
-                                    roots.extend_from_slice(&b_keys);
-                                    roots.push(key_f);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    b_keys.push(key?);
-                                }
-                                let mut result = Vec::new();
-                                let (mut i, mut j) = (0usize, 0usize);
-                                while i < a_elems.len() && j < b_elems.len() {
-                                    let cmp = native::compare_values(
-                                        a_keys[i],
-                                        b_keys[j],
-                                        &self.memory_manager,
-                                    );
-                                    match cmp {
-                                        std::cmp::Ordering::Less => i += 1,
-                                        std::cmp::Ordering::Greater => j += 1,
-                                        std::cmp::Ordering::Equal => {
-                                            result.push(a_elems[i]);
-                                            i += 1;
-                                            j += 1;
+                                // Handle std.extVar
+                                if id == chunk::NativeFuncId::ExtVar {
+                                    let span = self.get_current_span();
+                                    let source_id = self.current_chunk().source_id.to_string();
+                                    let key = match args[0] {
+                                        Value::String(idx) => {
+                                            self.memory_manager.load_string(idx).to_string()
+                                        }
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span,
+                                                message: format!(
+                                                    "std.extVar: argument must be a string, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id,
+                                            });
+                                        }
+                                    };
+                                    match self.ext_vars.get(&key).copied() {
+                                        Some(val) => {
+                                            self.push(val)?;
+                                            continue;
+                                        }
+                                        None => {
+                                            return Err(RuntimeError {
+                                                span,
+                                                message: format!(
+                                                    "Undefined external variable: '{}'",
+                                                    key
+                                                ),
+                                                source_id,
+                                            });
                                         }
                                     }
                                 }
-                                let alloc = self.memory_manager.allocate_array(result);
-                                self.push(Value::Array(alloc.index))?;
-                                continue;
-                            }
 
-                            if id == chunk::NativeFuncId::SetDiff && args.len() == 3 {
-                                let a_val = args[0];
-                                let b_val = args[1];
-                                let key_f = args[2];
-                                let a_idx = match a_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "setDiff: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let b_idx = match b_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "setDiff: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let a_elems: Vec<Value> =
-                                    self.memory_manager.load_array(a_idx).elements.clone();
-                                let b_elems: Vec<Value> =
-                                    self.memory_manager.load_array(b_idx).elements.clone();
-                                let mut a_keys: Vec<Value> = Vec::with_capacity(a_elems.len());
-                                for &elem in &a_elems {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&a_elems);
-                                    roots.extend_from_slice(&b_elems);
-                                    roots.extend_from_slice(&a_keys);
-                                    roots.push(key_f);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    a_keys.push(key?);
-                                }
-                                let mut b_keys: Vec<Value> = Vec::with_capacity(b_elems.len());
-                                for &elem in &b_elems {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&a_elems);
-                                    roots.extend_from_slice(&b_elems);
-                                    roots.extend_from_slice(&a_keys);
-                                    roots.extend_from_slice(&b_keys);
-                                    roots.push(key_f);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    b_keys.push(key?);
-                                }
-                                let mut result = Vec::new();
-                                let (mut i, mut j) = (0usize, 0usize);
-                                while i < a_elems.len() {
-                                    if j >= b_elems.len() {
-                                        result.push(a_elems[i]);
-                                        i += 1;
-                                        continue;
-                                    }
-                                    let cmp = native::compare_values(
-                                        a_keys[i],
-                                        b_keys[j],
-                                        &self.memory_manager,
-                                    );
-                                    match cmp {
-                                        std::cmp::Ordering::Less => {
-                                            result.push(a_elems[i]);
-                                            i += 1;
+                                // Handle set operations with keyF (3-arg forms)
+                                if id == chunk::NativeFuncId::SetInter && args.len() == 3 {
+                                    let a_val = args[0];
+                                    let b_val = args[1];
+                                    let key_f = args[2];
+                                    let a_idx = match a_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "setInter: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
                                         }
-                                        std::cmp::Ordering::Greater => {
-                                            j += 1;
+                                    };
+                                    let b_idx = match b_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "setInter: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
                                         }
-                                        std::cmp::Ordering::Equal => {
-                                            i += 1;
-                                            j += 1;
-                                        }
-                                    }
-                                }
-                                let alloc = self.memory_manager.allocate_array(result);
-                                self.push(Value::Array(alloc.index))?;
-                                continue;
-                            }
-
-                            if id == chunk::NativeFuncId::SetMember && args.len() == 3 {
-                                let x_val = args[0];
-                                let arr_val = args[1];
-                                let key_f = args[2];
-                                let arr_idx = match arr_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "setMember: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let arr_elems: Vec<Value> =
-                                    self.memory_manager.load_array(arr_idx).elements.clone();
-                                let x_key = {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&arr_elems);
-                                    roots.push(key_f);
-                                    roots.push(x_val);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let k = self.call_value_with_one_arg(key_f, x_val);
-                                    self.memory_manager.pop_external_roots();
-                                    k?
-                                };
-                                let mut lo = 0usize;
-                                let mut hi = arr_elems.len();
-                                let mut found = false;
-                                while lo < hi {
-                                    let mid = lo + (hi - lo) / 2;
-                                    let mid_key = {
+                                    };
+                                    let a_elems: Vec<Value> =
+                                        self.memory_manager.load_array(a_idx).elements.clone();
+                                    let b_elems: Vec<Value> =
+                                        self.memory_manager.load_array(b_idx).elements.clone();
+                                    let mut a_keys: Vec<Value> = Vec::with_capacity(a_elems.len());
+                                    for &elem in &a_elems {
                                         let mut roots = Vec::from(self.stack.clone());
-                                        roots.extend_from_slice(&arr_elems);
+                                        roots.extend_from_slice(&a_elems);
+                                        roots.extend_from_slice(&b_elems);
+                                        roots.extend_from_slice(&a_keys);
                                         roots.push(key_f);
-                                        roots.push(x_val);
-                                        roots.push(x_key);
                                         let mut open_upvalue_roots = Vec::new();
                                         let mut upvalue = self.open_upvalues;
                                         while let Some(uv_idx) = upvalue {
@@ -5289,638 +6041,1067 @@ impl VirtualMachine {
                                         }
                                         self.memory_manager
                                             .push_external_roots(roots, open_upvalue_roots);
-                                        let k = self.call_value_with_one_arg(key_f, arr_elems[mid]);
+                                        let key = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        a_keys.push(key?);
+                                    }
+                                    let mut b_keys: Vec<Value> = Vec::with_capacity(b_elems.len());
+                                    for &elem in &b_elems {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&a_elems);
+                                        roots.extend_from_slice(&b_elems);
+                                        roots.extend_from_slice(&a_keys);
+                                        roots.extend_from_slice(&b_keys);
+                                        roots.push(key_f);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let key = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        b_keys.push(key?);
+                                    }
+                                    let mut result = Vec::new();
+                                    let (mut i, mut j) = (0usize, 0usize);
+                                    while i < a_elems.len() && j < b_elems.len() {
+                                        let cmp = native::compare_values(
+                                            a_keys[i],
+                                            b_keys[j],
+                                            &self.memory_manager,
+                                        );
+                                        match cmp {
+                                            std::cmp::Ordering::Less => i += 1,
+                                            std::cmp::Ordering::Greater => j += 1,
+                                            std::cmp::Ordering::Equal => {
+                                                result.push(a_elems[i]);
+                                                i += 1;
+                                                j += 1;
+                                            }
+                                        }
+                                    }
+                                    let alloc = self.memory_manager.allocate_array(result);
+                                    self.push(Value::Array(alloc.index))?;
+                                    continue;
+                                }
+
+                                if id == chunk::NativeFuncId::SetDiff && args.len() == 3 {
+                                    let a_val = args[0];
+                                    let b_val = args[1];
+                                    let key_f = args[2];
+                                    let a_idx = match a_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "setDiff: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let b_idx = match b_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "setDiff: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let a_elems: Vec<Value> =
+                                        self.memory_manager.load_array(a_idx).elements.clone();
+                                    let b_elems: Vec<Value> =
+                                        self.memory_manager.load_array(b_idx).elements.clone();
+                                    let mut a_keys: Vec<Value> = Vec::with_capacity(a_elems.len());
+                                    for &elem in &a_elems {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&a_elems);
+                                        roots.extend_from_slice(&b_elems);
+                                        roots.extend_from_slice(&a_keys);
+                                        roots.push(key_f);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let key = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        a_keys.push(key?);
+                                    }
+                                    let mut b_keys: Vec<Value> = Vec::with_capacity(b_elems.len());
+                                    for &elem in &b_elems {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&a_elems);
+                                        roots.extend_from_slice(&b_elems);
+                                        roots.extend_from_slice(&a_keys);
+                                        roots.extend_from_slice(&b_keys);
+                                        roots.push(key_f);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let key = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        b_keys.push(key?);
+                                    }
+                                    let mut result = Vec::new();
+                                    let (mut i, mut j) = (0usize, 0usize);
+                                    while i < a_elems.len() {
+                                        if j >= b_elems.len() {
+                                            result.push(a_elems[i]);
+                                            i += 1;
+                                            continue;
+                                        }
+                                        let cmp = native::compare_values(
+                                            a_keys[i],
+                                            b_keys[j],
+                                            &self.memory_manager,
+                                        );
+                                        match cmp {
+                                            std::cmp::Ordering::Less => {
+                                                result.push(a_elems[i]);
+                                                i += 1;
+                                            }
+                                            std::cmp::Ordering::Greater => {
+                                                j += 1;
+                                            }
+                                            std::cmp::Ordering::Equal => {
+                                                i += 1;
+                                                j += 1;
+                                            }
+                                        }
+                                    }
+                                    let alloc = self.memory_manager.allocate_array(result);
+                                    self.push(Value::Array(alloc.index))?;
+                                    continue;
+                                }
+
+                                if id == chunk::NativeFuncId::SetMember && args.len() == 3 {
+                                    let x_val = args[0];
+                                    let arr_val = args[1];
+                                    let key_f = args[2];
+                                    let arr_idx = match arr_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "setMember: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let arr_elems: Vec<Value> =
+                                        self.memory_manager.load_array(arr_idx).elements.clone();
+                                    let x_key = {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&arr_elems);
+                                        roots.push(key_f);
+                                        roots.push(x_val);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let k = self.call_value_with_one_arg(key_f, x_val);
                                         self.memory_manager.pop_external_roots();
                                         k?
                                     };
-                                    let cmp = native::compare_values(
-                                        x_key,
-                                        mid_key,
-                                        &self.memory_manager,
+                                    let mut lo = 0usize;
+                                    let mut hi = arr_elems.len();
+                                    let mut found = false;
+                                    while lo < hi {
+                                        let mid = lo + (hi - lo) / 2;
+                                        let mid_key = {
+                                            let mut roots = Vec::from(self.stack.clone());
+                                            roots.extend_from_slice(&arr_elems);
+                                            roots.push(key_f);
+                                            roots.push(x_val);
+                                            roots.push(x_key);
+                                            let mut open_upvalue_roots = Vec::new();
+                                            let mut upvalue = self.open_upvalues;
+                                            while let Some(uv_idx) = upvalue {
+                                                open_upvalue_roots.push(uv_idx);
+                                                upvalue =
+                                                    self.memory_manager.load_upvalue(uv_idx).next;
+                                            }
+                                            self.memory_manager
+                                                .push_external_roots(roots, open_upvalue_roots);
+                                            let k =
+                                                self.call_value_with_one_arg(key_f, arr_elems[mid]);
+                                            self.memory_manager.pop_external_roots();
+                                            k?
+                                        };
+                                        let cmp = native::compare_values(
+                                            x_key,
+                                            mid_key,
+                                            &self.memory_manager,
+                                        );
+                                        match cmp {
+                                            std::cmp::Ordering::Equal => {
+                                                found = true;
+                                                break;
+                                            }
+                                            std::cmp::Ordering::Less => hi = mid,
+                                            std::cmp::Ordering::Greater => lo = mid + 1,
+                                        }
+                                    }
+                                    self.push(Value::Boolean(found))?;
+                                    continue;
+                                }
+
+                                if id == chunk::NativeFuncId::SetUnion && args.len() == 3 {
+                                    let a_val = args[0];
+                                    let b_val = args[1];
+                                    let key_f = args[2];
+                                    let a_idx = match a_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "setUnion: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let b_idx = match b_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "setUnion: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let mut combined =
+                                        self.memory_manager.load_array(a_idx).elements.clone();
+                                    combined.extend_from_slice(
+                                        &self.memory_manager.load_array(b_idx).elements.clone(),
                                     );
-                                    match cmp {
-                                        std::cmp::Ordering::Equal => {
-                                            found = true;
-                                            break;
+                                    let mut keys: Vec<Value> = Vec::with_capacity(combined.len());
+                                    for &elem in &combined {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&combined);
+                                        roots.extend_from_slice(&keys);
+                                        roots.push(key_f);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
                                         }
-                                        std::cmp::Ordering::Less => hi = mid,
-                                        std::cmp::Ordering::Greater => lo = mid + 1,
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let key = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        keys.push(key?);
                                     }
-                                }
-                                self.push(Value::Boolean(found))?;
-                                continue;
-                            }
-
-                            if id == chunk::NativeFuncId::SetUnion && args.len() == 3 {
-                                let a_val = args[0];
-                                let b_val = args[1];
-                                let key_f = args[2];
-                                let a_idx = match a_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "setUnion: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
+                                    let mut indexed: Vec<usize> = (0..combined.len()).collect();
+                                    {
+                                        let mm = &self.memory_manager;
+                                        indexed.sort_by(|&a, &b| {
+                                            native::compare_values(keys[a], keys[b], mm)
                                         });
                                     }
-                                };
-                                let b_idx = match b_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "setUnion: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let mut combined =
-                                    self.memory_manager.load_array(a_idx).elements.clone();
-                                combined.extend_from_slice(
-                                    &self.memory_manager.load_array(b_idx).elements.clone(),
-                                );
-                                let mut keys: Vec<Value> = Vec::with_capacity(combined.len());
-                                for &elem in &combined {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&combined);
-                                    roots.extend_from_slice(&keys);
-                                    roots.push(key_f);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    keys.push(key?);
-                                }
-                                let mut indexed: Vec<usize> = (0..combined.len()).collect();
-                                {
-                                    let mm = &self.memory_manager;
-                                    indexed.sort_by(|&a, &b| {
-                                        native::compare_values(keys[a], keys[b], mm)
-                                    });
-                                }
-                                let sorted_elems: Vec<Value> =
-                                    indexed.iter().map(|&i| combined[i]).collect();
-                                let sorted_keys: Vec<Value> =
-                                    indexed.iter().map(|&i| keys[i]).collect();
-                                let mut result: Vec<Value> = Vec::new();
-                                let mut last_key: Option<Value> = None;
-                                for (elem, key) in sorted_elems.iter().zip(sorted_keys.iter()) {
-                                    if let Some(lk) = last_key {
-                                        if native::compare_values(lk, *key, &self.memory_manager)
-                                            == std::cmp::Ordering::Equal
-                                        {
-                                            continue;
+                                    let sorted_elems: Vec<Value> =
+                                        indexed.iter().map(|&i| combined[i]).collect();
+                                    let sorted_keys: Vec<Value> =
+                                        indexed.iter().map(|&i| keys[i]).collect();
+                                    let mut result: Vec<Value> = Vec::new();
+                                    let mut last_key: Option<Value> = None;
+                                    for (elem, key) in sorted_elems.iter().zip(sorted_keys.iter()) {
+                                        if let Some(lk) = last_key {
+                                            if native::compare_values(
+                                                lk,
+                                                *key,
+                                                &self.memory_manager,
+                                            ) == std::cmp::Ordering::Equal
+                                            {
+                                                continue;
+                                            }
                                         }
+                                        result.push(*elem);
+                                        last_key = Some(*key);
                                     }
-                                    result.push(*elem);
-                                    last_key = Some(*key);
+                                    let alloc = self.memory_manager.allocate_array(result);
+                                    self.push(Value::Array(alloc.index))?;
+                                    continue;
                                 }
-                                let alloc = self.memory_manager.allocate_array(result);
-                                self.push(Value::Array(alloc.index))?;
-                                continue;
-                            }
 
-                            // Handle std.sort with keyF
-                            if id == chunk::NativeFuncId::Sort && args.len() == 2 {
-                                let arr_val = args[0];
-                                let key_f = args[1];
-                                let arr_idx = match arr_val {
-                                    Value::Array(a) => a,
-                                    _ => {
-                                        return Err(RuntimeError {
+                                // Handle std.sort with keyF
+                                if id == chunk::NativeFuncId::Sort && args.len() == 2 {
+                                    let arr_val = args[0];
+                                    let key_f = args[1];
+                                    let arr_idx =
+                                        match arr_val {
+                                            Value::Array(a) => a,
+                                            _ => {
+                                                return Err(RuntimeError {
                                             span: self.get_current_span(),
                                             message: "std.sort() expected array as first argument"
                                                 .to_string(),
                                             source_id: self.current_chunk().source_id.to_string(),
                                         });
-                                    }
-                                };
-                                let elements: Vec<Value> =
-                                    self.memory_manager.load_array(arr_idx).elements.clone();
+                                            }
+                                        };
+                                    let elements: Vec<Value> =
+                                        self.memory_manager.load_array(arr_idx).elements.clone();
 
-                                // Compute keys for each element by calling keyF
-                                let mut keys: Vec<Value> = Vec::with_capacity(elements.len());
-                                for &elem in &elements {
-                                    // Root accumulated data before each call to protect from GC
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&elements);
-                                    roots.extend_from_slice(&keys);
-                                    roots.push(key_f);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    keys.push(key?);
-                                }
-
-                                // Sort elements by their computed keys
-                                let mut indexed: Vec<usize> = (0..elements.len()).collect();
-                                let mm = &self.memory_manager;
-                                indexed
-                                    .sort_by(|&a, &b| native::compare_values(keys[a], keys[b], mm));
-                                let sorted: Vec<Value> =
-                                    indexed.iter().map(|&i| elements[i]).collect();
-                                let arr_alloc = self.memory_manager.allocate_array(sorted);
-                                self.push(Value::Array(arr_alloc.index))?;
-                                continue;
-                            }
-
-                            // Handle std.groupBy
-                            if id == chunk::NativeFuncId::GroupBy {
-                                let arr_val = args[0];
-                                let key_f = args[1];
-                                let arr_idx = match arr_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "std.groupBy: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let elements: Vec<Value> =
-                                    self.memory_manager.load_array(arr_idx).elements.clone();
-                                let mut group_order: Vec<String> = Vec::new();
-                                let mut groups: std::collections::HashMap<String, Vec<Value>> =
-                                    std::collections::HashMap::new();
-                                for &elem in &elements {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&elements);
-                                    roots.push(key_f);
-                                    for group_elems in groups.values() {
-                                        roots.extend_from_slice(group_elems);
-                                    }
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key_val = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    let key_val = key_val?;
-                                    let key_str = match key_val {
-                                        Value::String(idx) => {
-                                            self.memory_manager.load_string(idx).to_string()
+                                    // Compute keys for each element by calling keyF
+                                    let mut keys: Vec<Value> = Vec::with_capacity(elements.len());
+                                    for &elem in &elements {
+                                        // Root accumulated data before each call to protect from GC
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&elements);
+                                        roots.extend_from_slice(&keys);
+                                        roots.push(key_f);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
                                         }
-                                        other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
-                                                    "std.groupBy: keyF must return string, got {}",
-                                                    other.type_name()
-                                                ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
-                                        }
-                                    };
-                                    if !groups.contains_key(&key_str) {
-                                        group_order.push(key_str.clone());
-                                        groups.insert(key_str.clone(), Vec::new());
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let key = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        keys.push(key?);
                                     }
-                                    groups.get_mut(&key_str).unwrap().push(elem);
-                                }
-                                let mut properties: std::collections::HashMap<
-                                    chunk::StringIndex,
-                                    memory_manager::ObjectField,
-                                > = std::collections::HashMap::new();
-                                for key_str in &group_order {
-                                    let group_elems = groups.remove(key_str).unwrap_or_default();
-                                    let arr_alloc = self.memory_manager.allocate_array(group_elems);
-                                    let k_alloc = self.memory_manager.allocate_string(key_str);
-                                    properties.insert(
-                                        k_alloc.index,
-                                        memory_manager::ObjectField {
-                                            value: Value::Array(arr_alloc.index),
-                                            super_obj: None,
-                                            visibility: FieldVisibility::Visible,
-                                        },
-                                    );
-                                }
-                                let obj_alloc = self
-                                    .memory_manager
-                                    .allocate_object_with_properties(properties);
-                                self.push(Value::Object(obj_alloc.index))?;
-                                continue;
-                            }
 
-                            // Handle std.sortBy
-                            if id == chunk::NativeFuncId::SortBy {
-                                let arr_val = args[0];
-                                let key_f = args[1];
-                                let arr_idx = match arr_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "std.sortBy: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let elements: Vec<Value> =
-                                    self.memory_manager.load_array(arr_idx).elements.clone();
-                                let mut keyed: Vec<(Value, Value)> =
-                                    Vec::with_capacity(elements.len());
-                                for &elem in &elements {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&elements);
-                                    roots.push(key_f);
-                                    for (k, v) in &keyed {
-                                        roots.push(*k);
-                                        roots.push(*v);
-                                    }
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    keyed.push((key?, elem));
-                                }
-                                keyed.sort_by(|(ka, _), (kb, _)| {
-                                    native::compare_values(*ka, *kb, &self.memory_manager)
-                                });
-                                let sorted: Vec<Value> =
-                                    keyed.into_iter().map(|(_, v)| v).collect();
-                                let alloc = self.memory_manager.allocate_array(sorted);
-                                self.push(Value::Array(alloc.index))?;
-                                continue;
-                            }
-
-                            // Handle std.countBy
-                            if id == chunk::NativeFuncId::CountBy {
-                                let arr_val = args[0];
-                                let key_f = args[1];
-                                let arr_idx = match arr_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "std.countBy: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let elements: Vec<Value> =
-                                    self.memory_manager.load_array(arr_idx).elements.clone();
-                                let mut group_order: Vec<String> = Vec::new();
-                                let mut counts: std::collections::HashMap<String, u64> =
-                                    std::collections::HashMap::new();
-                                for &elem in &elements {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&elements);
-                                    roots.push(key_f);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key_val = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    let key_val = key_val?;
-                                    let key_str = match key_val {
-                                        Value::String(idx) => {
-                                            self.memory_manager.load_string(idx).to_string()
-                                        }
-                                        other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
-                                                    "std.countBy: keyF must return string, got {}",
-                                                    other.type_name()
-                                                ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
-                                        }
-                                    };
-                                    if !counts.contains_key(&key_str) {
-                                        group_order.push(key_str.clone());
-                                    }
-                                    *counts.entry(key_str).or_insert(0) += 1;
-                                }
-                                let mut properties: std::collections::HashMap<
-                                    chunk::StringIndex,
-                                    memory_manager::ObjectField,
-                                > = std::collections::HashMap::new();
-                                for key_str in &group_order {
-                                    let count = counts[key_str];
-                                    let k_alloc = self.memory_manager.allocate_string(key_str);
-                                    properties.insert(
-                                        k_alloc.index,
-                                        memory_manager::ObjectField {
-                                            value: Value::Number(count as f64),
-                                            super_obj: None,
-                                            visibility: FieldVisibility::Visible,
-                                        },
-                                    );
-                                }
-                                let obj_alloc = self
-                                    .memory_manager
-                                    .allocate_object_with_properties(properties);
-                                self.push(Value::Object(obj_alloc.index))?;
-                                continue;
-                            }
-
-                            // Handle std.uniqBy
-                            if id == chunk::NativeFuncId::UniqBy {
-                                let arr_val = args[0];
-                                let key_f = args[1];
-                                let arr_idx = match arr_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "std.uniqBy: expected array, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let elements: Vec<Value> =
-                                    self.memory_manager.load_array(arr_idx).elements.clone();
-                                let mut seen: std::collections::HashSet<String> =
-                                    std::collections::HashSet::new();
-                                let mut result: Vec<Value> = Vec::new();
-                                for &elem in &elements {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&elements);
-                                    roots.extend_from_slice(&result);
-                                    roots.push(key_f);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key_val = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    let key_val = key_val?;
-                                    let key_str = match key_val {
-                                        Value::String(idx) => {
-                                            self.memory_manager.load_string(idx).to_string()
-                                        }
-                                        other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
-                                                    "std.uniqBy: keyF must return string, got {}",
-                                                    other.type_name()
-                                                ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
-                                        }
-                                    };
-                                    if seen.insert(key_str) {
-                                        result.push(elem);
-                                    }
-                                }
-                                let alloc = self.memory_manager.allocate_array(result);
-                                self.push(Value::Array(alloc.index))?;
-                                continue;
-                            }
-
-                            // Handle std.minBy and std.maxBy
-                            if id == chunk::NativeFuncId::MinBy || id == chunk::NativeFuncId::MaxBy
-                            {
-                                let arr_val = args[0];
-                                let key_f = args[1];
-                                let arr_idx = match arr_val {
-                                    Value::Array(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "std.{}: expected array, got {}",
-                                                id.name(),
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let elements: Vec<Value> =
-                                    self.memory_manager.load_array(arr_idx).elements.clone();
-                                if elements.is_empty() {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
-                                            "std.{}: array must not be empty",
-                                            id.name()
-                                        ),
-                                        source_id: self.current_chunk().source_id.to_string(),
+                                    // Sort elements by their computed keys
+                                    let mut indexed: Vec<usize> = (0..elements.len()).collect();
+                                    let mm = &self.memory_manager;
+                                    indexed.sort_by(|&a, &b| {
+                                        native::compare_values(keys[a], keys[b], mm)
                                     });
+                                    let sorted: Vec<Value> =
+                                        indexed.iter().map(|&i| elements[i]).collect();
+                                    let arr_alloc = self.memory_manager.allocate_array(sorted);
+                                    self.push(Value::Array(arr_alloc.index))?;
+                                    continue;
                                 }
-                                let (mut best_key, mut best_elem) = {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&elements);
-                                    roots.push(key_f);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let k = self.call_value_with_one_arg(key_f, elements[0]);
-                                    self.memory_manager.pop_external_roots();
-                                    (k?, elements[0])
-                                };
-                                for &elem in elements.iter().skip(1) {
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.extend_from_slice(&elements);
-                                    roots.push(key_f);
-                                    roots.push(best_key);
-                                    roots.push(best_elem);
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let key = self.call_value_with_one_arg(key_f, elem);
-                                    self.memory_manager.pop_external_roots();
-                                    let key = key?;
-                                    let cmp =
-                                        native::compare_values(key, best_key, &self.memory_manager);
-                                    let take = if id == chunk::NativeFuncId::MinBy {
-                                        cmp == std::cmp::Ordering::Less
-                                    } else {
-                                        cmp == std::cmp::Ordering::Greater
-                                    };
-                                    if take {
-                                        best_key = key;
-                                        best_elem = elem;
-                                    }
-                                }
-                                self.push(best_elem)?;
-                                continue;
-                            }
 
-                            // Handle std.toPairs
-                            if id == chunk::NativeFuncId::ToPairs {
-                                let obj_val = args[0];
-                                let o_idx = match obj_val {
-                                    Value::Object(i) => i,
-                                    other => {
+                                // Handle std.groupBy
+                                if id == chunk::NativeFuncId::GroupBy {
+                                    let arr_val = args[0];
+                                    let key_f = args[1];
+                                    let arr_idx = match arr_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.groupBy: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let elements: Vec<Value> =
+                                        self.memory_manager.load_array(arr_idx).elements.clone();
+                                    let mut group_order: Vec<String> = Vec::new();
+                                    let mut groups: std::collections::HashMap<String, Vec<Value>> =
+                                        std::collections::HashMap::new();
+                                    for &elem in &elements {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&elements);
+                                        roots.push(key_f);
+                                        for group_elems in groups.values() {
+                                            roots.extend_from_slice(group_elems);
+                                        }
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let key_val = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        let key_val = key_val?;
+                                        let key_str = match key_val {
+                                            Value::String(idx) => {
+                                                self.memory_manager.load_string(idx).to_string()
+                                            }
+                                            other => {
+                                                return Err(RuntimeError {
+                                                    span: self.get_current_span(),
+                                                    message: format!(
+                                                        "std.groupBy: keyF must return string, got {}",
+                                                        other.type_name()
+                                                    ),
+                                                    source_id: self
+                                                        .current_chunk()
+                                                        .source_id
+                                                        .to_string(),
+                                                });
+                                            }
+                                        };
+                                        if !groups.contains_key(&key_str) {
+                                            group_order.push(key_str.clone());
+                                            groups.insert(key_str.clone(), Vec::new());
+                                        }
+                                        groups.get_mut(&key_str).unwrap().push(elem);
+                                    }
+                                    let mut properties: std::collections::HashMap<
+                                        chunk::StringIndex,
+                                        memory_manager::ObjectField,
+                                    > = std::collections::HashMap::new();
+                                    for key_str in &group_order {
+                                        let group_elems =
+                                            groups.remove(key_str).unwrap_or_default();
+                                        let arr_alloc =
+                                            self.memory_manager.allocate_array(group_elems);
+                                        let k_alloc = self.memory_manager.allocate_string(key_str);
+                                        properties.insert(
+                                            k_alloc.index,
+                                            memory_manager::ObjectField {
+                                                value: Value::Array(arr_alloc.index),
+                                                super_obj: None,
+                                                visibility: FieldVisibility::Visible,
+                                            },
+                                        );
+                                    }
+                                    let obj_alloc = self
+                                        .memory_manager
+                                        .allocate_object_with_properties(properties);
+                                    self.push(Value::Object(obj_alloc.index))?;
+                                    continue;
+                                }
+
+                                // Handle std.sortBy
+                                if id == chunk::NativeFuncId::SortBy {
+                                    let arr_val = args[0];
+                                    let key_f = args[1];
+                                    let arr_idx = match arr_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.sortBy: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let elements: Vec<Value> =
+                                        self.memory_manager.load_array(arr_idx).elements.clone();
+                                    let mut keyed: Vec<(Value, Value)> =
+                                        Vec::with_capacity(elements.len());
+                                    for &elem in &elements {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&elements);
+                                        roots.push(key_f);
+                                        for (k, v) in &keyed {
+                                            roots.push(*k);
+                                            roots.push(*v);
+                                        }
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let key = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        keyed.push((key?, elem));
+                                    }
+                                    keyed.sort_by(|(ka, _), (kb, _)| {
+                                        native::compare_values(*ka, *kb, &self.memory_manager)
+                                    });
+                                    let sorted: Vec<Value> =
+                                        keyed.into_iter().map(|(_, v)| v).collect();
+                                    let alloc = self.memory_manager.allocate_array(sorted);
+                                    self.push(Value::Array(alloc.index))?;
+                                    continue;
+                                }
+
+                                // Handle std.countBy
+                                if id == chunk::NativeFuncId::CountBy {
+                                    let arr_val = args[0];
+                                    let key_f = args[1];
+                                    let arr_idx = match arr_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.countBy: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let elements: Vec<Value> =
+                                        self.memory_manager.load_array(arr_idx).elements.clone();
+                                    let mut group_order: Vec<String> = Vec::new();
+                                    let mut counts: std::collections::HashMap<String, u64> =
+                                        std::collections::HashMap::new();
+                                    for &elem in &elements {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&elements);
+                                        roots.push(key_f);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let key_val = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        let key_val = key_val?;
+                                        let key_str = match key_val {
+                                            Value::String(idx) => {
+                                                self.memory_manager.load_string(idx).to_string()
+                                            }
+                                            other => {
+                                                return Err(RuntimeError {
+                                                    span: self.get_current_span(),
+                                                    message: format!(
+                                                        "std.countBy: keyF must return string, got {}",
+                                                        other.type_name()
+                                                    ),
+                                                    source_id: self
+                                                        .current_chunk()
+                                                        .source_id
+                                                        .to_string(),
+                                                });
+                                            }
+                                        };
+                                        if !counts.contains_key(&key_str) {
+                                            group_order.push(key_str.clone());
+                                        }
+                                        *counts.entry(key_str).or_insert(0) += 1;
+                                    }
+                                    let mut properties: std::collections::HashMap<
+                                        chunk::StringIndex,
+                                        memory_manager::ObjectField,
+                                    > = std::collections::HashMap::new();
+                                    for key_str in &group_order {
+                                        let count = counts[key_str];
+                                        let k_alloc = self.memory_manager.allocate_string(key_str);
+                                        properties.insert(
+                                            k_alloc.index,
+                                            memory_manager::ObjectField {
+                                                value: Value::Number(count as f64),
+                                                super_obj: None,
+                                                visibility: FieldVisibility::Visible,
+                                            },
+                                        );
+                                    }
+                                    let obj_alloc = self
+                                        .memory_manager
+                                        .allocate_object_with_properties(properties);
+                                    self.push(Value::Object(obj_alloc.index))?;
+                                    continue;
+                                }
+
+                                // Handle std.uniqBy
+                                if id == chunk::NativeFuncId::UniqBy {
+                                    let arr_val = args[0];
+                                    let key_f = args[1];
+                                    let arr_idx = match arr_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.uniqBy: expected array, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let elements: Vec<Value> =
+                                        self.memory_manager.load_array(arr_idx).elements.clone();
+                                    let mut seen: std::collections::HashSet<String> =
+                                        std::collections::HashSet::new();
+                                    let mut result: Vec<Value> = Vec::new();
+                                    for &elem in &elements {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&elements);
+                                        roots.extend_from_slice(&result);
+                                        roots.push(key_f);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let key_val = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        let key_val = key_val?;
+                                        let key_str = match key_val {
+                                            Value::String(idx) => {
+                                                self.memory_manager.load_string(idx).to_string()
+                                            }
+                                            other => {
+                                                return Err(RuntimeError {
+                                                    span: self.get_current_span(),
+                                                    message: format!(
+                                                        "std.uniqBy: keyF must return string, got {}",
+                                                        other.type_name()
+                                                    ),
+                                                    source_id: self
+                                                        .current_chunk()
+                                                        .source_id
+                                                        .to_string(),
+                                                });
+                                            }
+                                        };
+                                        if seen.insert(key_str) {
+                                            result.push(elem);
+                                        }
+                                    }
+                                    let alloc = self.memory_manager.allocate_array(result);
+                                    self.push(Value::Array(alloc.index))?;
+                                    continue;
+                                }
+
+                                // Handle std.minBy and std.maxBy
+                                if id == chunk::NativeFuncId::MinBy
+                                    || id == chunk::NativeFuncId::MaxBy
+                                {
+                                    let arr_val = args[0];
+                                    let key_f = args[1];
+                                    let arr_idx = match arr_val {
+                                        Value::Array(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.{}: expected array, got {}",
+                                                    id.name(),
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    // Root keyF before forcing array elements (which may trigger GC)
+                                    self.memory_manager
+                                        .external_roots
+                                        .push(vec![key_f, arr_val]);
+                                    self.force_all_array_elements(arr_idx)?;
+                                    let elements: Vec<Value> =
+                                        self.memory_manager.load_array(arr_idx).elements.clone();
+                                    if elements.is_empty() {
+                                        self.memory_manager.external_roots.pop();
                                         return Err(RuntimeError {
                                             span: self.get_current_span(),
                                             message: format!(
-                                                "std.toPairs: expected object, got {}",
-                                                other.type_name()
+                                                "std.{}: array must not be empty",
+                                                id.name()
                                             ),
                                             source_id: self.current_chunk().source_id.to_string(),
                                         });
                                     }
-                                };
-                                let field_data: Vec<(chunk::StringIndex, Value)> = {
-                                    let obj = self.memory_manager.load_object(o_idx);
-                                    obj.properties
-                                        .iter()
-                                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                                        .map(|(k, f)| (*k, f.value))
-                                        .collect()
-                                };
-                                let mut pairs: Vec<Value> = Vec::with_capacity(field_data.len());
-                                for (k_idx, raw_val) in &field_data {
-                                    let k_idx = *k_idx;
-                                    let raw_val = *raw_val;
-                                    let evaled_val = match raw_val {
-                                        Value::Closure(closure_idx) => {
-                                            self.execute_thunk_sync(closure_idx, Some(o_idx), None)?
+                                    let (mut best_key, mut best_elem) = {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&elements);
+                                        roots.push(key_f);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
                                         }
-                                        other => other,
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let k = self.call_value_with_one_arg(key_f, elements[0]);
+                                        self.memory_manager.pop_external_roots();
+                                        (k?, elements[0])
                                     };
-                                    let key_str =
-                                        self.memory_manager.load_string(k_idx).to_string();
-                                    let k_alloc = self.memory_manager.allocate_string(&key_str);
-                                    let k_val = Value::String(k_alloc.index);
-                                    let pair_alloc =
-                                        self.memory_manager.allocate_array(vec![k_val, evaled_val]);
-                                    pairs.push(Value::Array(pair_alloc.index));
+                                    for &elem in elements.iter().skip(1) {
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.extend_from_slice(&elements);
+                                        roots.push(key_f);
+                                        roots.push(best_key);
+                                        roots.push(best_elem);
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let key = self.call_value_with_one_arg(key_f, elem);
+                                        self.memory_manager.pop_external_roots();
+                                        let key = key?;
+                                        let cmp = native::compare_values(
+                                            key,
+                                            best_key,
+                                            &self.memory_manager,
+                                        );
+                                        let take = if id == chunk::NativeFuncId::MinBy {
+                                            cmp == std::cmp::Ordering::Less
+                                        } else {
+                                            cmp == std::cmp::Ordering::Greater
+                                        };
+                                        if take {
+                                            best_key = key;
+                                            best_elem = elem;
+                                        }
+                                    }
+                                    self.memory_manager.external_roots.pop(); // pop keyF/arrVal roots
+                                    self.push(best_elem)?;
+                                    continue;
                                 }
-                                let alloc = self.memory_manager.allocate_array(pairs);
-                                self.push(Value::Array(alloc.index))?;
-                                continue;
-                            }
 
-                            // Handle std.mapKeys
-                            if id == chunk::NativeFuncId::MapKeys {
-                                let func_val = args[0];
-                                let obj_val = args[1];
-                                let o_idx = match obj_val {
-                                    Value::Object(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "std.mapKeys: expected object, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = {
-                                    let obj = self.memory_manager.load_object(o_idx);
-                                    obj.properties
-                                        .iter()
-                                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                                        .map(|(k, f)| (*k, f.value, f.visibility))
-                                        .collect()
-                                };
-                                let mut new_properties: std::collections::HashMap<
-                                    chunk::StringIndex,
-                                    memory_manager::ObjectField,
-                                > = std::collections::HashMap::new();
-                                for (k_idx, raw_val, vis) in &field_data {
-                                    let k_idx = *k_idx;
-                                    let raw_val = *raw_val;
-                                    let vis = *vis;
-                                    let evaled_val = match raw_val {
-                                        Value::Closure(closure_idx) => {
-                                            self.execute_thunk_sync(closure_idx, Some(o_idx), None)?
+                                // Handle std.toPairs
+                                if id == chunk::NativeFuncId::ToPairs {
+                                    let obj_val = args[0];
+                                    let o_idx = match obj_val {
+                                        Value::Object(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.toPairs: expected object, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
                                         }
-                                        other => other,
                                     };
-                                    let key_str =
-                                        self.memory_manager.load_string(k_idx).to_string();
-                                    let key_alloc = self.memory_manager.allocate_string(&key_str);
-                                    let key_val = Value::String(key_alloc.index);
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.push(func_val);
-                                    roots.push(evaled_val);
-                                    roots.push(key_val);
-                                    for f in new_properties.values() {
-                                        roots.push(f.value);
+                                    let field_data: Vec<(chunk::StringIndex, Value)> = {
+                                        let obj = self.memory_manager.load_object(o_idx);
+                                        obj.properties
+                                            .iter()
+                                            .filter(|(_, f)| {
+                                                f.visibility != FieldVisibility::Hidden
+                                            })
+                                            .map(|(k, f)| (*k, f.value))
+                                            .collect()
+                                    };
+                                    let mut pairs: Vec<Value> =
+                                        Vec::with_capacity(field_data.len());
+                                    for (k_idx, raw_val) in &field_data {
+                                        let k_idx = *k_idx;
+                                        let raw_val = *raw_val;
+                                        let evaled_val = match raw_val {
+                                            Value::Closure(closure_idx) => self
+                                                .execute_thunk_sync(
+                                                    closure_idx,
+                                                    Some(o_idx),
+                                                    None,
+                                                )?,
+                                            other => other,
+                                        };
+                                        let key_str =
+                                            self.memory_manager.load_string(k_idx).to_string();
+                                        let k_alloc = self.memory_manager.allocate_string(&key_str);
+                                        let k_val = Value::String(k_alloc.index);
+                                        let pair_alloc = self
+                                            .memory_manager
+                                            .allocate_array(vec![k_val, evaled_val]);
+                                        pairs.push(Value::Array(pair_alloc.index));
                                     }
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                    let alloc = self.memory_manager.allocate_array(pairs);
+                                    self.push(Value::Array(alloc.index))?;
+                                    continue;
+                                }
+
+                                // Handle std.mapKeys
+                                if id == chunk::NativeFuncId::MapKeys {
+                                    let func_val = args[0];
+                                    let obj_val = args[1];
+                                    let o_idx = match obj_val {
+                                        Value::Object(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.mapKeys: expected object, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let field_data: Vec<(
+                                        chunk::StringIndex,
+                                        Value,
+                                        FieldVisibility,
+                                    )> = {
+                                        let obj = self.memory_manager.load_object(o_idx);
+                                        obj.properties
+                                            .iter()
+                                            .filter(|(_, f)| {
+                                                f.visibility != FieldVisibility::Hidden
+                                            })
+                                            .map(|(k, f)| (*k, f.value, f.visibility))
+                                            .collect()
+                                    };
+                                    let mut new_properties: std::collections::HashMap<
+                                        chunk::StringIndex,
+                                        memory_manager::ObjectField,
+                                    > = std::collections::HashMap::new();
+                                    for (k_idx, raw_val, vis) in &field_data {
+                                        let k_idx = *k_idx;
+                                        let raw_val = *raw_val;
+                                        let vis = *vis;
+                                        let evaled_val = match raw_val {
+                                            Value::Closure(closure_idx) => self
+                                                .execute_thunk_sync(
+                                                    closure_idx,
+                                                    Some(o_idx),
+                                                    None,
+                                                )?,
+                                            other => other,
+                                        };
+                                        let key_str =
+                                            self.memory_manager.load_string(k_idx).to_string();
+                                        let key_alloc =
+                                            self.memory_manager.allocate_string(&key_str);
+                                        let key_val = Value::String(key_alloc.index);
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.push(func_val);
+                                        roots.push(evaled_val);
+                                        roots.push(key_val);
+                                        for f in new_properties.values() {
+                                            roots.push(f.value);
+                                        }
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let new_key_val =
+                                            self.call_value_with_one_arg(func_val, key_val);
+                                        self.memory_manager.pop_external_roots();
+                                        let new_key_val = new_key_val?;
+                                        let new_key_str = match new_key_val {
+                                            Value::String(idx) => {
+                                                self.memory_manager.load_string(idx).to_string()
+                                            }
+                                            other => {
+                                                return Err(RuntimeError {
+                                                    span: self.get_current_span(),
+                                                    message: format!(
+                                                        "std.mapKeys: func must return string, got {}",
+                                                        other.type_name()
+                                                    ),
+                                                    source_id: self
+                                                        .current_chunk()
+                                                        .source_id
+                                                        .to_string(),
+                                                });
+                                            }
+                                        };
+                                        let new_k_alloc =
+                                            self.memory_manager.allocate_string(&new_key_str);
+                                        new_properties.insert(
+                                            new_k_alloc.index,
+                                            memory_manager::ObjectField {
+                                                value: evaled_val,
+                                                super_obj: None,
+                                                visibility: vis,
+                                            },
+                                        );
                                     }
-                                    self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let new_key_val =
-                                        self.call_value_with_one_arg(func_val, key_val);
-                                    self.memory_manager.pop_external_roots();
-                                    let new_key_val = new_key_val?;
-                                    let new_key_str = match new_key_val {
+                                    let alloc = self
+                                        .memory_manager
+                                        .allocate_object_with_properties(new_properties);
+                                    self.push(Value::Object(alloc.index))?;
+                                    continue;
+                                }
+
+                                // Handle std.filterObject
+                                if id == chunk::NativeFuncId::FilterObject {
+                                    let func_val = args[0];
+                                    let obj_val = args[1];
+                                    let o_idx = match obj_val {
+                                        Value::Object(i) => i,
+                                        other => {
+                                            return Err(RuntimeError {
+                                                span: self.get_current_span(),
+                                                message: format!(
+                                                    "std.filterObject: expected object, got {}",
+                                                    other.type_name()
+                                                ),
+                                                source_id: self
+                                                    .current_chunk()
+                                                    .source_id
+                                                    .to_string(),
+                                            });
+                                        }
+                                    };
+                                    let field_data: Vec<(
+                                        chunk::StringIndex,
+                                        Value,
+                                        FieldVisibility,
+                                    )> = {
+                                        let obj = self.memory_manager.load_object(o_idx);
+                                        obj.properties
+                                            .iter()
+                                            .filter(|(_, f)| {
+                                                f.visibility != FieldVisibility::Hidden
+                                            })
+                                            .map(|(k, f)| (*k, f.value, f.visibility))
+                                            .collect()
+                                    };
+                                    let mut kept_properties: std::collections::HashMap<
+                                        chunk::StringIndex,
+                                        memory_manager::ObjectField,
+                                    > = std::collections::HashMap::new();
+                                    for (k_idx, raw_val, vis) in &field_data {
+                                        let k_idx = *k_idx;
+                                        let raw_val = *raw_val;
+                                        let vis = *vis;
+                                        let evaled_val = match raw_val {
+                                            Value::Closure(closure_idx) => self
+                                                .execute_thunk_sync(
+                                                    closure_idx,
+                                                    Some(o_idx),
+                                                    None,
+                                                )?,
+                                            other => other,
+                                        };
+                                        let key_str =
+                                            self.memory_manager.load_string(k_idx).to_string();
+                                        let key_alloc =
+                                            self.memory_manager.allocate_string(&key_str);
+                                        let key_val = Value::String(key_alloc.index);
+                                        let mut roots = Vec::from(self.stack.clone());
+                                        roots.push(func_val);
+                                        roots.push(evaled_val);
+                                        roots.push(key_val);
+                                        for f in kept_properties.values() {
+                                            roots.push(f.value);
+                                        }
+                                        let mut open_upvalue_roots = Vec::new();
+                                        let mut upvalue = self.open_upvalues;
+                                        while let Some(uv_idx) = upvalue {
+                                            open_upvalue_roots.push(uv_idx);
+                                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                                        }
+                                        self.memory_manager
+                                            .push_external_roots(roots, open_upvalue_roots);
+                                        let keep = self.call_value_with_two_args(
+                                            func_val, key_val, evaled_val,
+                                        );
+                                        self.memory_manager.pop_external_roots();
+                                        match keep? {
+                                            Value::Boolean(true) => {
+                                                kept_properties.insert(
+                                                    k_idx,
+                                                    memory_manager::ObjectField {
+                                                        value: evaled_val,
+                                                        super_obj: None,
+                                                        visibility: vis,
+                                                    },
+                                                );
+                                            }
+                                            Value::Boolean(false) => {}
+                                            other => {
+                                                return Err(RuntimeError {
+                                                    span: self.get_current_span(),
+                                                    message: format!(
+                                                        "std.filterObject: func must return bool, got {}",
+                                                        other.type_name()
+                                                    ),
+                                                    source_id: self
+                                                        .current_chunk()
+                                                        .source_id
+                                                        .to_string(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    let alloc = self
+                                        .memory_manager
+                                        .allocate_object_with_properties(kept_properties);
+                                    self.push(Value::Object(alloc.index))?;
+                                    continue;
+                                }
+
+                                // Handle std.objectFlatten
+                                if id == chunk::NativeFuncId::ObjectFlatten {
+                                    let obj_val = args[0];
+                                    let sep_val = args[1];
+                                    let sep = match sep_val {
                                         Value::String(idx) => {
                                             self.memory_manager.load_string(idx).to_string()
                                         }
@@ -5928,7 +7109,7 @@ impl VirtualMachine {
                                             return Err(RuntimeError {
                                                 span: self.get_current_span(),
                                                 message: format!(
-                                                    "std.mapKeys: func must return string, got {}",
+                                                    "std.objectFlatten: sep must be string, got {}",
                                                     other.type_name()
                                                 ),
                                                 source_id: self
@@ -5938,205 +7119,77 @@ impl VirtualMachine {
                                             });
                                         }
                                     };
-                                    let new_k_alloc =
-                                        self.memory_manager.allocate_string(&new_key_str);
-                                    new_properties.insert(
-                                        new_k_alloc.index,
-                                        memory_manager::ObjectField {
-                                            value: evaled_val,
-                                            super_obj: None,
-                                            visibility: vis,
-                                        },
-                                    );
-                                }
-                                let alloc = self
-                                    .memory_manager
-                                    .allocate_object_with_properties(new_properties);
-                                self.push(Value::Object(alloc.index))?;
-                                continue;
-                            }
+                                    let mut flat_fields: Vec<(String, Value)> = Vec::new();
 
-                            // Handle std.filterObject
-                            if id == chunk::NativeFuncId::FilterObject {
-                                let func_val = args[0];
-                                let obj_val = args[1];
-                                let o_idx = match obj_val {
-                                    Value::Object(i) => i,
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "std.filterObject: expected object, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = {
-                                    let obj = self.memory_manager.load_object(o_idx);
-                                    obj.properties
-                                        .iter()
-                                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                                        .map(|(k, f)| (*k, f.value, f.visibility))
-                                        .collect()
-                                };
-                                let mut kept_properties: std::collections::HashMap<
-                                    chunk::StringIndex,
-                                    memory_manager::ObjectField,
-                                > = std::collections::HashMap::new();
-                                for (k_idx, raw_val, vis) in &field_data {
-                                    let k_idx = *k_idx;
-                                    let raw_val = *raw_val;
-                                    let vis = *vis;
-                                    let evaled_val = match raw_val {
-                                        Value::Closure(closure_idx) => {
-                                            self.execute_thunk_sync(closure_idx, Some(o_idx), None)?
-                                        }
-                                        other => other,
-                                    };
-                                    let key_str =
-                                        self.memory_manager.load_string(k_idx).to_string();
-                                    let key_alloc = self.memory_manager.allocate_string(&key_str);
-                                    let key_val = Value::String(key_alloc.index);
-                                    let mut roots = Vec::from(self.stack.clone());
-                                    roots.push(func_val);
-                                    roots.push(evaled_val);
-                                    roots.push(key_val);
-                                    for f in kept_properties.values() {
-                                        roots.push(f.value);
-                                    }
-                                    let mut open_upvalue_roots = Vec::new();
-                                    let mut upvalue = self.open_upvalues;
-                                    while let Some(uv_idx) = upvalue {
-                                        open_upvalue_roots.push(uv_idx);
-                                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                                    }
+                                    // Root arguments during recursive flattening
                                     self.memory_manager
-                                        .push_external_roots(roots, open_upvalue_roots);
-                                    let keep = self
-                                        .call_value_with_two_args(func_val, key_val, evaled_val);
-                                    self.memory_manager.pop_external_roots();
-                                    match keep? {
-                                        Value::Boolean(true) => {
-                                            kept_properties.insert(
-                                                k_idx,
-                                                memory_manager::ObjectField {
-                                                    value: evaled_val,
-                                                    super_obj: None,
-                                                    visibility: vis,
-                                                },
-                                            );
-                                        }
-                                        Value::Boolean(false) => {}
-                                        other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
-                                                    "std.filterObject: func must return bool, got {}",
-                                                    other.type_name()
-                                                ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
-                                        }
-                                    }
-                                }
-                                let alloc = self
-                                    .memory_manager
-                                    .allocate_object_with_properties(kept_properties);
-                                self.push(Value::Object(alloc.index))?;
-                                continue;
-                            }
-
-                            // Handle std.objectFlatten
-                            if id == chunk::NativeFuncId::ObjectFlatten {
-                                let obj_val = args[0];
-                                let sep_val = args[1];
-                                let sep = match sep_val {
-                                    Value::String(idx) => {
-                                        self.memory_manager.load_string(idx).to_string()
-                                    }
-                                    other => {
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "std.objectFlatten: sep must be string, got {}",
-                                                other.type_name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                    }
-                                };
-                                let mut flat_fields: Vec<(String, Value)> = Vec::new();
-
-                                // Root arguments during recursive flattening
-                                self.memory_manager
-                                    .push_external_roots(args.clone(), Vec::new());
-                                let flatten_res = self.flatten_object_recursive(
-                                    obj_val,
-                                    &sep,
-                                    String::new(),
-                                    &mut flat_fields,
-                                );
-                                self.memory_manager.pop_external_roots();
-                                flatten_res?;
-
-                                let mut properties: std::collections::HashMap<
-                                    chunk::StringIndex,
-                                    memory_manager::ObjectField,
-                                > = std::collections::HashMap::new();
-
-                                // Root the values in flat_fields while building the object
-                                let flat_vals: Vec<Value> =
-                                    flat_fields.iter().map(|(_, v)| *v).collect();
-                                self.memory_manager
-                                    .push_external_roots(flat_vals, Vec::new());
-
-                                for (k_str, v) in flat_fields {
-                                    let k_alloc = self.memory_manager.allocate_string(&k_str);
-                                    properties.insert(
-                                        k_alloc.index,
-                                        memory_manager::ObjectField {
-                                            value: v,
-                                            super_obj: None,
-                                            visibility: FieldVisibility::Visible,
-                                        },
+                                        .push_external_roots(args.clone(), Vec::new());
+                                    let flatten_res = self.flatten_object_recursive(
+                                        obj_val,
+                                        &sep,
+                                        String::new(),
+                                        &mut flat_fields,
                                     );
+                                    self.memory_manager.pop_external_roots();
+                                    flatten_res?;
+
+                                    let mut properties: std::collections::HashMap<
+                                        chunk::StringIndex,
+                                        memory_manager::ObjectField,
+                                    > = std::collections::HashMap::new();
+
+                                    // Root the values in flat_fields while building the object
+                                    let flat_vals: Vec<Value> =
+                                        flat_fields.iter().map(|(_, v)| *v).collect();
+                                    self.memory_manager
+                                        .push_external_roots(flat_vals, Vec::new());
+
+                                    for (k_str, v) in flat_fields {
+                                        let k_alloc = self.memory_manager.allocate_string(&k_str);
+                                        properties.insert(
+                                            k_alloc.index,
+                                            memory_manager::ObjectField {
+                                                value: v,
+                                                super_obj: None,
+                                                visibility: FieldVisibility::Visible,
+                                            },
+                                        );
+                                    }
+                                    let obj_alloc = self
+                                        .memory_manager
+                                        .allocate_object_with_properties(properties);
+
+                                    self.memory_manager.pop_external_roots();
+
+                                    self.push(Value::Object(obj_alloc.index))?;
+
+                                    if obj_alloc.should_garbage_collect {
+                                        self.run_garbage_collection();
+                                    }
+                                    continue;
                                 }
-                                let obj_alloc = self
-                                    .memory_manager
-                                    .allocate_object_with_properties(properties);
 
-                                self.memory_manager.pop_external_roots();
-
-                                self.push(Value::Object(obj_alloc.index))?;
-
-                                if obj_alloc.should_garbage_collect {
-                                    self.run_garbage_collection();
-                                }
-                                continue;
+                                // Call native function
+                                let span = self.get_current_span();
+                                let source_id = self.current_chunk().source_id.to_string();
+                                let result =
+                                    self.call_native_checked(id, &args, span, source_id)?;
+                                self.push(result)?;
                             }
 
-                            // Call native function
-                            let span = self.get_current_span();
-                            let source_id = self.current_chunk().source_id.to_string();
-                            let result =
-                                self.call_native_checked(id, &args, span, source_id)?;
-                            self.push(result)?;
-                        }
-
-                        _ => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!("Cannot call non-function value: {:?}", callee),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
-                        }
-                    }
-                }
+                            _ => {
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!(
+                                        "Cannot call non-function value: {:?}",
+                                        callee
+                                    ),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                });
+                            }
+                        } // close match callee
+                    } // close else
+                } // close Opcode::Call
 
                 Opcode::TailCall => {
                     // Read operands: positional_count and named_count (same layout as Call)
@@ -6154,33 +7207,84 @@ impl VirtualMachine {
                     let positional_count = chunk.code[frame.ip + 1] as usize;
                     let named_count = chunk.code[frame.ip + 2] as usize;
 
-                    // For now, only support positional arguments
-                    if named_count > 0 {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Named arguments not yet implemented".to_string(),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
-                    }
-
-                    let arg_count = positional_count;
-
                     // Advance IP past this instruction (opcode + 2 bytes)
                     self.current_frame_mut().ip += 3;
 
+                    // If named args, resolve them first by rearranging the stack
+                    let mut resolved_arg_count = positional_count;
+                    if named_count > 0 {
+                        let total_stack_items = positional_count + named_count * 2;
+                        let callee_position = self.stack.len() - total_stack_items - 1;
+                        let mut callee = self.stack[callee_position];
+                        callee = self.force_value(callee)?;
+                        self.stack[callee_position] = callee;
+
+                        if let Value::Closure(closure_index) = callee {
+                            let func_index =
+                                self.memory_manager.load_closure(closure_index).function;
+                            let function = self.memory_manager.load_function(func_index);
+                            let arity = function.arity as usize;
+                            let param_names = function.param_names.clone();
+
+                            // Collect named args from stack
+                            let mut named_args: Vec<(StringIndex, Value)> = Vec::new();
+                            for _ in 0..named_count {
+                                let value = self.pop()?;
+                                let name_val = self.pop()?;
+                                if let Value::String(name_idx) = name_val {
+                                    named_args.push((name_idx, value));
+                                } else {
+                                    return Err(RuntimeError {
+                                        span: self.get_current_span(),
+                                        message: "Named argument name must be a string".to_string(),
+                                        source_id: self.current_chunk().source_id.to_string(),
+                                    });
+                                }
+                            }
+
+                            // Collect positional args
+                            let mut positional_args: Vec<Value> = Vec::new();
+                            for _ in 0..positional_count {
+                                positional_args.push(self.pop()?);
+                            }
+                            positional_args.reverse();
+
+                            // Pop callee
+                            self.pop()?;
+
+                            // Build full argument array
+                            let mut args = vec![Value::Uninitialized; arity];
+                            for (i, val) in positional_args.into_iter().enumerate() {
+                                if i < arity {
+                                    args[i] = val;
+                                }
+                            }
+                            for (name_idx, val) in named_args {
+                                if let Some(pos) = param_names.iter().position(|&pn| pn == name_idx)
+                                {
+                                    args[pos] = val;
+                                }
+                            }
+
+                            // Push callee and reordered args back
+                            self.push(Value::Closure(closure_index))?;
+                            resolved_arg_count = arity;
+                            for val in args {
+                                self.push(val)?;
+                            }
+                        } else {
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: "Named arguments only supported for closures".to_string(),
+                                source_id: self.current_chunk().source_id.to_string(),
+                            });
+                        }
+                    }
+
+                    let arg_count = resolved_arg_count;
+
                     // Get callee from stack at position: stack.len() - arg_count - 1
                     let callee_position = self.stack.len() - arg_count - 1;
-                    if callee_position >= self.stack.len() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!(
-                                "Invalid stack access for callee at position {} (stack size: {})",
-                                callee_position,
-                                self.stack.len()
-                            ),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
-                    }
 
                     let mut callee = self.stack[callee_position];
                     callee = self.force_value(callee)?;
@@ -6198,21 +7302,28 @@ impl VirtualMachine {
                     match callee {
                         Value::Closure(closure_index) => {
                             // Validate arity before doing anything destructive
-                            let arity = {
+                            let (arity, required) = {
                                 let closure = self.memory_manager.load_closure(closure_index);
                                 let function = self.memory_manager.load_function(closure.function);
-                                function.arity as usize
+                                (function.arity as usize, function.required_params as usize)
                             };
-                            if arg_count != arity {
+
+                            if arg_count < required || arg_count > arity {
                                 return Err(RuntimeError {
                                     span: self.get_current_span(),
                                     message: format!(
-                                        "Function expects {} arguments, got {}",
-                                        arity, arg_count
+                                        "Function expects {}-{} argument(s), got {}",
+                                        required, arity, arg_count
                                     ),
                                     source_id: self.current_chunk().source_id.to_string(),
                                 });
                             }
+
+                            // Pad missing optional arguments
+                            for _ in arg_count..arity {
+                                self.push(Value::Uninitialized)?;
+                            }
+                            let arg_count = arity;
 
                             // Copy the current frame's stack_base before mutating
                             let current_stack_base = self.current_frame().stack_base;
@@ -6283,6 +7394,9 @@ impl VirtualMachine {
                                     }
                                     chunk::NativeFuncId::Set => {
                                         let arr_val = args[0];
+                                        if let Value::Array(a) = arr_val {
+                                            self.force_all_array_elements(a)?;
+                                        }
                                         let sorted = crate::native::call_native(
                                             chunk::NativeFuncId::Sort,
                                             &[arr_val],
@@ -6299,7 +7413,10 @@ impl VirtualMachine {
                                         let a_val = args[0];
                                         let b_val = args[1];
                                         let a_idx = match a_val {
-                                            Value::Array(i) => i,
+                                            Value::Array(i) => {
+                                                self.force_all_array_elements(i)?;
+                                                i
+                                            }
                                             _ => return Err(RuntimeError {
                                                 span,
                                                 message:
@@ -6309,7 +7426,10 @@ impl VirtualMachine {
                                             }),
                                         };
                                         let b_idx = match b_val {
-                                            Value::Array(i) => i,
+                                            Value::Array(i) => {
+                                                self.force_all_array_elements(i)?;
+                                                i
+                                            }
                                             _ => return Err(RuntimeError {
                                                 span,
                                                 message:
@@ -6342,8 +7462,7 @@ impl VirtualMachine {
 
                             let span = self.get_current_span();
                             let source_id = self.current_chunk().source_id.to_string();
-                            let result =
-                                self.call_native_checked(id, &args, span, source_id)?;
+                            let result = self.call_native_checked(id, &args, span, source_id)?;
                             self.push(result)?;
                         }
                         _ => {
@@ -6414,11 +7533,38 @@ impl VirtualMachine {
                             });
                         }
                         let val = self.stack[location];
-                        val
+                        // Force thunk if needed
+                        if let Value::Closure(ci) = val {
+                            if self.memory_manager.load_closure(ci).is_thunk {
+                                self.stack[location] = Value::Null;
+                                let result = self.force_thunk(ci)?;
+                                self.stack[location] = result;
+                                result
+                            } else {
+                                val
+                            }
+                        } else {
+                            val
+                        }
                     } else if let Some(closed_value) = upvalue.closed_value {
                         // Upvalue is closed - read from heap
-                        let val = closed_value;
-                        val
+                        // Force thunk if needed
+                        if let Value::Closure(ci) = closed_value {
+                            if self.memory_manager.load_closure(ci).is_thunk {
+                                let upvalue_mut =
+                                    self.memory_manager.load_upvalue_mut(upvalue_index);
+                                upvalue_mut.closed_value = Some(Value::Null);
+                                let result = self.force_thunk(ci)?;
+                                let upvalue_mut =
+                                    self.memory_manager.load_upvalue_mut(upvalue_index);
+                                upvalue_mut.closed_value = Some(result);
+                                result
+                            } else {
+                                closed_value
+                            }
+                        } else {
+                            closed_value
+                        }
                     } else {
                         return Err(RuntimeError {
                             span: self.get_current_span(),
@@ -6438,7 +7584,8 @@ impl VirtualMachine {
                     self.advance_pc();
                 }
 
-                Opcode::Closure => {
+                Opcode::Closure | Opcode::MakeThunk => {
+                    let is_thunk = opcode == Opcode::MakeThunk;
                     // Read function index from constants
                     let func_index_in_constants = self.read_u16_operand()?;
                     let chunk = self.current_chunk();
@@ -6537,10 +7684,14 @@ impl VirtualMachine {
                         upvalue_indices.push(upvalue_index);
                     }
 
-                    // Create closure
-                    let closure_allocation = self
-                        .memory_manager
-                        .allocate_closure(func_index, upvalue_indices);
+                    // Create closure (or thunk)
+                    let closure_allocation = if is_thunk {
+                        self.memory_manager
+                            .allocate_thunk(func_index, upvalue_indices)
+                    } else {
+                        self.memory_manager
+                            .allocate_closure(func_index, upvalue_indices)
+                    };
                     self.push(Value::Closure(closure_allocation.index))?;
 
                     if closure_allocation.should_garbage_collect {
@@ -6555,6 +7706,12 @@ impl VirtualMachine {
                     }
                 }
 
+                Opcode::LoadStd => {
+                    self.advance_pc();
+                    let std_obj = self.get_or_create_std_object();
+                    self.push(std_obj)?;
+                }
+
                 // All other opcodes result in runtime error
                 _ => {
                     return Err(RuntimeError {
@@ -6565,6 +7722,36 @@ impl VirtualMachine {
                 }
             }
         }
+    }
+
+    /// Get or create the `std` object with all native functions as hidden fields.
+    fn get_or_create_std_object(&mut self) -> Value {
+        if let Some(obj) = self.std_object {
+            return obj;
+        }
+
+        let mut properties = std::collections::HashMap::new();
+        for &(name, id) in chunk::NativeFuncId::all_with_names() {
+            let key = self.memory_manager.allocate_string(name).index;
+            properties.insert(
+                key,
+                memory_manager::ObjectField {
+                    value: Value::NativeFunction(id),
+                    super_obj: None,
+                    visibility: FieldVisibility::Hidden,
+                },
+            );
+        }
+        let alloc = self
+            .memory_manager
+            .allocate_object_with_properties(properties);
+        let obj = Value::Object(alloc.index);
+        self.std_object = Some(obj);
+        // Also register as a persistent external root so the object survives
+        // GC runs triggered by the compiler (which doesn't know about VM state).
+        self.memory_manager
+            .push_external_roots(vec![obj], Vec::new());
+        obj
     }
 
     /// Check if two values are equal according to Jsonnet semantics.
@@ -6585,18 +7772,26 @@ impl VirtualMachine {
                 if a_idx == b_idx {
                     return Ok(true);
                 }
-                let a_elements = self.memory_manager.load_array(*a_idx).elements.clone();
-                let b_elements = self.memory_manager.load_array(*b_idx).elements.clone();
+                let a_len = self.memory_manager.load_array(*a_idx).elements.len();
+                let b_len = self.memory_manager.load_array(*b_idx).elements.len();
 
-                self.memory_manager.external_roots.push(a_elements.clone());
-                self.memory_manager.external_roots.push(b_elements.clone());
+                self.memory_manager
+                    .external_roots
+                    .push(vec![Value::Array(*a_idx)]);
+                self.memory_manager
+                    .external_roots
+                    .push(vec![Value::Array(*b_idx)]);
 
                 let res = (|| {
-                    if a_elements.len() != b_elements.len() {
+                    if a_len != b_len {
                         return Ok(false);
                     }
-                    for (v_a, v_b) in a_elements.iter().zip(b_elements.iter()) {
-                        if !self.values_equal(v_a, v_b)? {
+                    for i in 0..a_len {
+                        let v_a = self.memory_manager.load_array(*a_idx).elements[i];
+                        let v_a = self.force_array_element(*a_idx, i, v_a)?;
+                        let v_b = self.memory_manager.load_array(*b_idx).elements[i];
+                        let v_b = self.force_array_element(*b_idx, i, v_b)?;
+                        if !self.values_equal(&v_a, &v_b)? {
                             return Ok(false);
                         }
                     }
@@ -6660,11 +7855,7 @@ impl VirtualMachine {
 
     /// Compare two values for ordering according to Jsonnet semantics.
     /// Supports numbers, strings, and arrays. Returns an error for incomparable types.
-    fn compare_values(
-        &mut self,
-        a: Value,
-        b: Value,
-    ) -> Result<std::cmp::Ordering, RuntimeError> {
+    fn compare_values(&mut self, a: Value, b: Value) -> Result<std::cmp::Ordering, RuntimeError> {
         let a = self.force_value(a)?;
         let b = self.force_value(b)?;
         match (a, b) {
@@ -6682,9 +7873,9 @@ impl VirtualMachine {
                 let min_len = a_len.min(b_len);
                 for i in 0..min_len {
                     let a_elem = self.memory_manager.load_array(a_idx).elements[i];
+                    let a_elem = self.force_array_element(a_idx, i, a_elem)?;
                     let b_elem = self.memory_manager.load_array(b_idx).elements[i];
-                    let a_elem = self.force_value(a_elem)?;
-                    let b_elem = self.force_value(b_elem)?;
+                    let b_elem = self.force_array_element(b_idx, i, b_elem)?;
                     let ord = self.compare_values(a_elem, b_elem)?;
                     if ord != std::cmp::Ordering::Equal {
                         return Ok(ord);
@@ -6694,10 +7885,7 @@ impl VirtualMachine {
             }
             _ => Err(RuntimeError {
                 span: self.get_current_span(),
-                message: format!(
-                    "Cannot compare {:?} with {:?}",
-                    a, b
-                ),
+                message: format!("Cannot compare {:?} with {:?}", a, b),
                 source_id: self.current_chunk().source_id.to_string(),
             }),
         }
@@ -6723,9 +7911,12 @@ impl VirtualMachine {
                 self.memory_manager.external_roots.push(current_vals);
 
                 let val_res = match field.value {
-                    Value::Closure(closure_idx) => {
-                        self.execute_thunk_sync(closure_idx, Some(obj_idx), None)
-                    }
+                    Value::Closure(closure_idx) => self.execute_thunk_sync_with_field(
+                        closure_idx,
+                        Some(obj_idx),
+                        field.super_obj,
+                        Some(name),
+                    ),
                     other => Ok(other),
                 };
 
@@ -6763,6 +7954,8 @@ impl VirtualMachine {
                     self.memory_manager.load_string(s).to_owned(),
                 )),
                 Value::Object(object_key) => {
+                    // Check deferred assertions during manifestation
+                    self.check_object_assertions(object_key)?;
                     // Check for circular references
                     if visited.contains(&object_key) {
                         return Err(RuntimeError {
@@ -6785,10 +7978,11 @@ impl VirtualMachine {
 
                     for (key, field) in properties {
                         let field_value = match field.value {
-                            Value::Closure(closure_idx) => self.execute_thunk_sync(
+                            Value::Closure(closure_idx) => self.execute_thunk_sync_with_field(
                                 closure_idx,
                                 Some(object_key),
                                 field.super_obj,
+                                Some(key),
                             )?,
                             v => v,
                         };
@@ -6801,6 +7995,8 @@ impl VirtualMachine {
                     Ok(serde_json::Value::Object(json_object))
                 }
                 Value::Array(array_key) => {
+                    // Force all thunked elements before serialization
+                    self.force_all_array_elements(array_key)?;
                     let elements: Vec<Value> =
                         self.memory_manager.load_array(array_key).elements.clone();
 
@@ -6847,6 +8043,11 @@ impl VirtualMachine {
             roots.push(*val);
         }
 
+        // Root the cached std object so GC doesn't collect it
+        if let Some(std_obj) = self.std_object {
+            roots.push(std_obj);
+        }
+
         // Collect open upvalues - these are upvalues that point to stack locations
         // and haven't been closed yet. They must be kept alive even if not yet part of a closure.
         let mut open_upvalue_roots = Vec::new();
@@ -6874,6 +8075,7 @@ impl VirtualMachine {
             Value::Closure(_) => Ok(true),  // Closures are truthy
             Value::NativeFunction(_) => Ok(true), // Native functions are truthy
             Value::Import(_) => Ok(true),   // Should be unreachable due to force_value
+            Value::Uninitialized => Ok(false),
         }
     }
 
@@ -6951,6 +8153,533 @@ impl VirtualMachine {
         }
     }
 
+    /// Parse a JSON string into a Jsonnet Value using Rust's f64 parser for number consistency.
+    fn parse_json_value(
+        &mut self,
+        input: &str,
+        span: Range<usize>,
+        source_id: &str,
+    ) -> Result<Value, RuntimeError> {
+        let mut pos = 0;
+        let bytes = input.as_bytes();
+        let result = self.parse_json_inner(bytes, &mut pos, &span, source_id)?;
+        // Skip trailing whitespace
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos != bytes.len() {
+            return Err(RuntimeError {
+                span: span.clone(),
+                message: format!(
+                    "std.parseJson: unexpected trailing content at position {}",
+                    pos
+                ),
+                source_id: source_id.to_string(),
+            });
+        }
+        Ok(result)
+    }
+
+    fn parse_json_inner(
+        &mut self,
+        bytes: &[u8],
+        pos: &mut usize,
+        span: &Range<usize>,
+        source_id: &str,
+    ) -> Result<Value, RuntimeError> {
+        self.skip_json_ws(bytes, pos);
+        if *pos >= bytes.len() {
+            return Err(RuntimeError {
+                span: span.clone(),
+                message: "std.parseJson: unexpected end of input".to_string(),
+                source_id: source_id.to_string(),
+            });
+        }
+        match bytes[*pos] {
+            b'n' => {
+                if bytes[*pos..].starts_with(b"null") {
+                    *pos += 4;
+                    Ok(Value::Null)
+                } else {
+                    Err(RuntimeError {
+                        span: span.clone(),
+                        message: "std.parseJson: expected 'null'".to_string(),
+                        source_id: source_id.to_string(),
+                    })
+                }
+            }
+            b't' => {
+                if bytes[*pos..].starts_with(b"true") {
+                    *pos += 4;
+                    Ok(Value::Boolean(true))
+                } else {
+                    Err(RuntimeError {
+                        span: span.clone(),
+                        message: "std.parseJson: expected 'true'".to_string(),
+                        source_id: source_id.to_string(),
+                    })
+                }
+            }
+            b'f' => {
+                if bytes[*pos..].starts_with(b"false") {
+                    *pos += 5;
+                    Ok(Value::Boolean(false))
+                } else {
+                    Err(RuntimeError {
+                        span: span.clone(),
+                        message: "std.parseJson: expected 'false'".to_string(),
+                        source_id: source_id.to_string(),
+                    })
+                }
+            }
+            b'"' => self.parse_json_string(bytes, pos, span, source_id),
+            b'[' => self.parse_json_array(bytes, pos, span, source_id),
+            b'{' => self.parse_json_object(bytes, pos, span, source_id),
+            b'-' | b'0'..=b'9' => self.parse_json_number(bytes, pos, span, source_id),
+            c => Err(RuntimeError {
+                span: span.clone(),
+                message: format!("std.parseJson: unexpected character '{}'", c as char),
+                source_id: source_id.to_string(),
+            }),
+        }
+    }
+
+    fn skip_json_ws(&self, bytes: &[u8], pos: &mut usize) {
+        while *pos < bytes.len() && bytes[*pos].is_ascii_whitespace() {
+            *pos += 1;
+        }
+    }
+
+    fn parse_json_number(
+        &mut self,
+        bytes: &[u8],
+        pos: &mut usize,
+        span: &Range<usize>,
+        source_id: &str,
+    ) -> Result<Value, RuntimeError> {
+        let start = *pos;
+        if *pos < bytes.len() && bytes[*pos] == b'-' {
+            *pos += 1;
+        }
+        while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+            *pos += 1;
+        }
+        if *pos < bytes.len() && bytes[*pos] == b'.' {
+            *pos += 1;
+            while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+                *pos += 1;
+            }
+        }
+        if *pos < bytes.len() && (bytes[*pos] == b'e' || bytes[*pos] == b'E') {
+            *pos += 1;
+            if *pos < bytes.len() && (bytes[*pos] == b'+' || bytes[*pos] == b'-') {
+                *pos += 1;
+            }
+            while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+                *pos += 1;
+            }
+        }
+        let num_str = std::str::from_utf8(&bytes[start..*pos]).unwrap_or("");
+        num_str
+            .parse::<f64>()
+            .map(Value::Number)
+            .map_err(|_| RuntimeError {
+                span: span.clone(),
+                message: format!("std.parseJson: invalid number '{}'", num_str),
+                source_id: source_id.to_string(),
+            })
+    }
+
+    fn parse_json_string(
+        &mut self,
+        bytes: &[u8],
+        pos: &mut usize,
+        span: &Range<usize>,
+        source_id: &str,
+    ) -> Result<Value, RuntimeError> {
+        *pos += 1; // skip opening "
+        let mut s = String::new();
+        while *pos < bytes.len() && bytes[*pos] != b'"' {
+            if bytes[*pos] == b'\\' {
+                *pos += 1;
+                if *pos >= bytes.len() {
+                    return Err(RuntimeError {
+                        span: span.clone(),
+                        message: "std.parseJson: unterminated string escape".to_string(),
+                        source_id: source_id.to_string(),
+                    });
+                }
+                match bytes[*pos] {
+                    b'"' => s.push('"'),
+                    b'\\' => s.push('\\'),
+                    b'/' => s.push('/'),
+                    b'b' => s.push('\u{08}'),
+                    b'f' => s.push('\u{0c}'),
+                    b'n' => s.push('\n'),
+                    b'r' => s.push('\r'),
+                    b't' => s.push('\t'),
+                    b'u' => {
+                        *pos += 1;
+                        if *pos + 4 > bytes.len() {
+                            return Err(RuntimeError {
+                                span: span.clone(),
+                                message: "std.parseJson: incomplete unicode escape".to_string(),
+                                source_id: source_id.to_string(),
+                            });
+                        }
+                        let hex = std::str::from_utf8(&bytes[*pos..*pos + 4]).unwrap_or("");
+                        let cp = u32::from_str_radix(hex, 16).map_err(|_| RuntimeError {
+                            span: span.clone(),
+                            message: format!("std.parseJson: invalid unicode escape \\u{}", hex),
+                            source_id: source_id.to_string(),
+                        })?;
+                        *pos += 4;
+                        // Handle surrogate pairs: \uD800-\uDBFF followed by \uDC00-\uDFFF
+                        if (0xD800..=0xDBFF).contains(&cp)
+                            && *pos + 6 <= bytes.len()
+                            && bytes[*pos] == b'\\'
+                            && bytes[*pos + 1] == b'u'
+                        {
+                            let hex2 =
+                                std::str::from_utf8(&bytes[*pos + 2..*pos + 6]).unwrap_or("");
+                            if let Ok(cp2) = u32::from_str_radix(hex2, 16) {
+                                if (0xDC00..=0xDFFF).contains(&cp2) {
+                                    let full_cp = 0x10000 + ((cp - 0xD800) << 10) + (cp2 - 0xDC00);
+                                    if let Some(c) = char::from_u32(full_cp) {
+                                        s.push(c);
+                                    }
+                                    *pos += 6;
+                                    // continue skips the *pos += 1 at loop end, no adjustment needed
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Some(c) = char::from_u32(cp) {
+                            s.push(c);
+                        }
+                        *pos -= 1; // will be incremented below
+                    }
+                    c => {
+                        return Err(RuntimeError {
+                            span: span.clone(),
+                            message: format!("std.parseJson: invalid escape '\\{}'", c as char),
+                            source_id: source_id.to_string(),
+                        });
+                    }
+                }
+            } else {
+                // Handle UTF-8 multi-byte sequences
+                let remaining = &bytes[*pos..];
+                if let Some(ch) = std::str::from_utf8(remaining)
+                    .ok()
+                    .and_then(|s| s.chars().next())
+                {
+                    s.push(ch);
+                    *pos += ch.len_utf8() - 1; // -1 because of the += 1 below
+                } else {
+                    s.push(bytes[*pos] as char);
+                }
+            }
+            *pos += 1;
+        }
+        if *pos >= bytes.len() {
+            return Err(RuntimeError {
+                span: span.clone(),
+                message: "std.parseJson: unterminated string".to_string(),
+                source_id: source_id.to_string(),
+            });
+        }
+        *pos += 1; // skip closing "
+        let alloc = self.memory_manager.allocate_string(&s);
+        Ok(Value::String(alloc.index))
+    }
+
+    fn parse_json_array(
+        &mut self,
+        bytes: &[u8],
+        pos: &mut usize,
+        span: &Range<usize>,
+        source_id: &str,
+    ) -> Result<Value, RuntimeError> {
+        *pos += 1; // skip [
+        let mut elements = Vec::new();
+        self.skip_json_ws(bytes, pos);
+        if *pos < bytes.len() && bytes[*pos] == b']' {
+            *pos += 1;
+            let alloc = self.memory_manager.allocate_array(elements);
+            return Ok(Value::Array(alloc.index));
+        }
+        loop {
+            let val = self.parse_json_inner(bytes, pos, span, source_id)?;
+            elements.push(val);
+            self.skip_json_ws(bytes, pos);
+            if *pos >= bytes.len() {
+                return Err(RuntimeError {
+                    span: span.clone(),
+                    message: "std.parseJson: unterminated array".to_string(),
+                    source_id: source_id.to_string(),
+                });
+            }
+            if bytes[*pos] == b']' {
+                *pos += 1;
+                break;
+            }
+            if bytes[*pos] != b',' {
+                return Err(RuntimeError {
+                    span: span.clone(),
+                    message: "std.parseJson: expected ',' or ']' in array".to_string(),
+                    source_id: source_id.to_string(),
+                });
+            }
+            *pos += 1; // skip comma
+        }
+        let alloc = self.memory_manager.allocate_array(elements);
+        Ok(Value::Array(alloc.index))
+    }
+
+    fn parse_json_object(
+        &mut self,
+        bytes: &[u8],
+        pos: &mut usize,
+        span: &Range<usize>,
+        source_id: &str,
+    ) -> Result<Value, RuntimeError> {
+        *pos += 1; // skip {
+        let mut props = std::collections::HashMap::new();
+        self.skip_json_ws(bytes, pos);
+        if *pos < bytes.len() && bytes[*pos] == b'}' {
+            *pos += 1;
+            let alloc = self.memory_manager.allocate_object_with_properties(props);
+            return Ok(Value::Object(alloc.index));
+        }
+        loop {
+            self.skip_json_ws(bytes, pos);
+            let key_val = self.parse_json_string(bytes, pos, span, source_id)?;
+            let key_idx = if let Value::String(idx) = key_val {
+                idx
+            } else {
+                unreachable!()
+            };
+            self.skip_json_ws(bytes, pos);
+            if *pos >= bytes.len() || bytes[*pos] != b':' {
+                return Err(RuntimeError {
+                    span: span.clone(),
+                    message: "std.parseJson: expected ':'".to_string(),
+                    source_id: source_id.to_string(),
+                });
+            }
+            *pos += 1; // skip :
+            let val = self.parse_json_inner(bytes, pos, span, source_id)?;
+            props.insert(
+                key_idx,
+                memory_manager::ObjectField {
+                    value: val,
+                    super_obj: None,
+                    visibility: chunk::FieldVisibility::Visible,
+                },
+            );
+            self.skip_json_ws(bytes, pos);
+            if *pos >= bytes.len() {
+                return Err(RuntimeError {
+                    span: span.clone(),
+                    message: "std.parseJson: unterminated object".to_string(),
+                    source_id: source_id.to_string(),
+                });
+            }
+            if bytes[*pos] == b'}' {
+                *pos += 1;
+                break;
+            }
+            if bytes[*pos] != b',' {
+                return Err(RuntimeError {
+                    span: span.clone(),
+                    message: "std.parseJson: expected ',' or '}' in object".to_string(),
+                    source_id: source_id.to_string(),
+                });
+            }
+            *pos += 1; // skip comma
+        }
+        let alloc = self.memory_manager.allocate_object_with_properties(props);
+        Ok(Value::Object(alloc.index))
+    }
+
+    /// Convert a value to a string for use in `+` string concatenation
+    /// and `std.toString`. Produces compact single-line JSON for objects/arrays.
+    fn value_to_string_for_concat(&mut self, val: &Value) -> Result<String, RuntimeError> {
+        // Force thunks/imports first
+        let val = match val {
+            Value::Closure(c) => {
+                if self.memory_manager.load_closure(*c).is_thunk {
+                    self.force_thunk(*c)?
+                } else {
+                    *val
+                }
+            }
+            Value::Import(_) => self.force_value(*val)?,
+            other => *other,
+        };
+        self.value_to_string_inner(&val)
+    }
+
+    fn value_to_string_inner(&mut self, val: &Value) -> Result<String, RuntimeError> {
+        match val {
+            Value::String(s) => Ok(self.memory_manager.load_string(*s).to_string()),
+            Value::Number(n) => {
+                if n.fract() == 0.0 && n.abs() < 1e15 {
+                    Ok(format!("{}", *n as i64))
+                } else {
+                    Ok(format!("{}", n))
+                }
+            }
+            Value::Boolean(b) => Ok(b.to_string()),
+            Value::Null => Ok("null".to_string()),
+            Value::Array(a_idx) => {
+                self.force_all_array_elements(*a_idx)?;
+                let elements = self.memory_manager.load_array(*a_idx).elements.clone();
+                if elements.is_empty() {
+                    return Ok("[ ]".to_string());
+                }
+                let mut items = Vec::with_capacity(elements.len());
+                for elem in &elements {
+                    self.memory_manager
+                        .push_external_roots(vec![*elem], Vec::new());
+                    let s = self.value_to_string_json_value(elem)?;
+                    self.memory_manager.pop_external_roots();
+                    items.push(s);
+                }
+                Ok(format!("[{}]", items.join(", ")))
+            }
+            Value::Object(o_idx) => {
+                self.check_object_assertions(*o_idx)?;
+                let field_data: Vec<(String, Value, Option<ObjectIndex>)> = {
+                    let obj = self.memory_manager.load_object(*o_idx);
+                    let mut fields: Vec<(StringIndex, Value, Option<ObjectIndex>)> = obj
+                        .properties
+                        .iter()
+                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+                        .map(|(k, f)| (*k, f.value, f.super_obj))
+                        .collect();
+                    fields.sort_by(|(ka, _, _), (kb, _, _)| ka.cmp(kb));
+                    fields
+                        .into_iter()
+                        .map(|(k, v, so)| (self.memory_manager.load_string(k).to_string(), v, so))
+                        .collect()
+                };
+                let mut sorted_fields = field_data;
+                sorted_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+
+                if sorted_fields.is_empty() {
+                    return Ok("{ }".to_string());
+                }
+                let mut pairs = Vec::with_capacity(sorted_fields.len());
+                for (key_str, field_val, super_obj) in &sorted_fields {
+                    let forced_val = match field_val {
+                        Value::Closure(c) => {
+                            self.memory_manager
+                                .push_external_roots(vec![*field_val], Vec::new());
+                            let result = self.execute_thunk_sync(*c, Some(*o_idx), *super_obj);
+                            self.memory_manager.pop_external_roots();
+                            result?
+                        }
+                        other => *other,
+                    };
+                    self.memory_manager
+                        .push_external_roots(vec![forced_val], Vec::new());
+                    let val_s = self.value_to_string_json_value(&forced_val)?;
+                    self.memory_manager.pop_external_roots();
+                    pairs.push(format!("\"{}\": {}", Self::json_escape_str(key_str), val_s));
+                }
+                Ok(format!("{{{}}}", pairs.join(", ")))
+            }
+            Value::Closure(c) => {
+                if self.memory_manager.load_closure(*c).is_thunk {
+                    let forced = self.force_thunk(*c)?;
+                    self.value_to_string_inner(&forced)
+                } else {
+                    Ok("<<function>>".to_string())
+                }
+            }
+            Value::Import(_) => {
+                let forced = self.force_value(*val)?;
+                self.value_to_string_inner(&forced)
+            }
+            Value::NativeFunction(_) | Value::Function(_) => Ok("<<function>>".to_string()),
+            Value::Binary(_) | Value::Uninitialized => Ok("<<internal>>".to_string()),
+        }
+    }
+
+    /// Produce compact JSON representation of a value (for use inside arrays/objects in toString)
+    fn value_to_string_json_value(&mut self, val: &Value) -> Result<String, RuntimeError> {
+        // Force thunks first
+        let val = match val {
+            Value::Closure(c) => {
+                if self.memory_manager.load_closure(*c).is_thunk {
+                    self.force_thunk(*c)?
+                } else {
+                    *val
+                }
+            }
+            Value::Import(_) => self.force_value(*val)?,
+            other => *other,
+        };
+        match val {
+            Value::String(s_idx) => {
+                let s = self.memory_manager.load_string(s_idx).to_string();
+                Ok(format!("\"{}\"", Self::json_escape_str(&s)))
+            }
+            // For all other types, toString and JSON representation are the same
+            _ => self.value_to_string_inner(&val),
+        }
+    }
+
+    fn json_escape_str(s: &str) -> String {
+        let mut out = String::new();
+        for ch in s.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// Replace empty collection patterns "[\n\n<ws>]" → "[ ]" and "{\n\n<ws>}" → "{ }"
+    /// for manifestJson (which differs from manifestJsonEx in empty collection handling).
+    fn fix_manifest_json_empties(s: &str) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let mut out = Vec::with_capacity(chars.len());
+        let mut i = 0;
+        while i < chars.len() {
+            if (chars[i] == '[' || chars[i] == '{')
+                && i + 2 < chars.len()
+                && chars[i + 1] == '\n'
+                && chars[i + 2] == '\n'
+            {
+                let open = chars[i];
+                let close = if open == '[' { ']' } else { '}' };
+                let mut j = i + 3;
+                while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == close {
+                    out.push(open);
+                    out.push(' ');
+                    out.push(close);
+                    i = j + 1;
+                    continue;
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out.into_iter().collect()
+    }
+
     /// Serialize a Value to a JSON string with configurable formatting
     fn manifest_json_value(
         &mut self,
@@ -6970,7 +8699,13 @@ impl VirtualMachine {
             // Force closures/imports
             let value = self.force_value(value)?;
             let value = match value {
-                Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                Value::Closure(c) => {
+                    if self.memory_manager.load_closure(c).is_thunk {
+                        self.force_thunk(c)?
+                    } else {
+                        self.execute_thunk_sync(c, None, None)?
+                    }
+                }
                 other => other,
             };
 
@@ -7019,12 +8754,14 @@ impl VirtualMachine {
                     Ok(out)
                 }
                 Value::Array(a_idx) => {
+                    // Force all thunked elements before iterating
+                    self.force_all_array_elements(a_idx)?;
                     let elements = self.memory_manager.load_array(a_idx).elements.clone();
+                    let close_indent = indent.repeat(depth);
                     if elements.is_empty() {
-                        return Ok("[ ]".to_string());
+                        return Ok(format!("[{}{}{}]", newline, newline, close_indent));
                     }
                     let item_indent = indent.repeat(depth + 1);
-                    let close_indent = indent.repeat(depth);
                     let mut items = Vec::with_capacity(elements.len());
                     for elem in elements {
                         // Root elem before recursive call
@@ -7052,6 +8789,8 @@ impl VirtualMachine {
                     ))
                 }
                 Value::Object(o_idx) => {
+                    // Check deferred assertions during manifestation
+                    self.check_object_assertions(o_idx)?;
                     // Collect visible fields
                     let field_data: Vec<(StringIndex, Value, Option<ObjectIndex>)> = {
                         let obj = self.memory_manager.load_object(o_idx);
@@ -7081,7 +8820,8 @@ impl VirtualMachine {
                     sorted_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                     if sorted_fields.is_empty() {
-                        return Ok("{ }".to_string());
+                        let close_indent = indent.repeat(depth);
+                        return Ok(format!("{{{}{}{}}}", newline, newline, close_indent));
                     }
 
                     let item_indent = indent.repeat(depth + 1);
@@ -7321,8 +9061,16 @@ impl VirtualMachine {
     }
 
     fn prune_value(&mut self, val: Value) -> Result<Value, RuntimeError> {
+        // Force thunks first
+        let val = match val {
+            Value::Closure(c) if self.memory_manager.load_closure(c).is_thunk => {
+                self.force_thunk(c)?
+            }
+            other => other,
+        };
         match val {
             Value::Array(a_idx) => {
+                self.force_all_array_elements(a_idx)?;
                 let elements = self.memory_manager.load_array(a_idx).elements.clone();
                 let mut pruned = Vec::new();
                 for elem in elements {
@@ -7339,6 +9087,9 @@ impl VirtualMachine {
                 Ok(Value::Array(alloc.index))
             }
             Value::Object(o_idx) => {
+                // Root the object and all field values to protect from GC
+                self.memory_manager
+                    .push_external_roots(vec![Value::Object(o_idx)], Vec::new());
                 let field_data: Vec<(
                     StringIndex,
                     Value,
@@ -7352,6 +9103,9 @@ impl VirtualMachine {
                         .map(|(k, f)| (*k, f.value, f.super_obj, f.visibility))
                         .collect()
                 };
+                let field_vals: Vec<Value> = field_data.iter().map(|(_, v, _, _)| *v).collect();
+                self.memory_manager
+                    .push_external_roots(field_vals, Vec::new());
                 let mut new_props: std::collections::HashMap<
                     StringIndex,
                     memory_manager::ObjectField,
@@ -7387,6 +9141,8 @@ impl VirtualMachine {
                         );
                     }
                 }
+                self.memory_manager.pop_external_roots(); // field values
+                self.memory_manager.pop_external_roots(); // object
                 let alloc = self
                     .memory_manager
                     .allocate_object_with_properties(new_props);
@@ -7445,6 +9201,7 @@ impl VirtualMachine {
                 });
             }
         };
+        self.force_all_array_elements(arr_idx)?;
         let elements = self.memory_manager.load_array(arr_idx).elements.clone();
         let mut result = Vec::new();
         let mut last_key: Option<Value> = None;
@@ -7490,7 +9247,13 @@ impl VirtualMachine {
     ) -> Result<String, RuntimeError> {
         let forced = self.force_value(value)?;
         let forced = match forced {
-            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            Value::Closure(c) => {
+                if self.memory_manager.load_closure(c).is_thunk {
+                    self.force_thunk(c)?
+                } else {
+                    self.execute_thunk_sync(c, None, None)?
+                }
+            }
             other => other,
         };
         let obj_idx = match forced {
@@ -7508,6 +9271,10 @@ impl VirtualMachine {
         };
 
         let mut result = String::new();
+
+        // Root the top-level object so it survives GC during processing
+        self.memory_manager
+            .push_external_roots(vec![Value::Object(obj_idx)], Vec::new());
 
         // Process "main" section (no header)
         let main_val = {
@@ -7531,6 +9298,7 @@ impl VirtualMachine {
             let main_obj_idx = match main_forced {
                 Value::Object(idx) => idx,
                 other => {
+                    self.memory_manager.pop_external_roots(); // pop obj_idx root
                     return Err(RuntimeError {
                         span,
                         message: format!(
@@ -7541,6 +9309,9 @@ impl VirtualMachine {
                     });
                 }
             };
+            // Root main_obj_idx
+            self.memory_manager
+                .push_external_roots(vec![Value::Object(main_obj_idx)], Vec::new());
             let main_fields: Vec<(String, Value, Option<ObjectIndex>)> = {
                 let mobj = self.memory_manager.load_object(main_obj_idx);
                 let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = mobj
@@ -7566,9 +9337,9 @@ impl VirtualMachine {
                     other => other,
                 };
                 let forced_val = self.force_value(forced_val)?;
-                let val_str = self.ini_scalar_to_string(forced_val, span.clone(), &source_id)?;
-                result.push_str(&format!("{} = {}\n", key, val_str));
+                self.ini_field_to_string(&key, forced_val, &mut result, span.clone(), &source_id)?;
             }
+            self.memory_manager.pop_external_roots(); // pop main_obj_idx root
         }
 
         // Process named sections
@@ -7593,6 +9364,7 @@ impl VirtualMachine {
             let sections_obj_idx = match sections_forced {
                 Value::Object(idx) => idx,
                 other => {
+                    self.memory_manager.pop_external_roots(); // pop obj_idx root
                     return Err(RuntimeError {
                         span,
                         message: format!(
@@ -7603,6 +9375,9 @@ impl VirtualMachine {
                     });
                 }
             };
+            // Root sections_obj_idx
+            self.memory_manager
+                .push_external_roots(vec![Value::Object(sections_obj_idx)], Vec::new());
             let section_names: Vec<(String, Value, Option<ObjectIndex>)> = {
                 let sobj = self.memory_manager.load_object(sections_obj_idx);
                 let mut names: Vec<(String, Value, Option<ObjectIndex>)> = sobj
@@ -7632,6 +9407,8 @@ impl VirtualMachine {
                 let section_obj_idx = match section_forced {
                     Value::Object(idx) => idx,
                     other => {
+                        self.memory_manager.pop_external_roots(); // pop sections_obj_idx root
+                        self.memory_manager.pop_external_roots(); // pop obj_idx root
                         return Err(RuntimeError {
                             span,
                             message: format!(
@@ -7643,6 +9420,9 @@ impl VirtualMachine {
                         });
                     }
                 };
+                // Root section_obj_idx for the duration of field processing
+                self.memory_manager
+                    .push_external_roots(vec![Value::Object(section_obj_idx)], Vec::new());
                 let section_fields: Vec<(String, Value, Option<ObjectIndex>)> = {
                     let sobj = self.memory_manager.load_object(section_obj_idx);
                     let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = sobj
@@ -7668,14 +9448,62 @@ impl VirtualMachine {
                         other => other,
                     };
                     let forced_val = self.force_value(forced_val)?;
-                    let val_str =
-                        self.ini_scalar_to_string(forced_val, span.clone(), &source_id)?;
-                    result.push_str(&format!("{} = {}\n", key, val_str));
+                    self.ini_field_to_string(
+                        &key,
+                        forced_val,
+                        &mut result,
+                        span.clone(),
+                        &source_id,
+                    )?;
                 }
+                self.memory_manager.pop_external_roots(); // pop section_obj_idx root
             }
+            self.memory_manager.pop_external_roots(); // pop sections_obj_idx root
         }
 
+        self.memory_manager.pop_external_roots(); // pop obj_idx root
         Ok(result)
+    }
+
+    fn ini_field_to_string(
+        &mut self,
+        key: &str,
+        value: Value,
+        result: &mut String,
+        span: Range<usize>,
+        source_id: &str,
+    ) -> Result<(), RuntimeError> {
+        match value {
+            Value::Array(arr_idx) => {
+                let elements: Vec<Value> = {
+                    let arr = self.memory_manager.load_array(arr_idx);
+                    arr.elements.clone()
+                };
+                for elem in elements {
+                    let forced_elem = self.force_value(elem)?;
+                    let forced_elem = match forced_elem {
+                        Value::Closure(c) => {
+                            if self.memory_manager.load_closure(c).is_thunk {
+                                self.force_thunk(c)?
+                            } else {
+                                self.execute_thunk_sync(c, None, None)?
+                            }
+                        }
+                        other => other,
+                    };
+                    let forced_elem = self.force_value(forced_elem)?;
+                    let val_str =
+                        self.ini_scalar_to_string(forced_elem, span.clone(), source_id)?;
+                    result.push_str(&format!("{} = {}\n", key, val_str));
+                }
+                Ok(())
+            }
+            _ => {
+                let val_str = self.ini_scalar_to_string(value, span, source_id)?;
+                result.push_str(&format!("{} = {}\n", key, val_str));
+                Ok(())
+            }
+        }
     }
 
     fn ini_scalar_to_string(
@@ -7716,7 +9544,13 @@ impl VirtualMachine {
     ) -> Result<String, RuntimeError> {
         let forced = self.force_value(value)?;
         let forced = match forced {
-            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            Value::Closure(c) => {
+                if self.memory_manager.load_closure(c).is_thunk {
+                    self.force_thunk(c)?
+                } else {
+                    self.execute_thunk_sync(c, None, None)?
+                }
+            }
             other => other,
         };
 
@@ -7767,10 +9601,8 @@ impl VirtualMachine {
             Value::Array(a_idx) => {
                 let elements = self.memory_manager.load_array(a_idx).elements.clone();
                 if elements.is_empty() {
-                    return Ok("[ ]".to_string());
+                    return Ok("[]".to_string());
                 }
-                let indent = "   ".repeat(depth + 1);
-                let close_indent = "   ".repeat(depth);
                 let mut items = Vec::with_capacity(elements.len());
                 for elem in elements {
                     let s = self.manifest_python_value(
@@ -7779,9 +9611,9 @@ impl VirtualMachine {
                         span.clone(),
                         source_id.clone(),
                     )?;
-                    items.push(format!("{}{}", indent, s));
+                    items.push(s);
                 }
-                Ok(format!("[\n{}\n{}]", items.join(",\n"), close_indent))
+                Ok(format!("[{}]", items.join(", ")))
             }
             Value::Object(o_idx) => {
                 let field_data: Vec<(String, Value, Option<ObjectIndex>)> = {
@@ -7803,11 +9635,12 @@ impl VirtualMachine {
                 };
 
                 if field_data.is_empty() {
-                    return Ok("{ }".to_string());
+                    return Ok("{}".to_string());
                 }
 
-                let item_indent = "   ".repeat(depth + 1);
-                let close_indent = "   ".repeat(depth);
+                // Root the object during field processing
+                self.memory_manager
+                    .push_external_roots(vec![Value::Object(o_idx)], Vec::new());
                 let mut pairs = Vec::with_capacity(field_data.len());
                 for (key_str, field_val, super_obj) in field_data {
                     let forced_val = match field_val {
@@ -7836,9 +9669,10 @@ impl VirtualMachine {
                         }
                     }
                     key_out.push('"');
-                    pairs.push(format!("{}{}: {}", item_indent, key_out, val_s));
+                    pairs.push(format!("{}: {}", key_out, val_s));
                 }
-                Ok(format!("{{\n{}\n{}}}", pairs.join(",\n"), close_indent))
+                self.memory_manager.pop_external_roots();
+                Ok(format!("{{{}}}", pairs.join(", ")))
             }
             _ => Err(RuntimeError {
                 span,
@@ -7857,7 +9691,13 @@ impl VirtualMachine {
     ) -> Result<String, RuntimeError> {
         let forced = self.force_value(value)?;
         let forced = match forced {
-            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            Value::Closure(c) => {
+                if self.memory_manager.load_closure(c).is_thunk {
+                    self.force_thunk(c)?
+                } else {
+                    self.execute_thunk_sync(c, None, None)?
+                }
+            }
             other => other,
         };
         let obj_idx = match forced {
@@ -7917,7 +9757,13 @@ impl VirtualMachine {
     ) -> Result<String, RuntimeError> {
         let forced = self.force_value(value)?;
         let forced = match forced {
-            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            Value::Closure(c) => {
+                if self.memory_manager.load_closure(c).is_thunk {
+                    self.force_thunk(c)?
+                } else {
+                    self.execute_thunk_sync(c, None, None)?
+                }
+            }
             other => other,
         };
 
@@ -7947,7 +9793,27 @@ impl VirtualMachine {
             }
             Value::String(s_idx) => {
                 let s = self.memory_manager.load_string(s_idx).to_string();
-                if yaml_needs_quoting(&s) {
+                // Use block scalar (|) for multiline strings ending with \n
+                if s.contains('\n') && s.ends_with('\n') {
+                    // Block scalar: "|" marker + content indented at depth+1
+                    let content_indent = "  ".repeat(depth + 1);
+                    let content = &s[..s.len() - 1]; // strip trailing \n
+                    let indented_lines: Vec<String> = content
+                        .split('\n')
+                        .map(|line| {
+                            if line.is_empty() {
+                                String::new()
+                            } else {
+                                format!("{}{}", content_indent, line)
+                            }
+                        })
+                        .collect();
+                    Ok(format!("|\n{}", indented_lines.join("\n")))
+                } else if depth == 0 && !yaml_value_needs_quoting(&s) {
+                    // Top-level strings that are YAML-safe are bare
+                    Ok(s)
+                } else {
+                    // String values inside structures are double-quoted in Jsonnet YAML output
                     let mut out = String::from("\"");
                     for ch in s.chars() {
                         match ch {
@@ -7964,44 +9830,100 @@ impl VirtualMachine {
                     }
                     out.push('"');
                     Ok(out)
-                } else {
-                    Ok(s)
                 }
             }
             Value::Array(a_idx) => {
                 let elements = self.memory_manager.load_array(a_idx).elements.clone();
                 if elements.is_empty() {
-                    return Ok("[ ]".to_string());
+                    return Ok("[]".to_string());
                 }
+                // Root array elements to protect from GC
+                self.memory_manager
+                    .push_external_roots(elements.clone(), Vec::new());
                 let indent = "  ".repeat(depth);
                 let mut lines = Vec::with_capacity(elements.len());
                 for elem in elements {
-                    let elem_str = self.manifest_yaml_doc(
-                        elem,
-                        depth + 1,
-                        indent_array_in_object,
-                        quote_keys,
-                        span.clone(),
-                        source_id.clone(),
-                    )?;
-                    if elem_str.contains('\n') {
-                        // Multi-line: first line on same line as "- ", rest indented
-                        let mut sub_lines = elem_str.lines();
-                        let first = sub_lines.next().unwrap_or("");
-                        let rest: Vec<String> =
-                            sub_lines.map(|l| format!("{}  {}", indent, l)).collect();
-                        if rest.is_empty() {
-                            lines.push(format!("{}- {}", indent, first));
-                        } else {
-                            lines.push(format!("{}- {}\n{}", indent, first, rest.join("\n")));
+                    let forced_elem = self.force_value(elem)?;
+                    let forced_elem = match forced_elem {
+                        Value::Closure(c) => {
+                            if self.memory_manager.load_closure(c).is_thunk {
+                                self.force_thunk(c)?
+                            } else {
+                                self.execute_thunk_sync(c, None, None)?
+                            }
                         }
+                        other => other,
+                    };
+
+                    let is_nonempty_array = if let Value::Array(ai) = forced_elem {
+                        !self.memory_manager.load_array(ai).elements.is_empty()
                     } else {
-                        lines.push(format!("{}- {}", indent, elem_str));
+                        false
+                    };
+                    if is_nonempty_array {
+                        // Array element is itself a non-empty array: put "-" alone, indent child below
+                        let elem_str = self.manifest_yaml_doc(
+                            forced_elem,
+                            depth + 1,
+                            indent_array_in_object,
+                            quote_keys,
+                            span.clone(),
+                            source_id.clone(),
+                        )?;
+                        lines.push(format!("{}-\n{}", indent, elem_str));
+                    } else {
+                        // Non-array element: render at depth+1 and strip child indent
+                        // from the first line (the "- " prefix replaces it)
+                        let elem_str = self.manifest_yaml_doc(
+                            forced_elem,
+                            depth + 1,
+                            indent_array_in_object,
+                            quote_keys,
+                            span.clone(),
+                            source_id.clone(),
+                        )?;
+                        let child_indent = "  ".repeat(depth + 1);
+                        if elem_str.contains('\n') {
+                            let mut sub_lines = elem_str.lines();
+                            let first = sub_lines.next().unwrap_or("");
+                            let first_stripped = first.strip_prefix(&child_indent).unwrap_or(first);
+                            // For block scalars (first line is "|"), strip child indent
+                            // from content lines too, since the content indent is absolute
+                            // and needs adjusting for the "- " prefix position.
+                            let strip_rest = first_stripped == "|";
+                            let rest: Vec<String> = sub_lines
+                                .map(|l| {
+                                    if strip_rest {
+                                        l.strip_prefix("  ").unwrap_or(l).to_string()
+                                    } else {
+                                        l.to_string()
+                                    }
+                                })
+                                .collect();
+                            if rest.is_empty() {
+                                lines.push(format!("{}- {}", indent, first_stripped));
+                            } else {
+                                lines.push(format!(
+                                    "{}- {}\n{}",
+                                    indent,
+                                    first_stripped,
+                                    rest.join("\n")
+                                ));
+                            }
+                        } else {
+                            let stripped =
+                                elem_str.strip_prefix(&child_indent).unwrap_or(&elem_str);
+                            lines.push(format!("{}- {}", indent, stripped));
+                        }
                     }
                 }
+                self.memory_manager.pop_external_roots();
                 Ok(lines.join("\n"))
             }
             Value::Object(o_idx) => {
+                // Root the object to protect from GC during field processing
+                self.memory_manager
+                    .push_external_roots(vec![Value::Object(o_idx)], Vec::new());
                 let field_data: Vec<(String, Value, Option<ObjectIndex>)> = {
                     let obj = self.memory_manager.load_object(o_idx);
                     let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = obj
@@ -8021,8 +9943,14 @@ impl VirtualMachine {
                 };
 
                 if field_data.is_empty() {
-                    return Ok("{ }".to_string());
+                    self.memory_manager.pop_external_roots();
+                    return Ok("{}".to_string());
                 }
+
+                // Root all field values (closures/thunks)
+                let field_values: Vec<Value> = field_data.iter().map(|(_, v, _)| *v).collect();
+                self.memory_manager
+                    .push_external_roots(field_values, Vec::new());
 
                 let indent = "  ".repeat(depth);
                 let mut lines = Vec::with_capacity(field_data.len());
@@ -8049,31 +9977,73 @@ impl VirtualMachine {
                         }
                         out.push('"');
                         out
+                    } else if yaml_needs_quoting(&key_str) {
+                        // Even with quote_keys=false, some keys need quoting
+                        let mut out = String::from("\"");
+                        for ch in key_str.chars() {
+                            match ch {
+                                '"' => out.push_str("\\\""),
+                                '\\' => out.push_str("\\\\"),
+                                '\n' => out.push_str("\\n"),
+                                '\r' => out.push_str("\\r"),
+                                '\t' => out.push_str("\\t"),
+                                c if (c as u32) < 0x20 => {
+                                    out.push_str(&format!("\\u{:04x}", c as u32));
+                                }
+                                c => out.push(c),
+                            }
+                        }
+                        out.push('"');
+                        out
                     } else {
                         key_str.clone()
                     };
 
+                    // For arrays in objects, use depth (not depth+1) when
+                    // indent_array_in_object is false — array items sit at the
+                    // same indent level as the key.
+                    let val_is_array = matches!(forced_val, Value::Array(_));
+                    let child_depth = if val_is_array && !indent_array_in_object {
+                        depth
+                    } else {
+                        depth + 1
+                    };
                     let val_str = self.manifest_yaml_doc(
                         forced_val,
-                        depth + 1,
+                        child_depth,
                         indent_array_in_object,
                         quote_keys,
                         span.clone(),
                         source_id.clone(),
                     )?;
 
-                    if val_str.contains('\n') {
-                        // Multi-line value: key on its own line then indented content
-                        let indented: String = val_str
-                            .lines()
-                            .map(|l| format!("{}  {}", indent, l))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        lines.push(format!("{}{}:\n{}", indent, key_repr, indented));
+                    if val_str.starts_with("|\n") {
+                        // Block scalar: put "|" inline with key, content below
+                        // Strip one level of indent from content lines since the
+                        // "|" is now inline with the key (not at child depth)
+                        let content_lines: Vec<&str> = val_str[2..].lines().collect();
+                        let adjusted: Vec<String> = content_lines
+                            .iter()
+                            .map(|l| l.strip_prefix("  ").unwrap_or(l).to_string())
+                            .collect();
+                        lines.push(format!(
+                            "{}{}: |\n{}",
+                            indent,
+                            key_repr,
+                            adjusted.join("\n")
+                        ));
+                    } else if val_str.contains('\n') {
+                        // Multi-line value: key on its own line, value already indented
+                        lines.push(format!("{}{}:\n{}", indent, key_repr, val_str));
+                    } else if val_is_array && val_str != "[]" {
+                        // Non-empty array value: put on next line for YAML style
+                        lines.push(format!("{}{}:\n{}", indent, key_repr, val_str));
                     } else {
                         lines.push(format!("{}{}: {}", indent, key_repr, val_str));
                     }
                 }
+                self.memory_manager.pop_external_roots(); // field values
+                self.memory_manager.pop_external_roots(); // object
                 Ok(lines.join("\n"))
             }
             other => Err(RuntimeError {
@@ -8095,7 +10065,13 @@ impl VirtualMachine {
     ) -> Result<String, RuntimeError> {
         let forced = self.force_value(value)?;
         let forced = match forced {
-            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            Value::Closure(c) => {
+                if self.memory_manager.load_closure(c).is_thunk {
+                    self.force_thunk(c)?
+                } else {
+                    self.execute_thunk_sync(c, None, None)?
+                }
+            }
             other => other,
         };
         let arr_idx = match forced {
@@ -8118,6 +10094,10 @@ impl VirtualMachine {
             return Ok(String::new());
         }
 
+        // Root elements to protect from GC
+        self.memory_manager
+            .push_external_roots(elements.clone(), Vec::new());
+
         let mut parts: Vec<String> = Vec::new();
         for elem in elements {
             let doc = self.manifest_yaml_doc(
@@ -8131,11 +10111,82 @@ impl VirtualMachine {
             parts.push(format!("---\n{}", doc));
         }
 
+        self.memory_manager.pop_external_roots();
         let mut result = parts.join("\n");
         if c_document_end {
-            result.push_str("\n...");
+            result.push_str("\n...\n");
+        } else {
+            result.push('\n');
         }
         Ok(result)
+    }
+
+    fn parse_yaml_multi_doc(
+        &mut self,
+        s: &str,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<Value, RuntimeError> {
+        // Split YAML into documents by --- separators
+        // A line matching /^---(\s|$)/ separates documents
+        let mut doc_strings: Vec<String> = Vec::new();
+        let mut current_doc = String::new();
+        let mut has_separator = false;
+        let mut seen_content_before_separator = false;
+
+        for line in s.lines() {
+            let trimmed = line.trim_end();
+            if trimmed == "---" || trimmed.starts_with("--- ") {
+                has_separator = true;
+                if seen_content_before_separator || !current_doc.trim().is_empty() {
+                    doc_strings.push(current_doc.clone());
+                    seen_content_before_separator = true;
+                }
+                current_doc.clear();
+            } else {
+                if !current_doc.is_empty() {
+                    current_doc.push('\n');
+                }
+                current_doc.push_str(line);
+                if !line.trim().is_empty() {
+                    seen_content_before_separator = true;
+                }
+            }
+        }
+        // Push the last document
+        doc_strings.push(current_doc);
+
+        if !has_separator {
+            // Single document - parse normally
+            let yaml_val: serde_yaml::Value =
+                serde_yaml::from_str(s).map_err(|e| RuntimeError {
+                    span: span.clone(),
+                    message: format!("parseYaml: {}", e),
+                    source_id: source_id.clone(),
+                })?;
+            return self.serde_yaml_to_jsonnet_value(yaml_val, span, source_id);
+        }
+
+        // Multiple documents → parse each and return array
+        let mut elements = Vec::new();
+        for doc_str in &doc_strings {
+            let trimmed = doc_str.trim();
+            if trimmed.is_empty() {
+                elements.push(Value::Null);
+            } else {
+                let yaml_val: serde_yaml::Value =
+                    serde_yaml::from_str(trimmed).map_err(|e| RuntimeError {
+                        span: span.clone(),
+                        message: format!("parseYaml: {}", e),
+                        source_id: source_id.clone(),
+                    })?;
+                let val =
+                    self.serde_yaml_to_jsonnet_value(yaml_val, span.clone(), source_id.clone())?;
+                elements.push(val);
+            }
+        }
+        let alloc = self.memory_manager.allocate_array(elements);
+        Ok(Value::Array(alloc.index))
     }
 
     fn serde_yaml_to_jsonnet_value(
@@ -8208,9 +10259,27 @@ impl VirtualMachine {
         span: Range<usize>,
         source_id: String,
     ) -> Result<String, RuntimeError> {
+        self.memory_manager.external_roots.push(vec![value]);
+        let result = self.manifest_xml_jsonml_inner(value, span, source_id);
+        self.memory_manager.external_roots.pop();
+        result
+    }
+
+    fn manifest_xml_jsonml_inner(
+        &mut self,
+        value: Value,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
         let forced = self.force_value(value)?;
         let forced = match forced {
-            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            Value::Closure(c) => {
+                if self.memory_manager.load_closure(c).is_thunk {
+                    self.force_thunk(c)?
+                } else {
+                    self.execute_thunk_sync(c, None, None)?
+                }
+            }
             other => other,
         };
         match forced {
@@ -8219,8 +10288,13 @@ impl VirtualMachine {
                 Ok(xml_escape(&s))
             }
             Value::Array(arr_idx) => {
+                // Force all array elements first to avoid GC issues during recursive processing
+                self.force_all_array_elements(arr_idx)?;
                 let elements = self.memory_manager.load_array(arr_idx).elements.clone();
+                // Root the elements to protect from GC during recursive calls
+                self.memory_manager.external_roots.push(elements.clone());
                 if elements.is_empty() {
+                    self.memory_manager.external_roots.pop();
                     return Err(RuntimeError {
                         span,
                         message:
@@ -8232,7 +10306,13 @@ impl VirtualMachine {
                 // First element: tag name
                 let tag_val = self.force_value(elements[0])?;
                 let tag_val = match tag_val {
-                    Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                    Value::Closure(c) => {
+                        if self.memory_manager.load_closure(c).is_thunk {
+                            self.force_thunk(c)?
+                        } else {
+                            self.execute_thunk_sync(c, None, None)?
+                        }
+                    }
                     other => other,
                 };
                 let tag = match tag_val {
@@ -8256,7 +10336,13 @@ impl VirtualMachine {
                 if elements.len() > 1 {
                     let second_val = self.force_value(elements[1])?;
                     let second_val = match second_val {
-                        Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                        Value::Closure(c) => {
+                            if self.memory_manager.load_closure(c).is_thunk {
+                                self.force_thunk(c)?
+                            } else {
+                                self.execute_thunk_sync(c, None, None)?
+                            }
+                        }
                         other => other,
                     };
                     if let Value::Object(obj_idx) = second_val {
@@ -8318,6 +10404,7 @@ impl VirtualMachine {
                     children.push_str(&child_str);
                 }
 
+                self.memory_manager.external_roots.pop();
                 Ok(format!("<{}{}>{}</{}>", tag, attrs, children, tag))
             }
             other => Err(RuntimeError {
@@ -8340,7 +10427,13 @@ impl VirtualMachine {
     ) -> Result<String, RuntimeError> {
         let forced = self.force_value(value)?;
         let forced = match forced {
-            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+            Value::Closure(c) => {
+                if self.memory_manager.load_closure(c).is_thunk {
+                    self.force_thunk(c)?
+                } else {
+                    self.execute_thunk_sync(c, None, None)?
+                }
+            }
             other => other,
         };
         let obj_idx = match forced {
@@ -8354,7 +10447,9 @@ impl VirtualMachine {
             }
         };
         let indent_owned = indent.to_string();
-        self.manifest_toml_table(obj_idx, &indent_owned, &[], span, source_id)
+        let result = self.manifest_toml_table(obj_idx, &indent_owned, &[], 0, span, source_id)?;
+        // Trim trailing newline - caller adds it back if needed
+        Ok(result.trim_end_matches('\n').to_string())
     }
 
     fn manifest_toml_table(
@@ -8362,9 +10457,14 @@ impl VirtualMachine {
         obj_idx: ObjectIndex,
         indent: &str,
         path: &[String],
+        depth: usize,
         span: Range<usize>,
         source_id: String,
     ) -> Result<String, RuntimeError> {
+        // Root the object to protect from GC during recursive processing
+        self.memory_manager
+            .external_roots
+            .push(vec![Value::Object(obj_idx)]);
         let fields: Vec<(String, Value, Option<ObjectIndex>)> = {
             let obj = self.memory_manager.load_object(obj_idx);
             let mut f: Vec<(String, Value, Option<ObjectIndex>)> = obj
@@ -8382,10 +10482,29 @@ impl VirtualMachine {
             f.sort_by(|a, b| a.0.cmp(&b.0));
             f
         };
+        // Root all field values to protect from GC during recursive processing
+        let field_values: Vec<Value> = fields.iter().map(|(_, v, _)| *v).collect();
+        self.memory_manager.external_roots.push(field_values);
+
+        let content_indent = indent.repeat(depth);
 
         let mut scalars = String::new();
-        let mut tables = String::new();
-        let mut array_tables = String::new();
+        // Collect sub-sections: (key, is_array_of_tables, forced_data)
+        // We'll store the data needed to render each sub-section later
+        enum SubSection {
+            Table {
+                key: String,
+                sub_obj_idx: ObjectIndex,
+            },
+            ArrayOfTables {
+                key: String,
+                elem_objs: Vec<ObjectIndex>,
+            },
+        }
+        let mut sub_sections: Vec<SubSection> = Vec::new();
+        // Pre-push an empty vec for sub-section roots so we can add to it during the loop
+        self.memory_manager.external_roots.push(Vec::new());
+        let sub_section_roots_idx = self.memory_manager.external_roots.len() - 1;
 
         for (key, val, super_obj) in fields {
             let forced = match val {
@@ -8398,44 +10517,56 @@ impl VirtualMachine {
             };
             match forced {
                 Value::Object(sub_obj_idx) => {
-                    let mut sub_path = path.to_vec();
-                    sub_path.push(key.clone());
-                    let path_str = sub_path.join(".");
-                    let indent_owned = indent.to_string();
-                    let sub_content = self.manifest_toml_table(
+                    // Root immediately to protect from GC (use index, not last_mut)
+                    self.memory_manager.external_roots[sub_section_roots_idx]
+                        .push(Value::Object(sub_obj_idx));
+                    sub_sections.push(SubSection::Table {
+                        key: key.clone(),
                         sub_obj_idx,
-                        &indent_owned,
-                        &sub_path,
-                        span.clone(),
-                        source_id.clone(),
-                    )?;
-                    tables.push_str(&format!("\n[{}]\n{}", path_str, sub_content));
+                    });
                 }
                 Value::Array(arr_idx) => {
+                    self.force_all_array_elements(arr_idx)?;
                     let elems = self.memory_manager.load_array(arr_idx).elements.clone();
+                    self.memory_manager.external_roots.push(elems.clone());
                     let is_array_of_objects = if elems.is_empty() {
                         false
                     } else {
                         let first_forced = self.force_value(elems[0])?;
                         let first_forced = match first_forced {
-                            Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                            Value::Closure(c) => {
+                                if self.memory_manager.load_closure(c).is_thunk {
+                                    self.force_thunk(c)?
+                                } else {
+                                    self.execute_thunk_sync(c, None, None)?
+                                }
+                            }
                             other => other,
                         };
                         matches!(first_forced, Value::Object(_))
                     };
                     if is_array_of_objects {
-                        let mut sub_path = path.to_vec();
-                        sub_path.push(key.clone());
-                        let path_str = sub_path.join(".");
+                        // Collect all object indices
+                        let mut elem_objs = Vec::new();
                         for elem in &elems {
                             let elem_forced = self.force_value(*elem)?;
                             let elem_forced = match elem_forced {
-                                Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                                Value::Closure(c) => {
+                                    if self.memory_manager.load_closure(c).is_thunk {
+                                        self.force_thunk(c)?
+                                    } else {
+                                        self.execute_thunk_sync(c, None, None)?
+                                    }
+                                }
                                 other => other,
                             };
                             let sub_obj_idx = match elem_forced {
                                 Value::Object(idx) => idx,
                                 other => {
+                                    self.memory_manager.external_roots.pop(); // elems
+                                    self.memory_manager.external_roots.pop(); // sub-section roots
+                                    self.memory_manager.external_roots.pop(); // field values
+                                    self.memory_manager.external_roots.pop(); // object
                                     return Err(RuntimeError {
                                         span: span.clone(),
                                         message: format!(
@@ -8446,34 +10577,114 @@ impl VirtualMachine {
                                     });
                                 }
                             };
-                            let indent_owned = indent.to_string();
-                            let sub_content = self.manifest_toml_table(
-                                sub_obj_idx,
-                                &indent_owned,
-                                &sub_path,
-                                span.clone(),
-                                source_id.clone(),
-                            )?;
-                            array_tables.push_str(&format!("\n[[{}]]\n{}", path_str, sub_content));
+                            // Root immediately using stable index (not last_mut which points to elems)
+                            self.memory_manager.external_roots[sub_section_roots_idx]
+                                .push(Value::Object(sub_obj_idx));
+                            elem_objs.push(sub_obj_idx);
                         }
+                        sub_sections.push(SubSection::ArrayOfTables {
+                            key: key.clone(),
+                            elem_objs,
+                        });
                     } else {
-                        let inline = self.manifest_toml_inline_array(
-                            arr_idx,
-                            span.clone(),
-                            source_id.clone(),
-                        )?;
-                        scalars.push_str(&format!("{} = {}\n", key, inline));
+                        // Render as inline or multiline array for scalars
+                        let escaped_key = toml_escape_key(&key);
+                        if elems.is_empty() {
+                            scalars.push_str(&format!("{}{} = []\n", content_indent, escaped_key));
+                        } else {
+                            // Multiline array
+                            let inner_indent = indent.repeat(depth + 1);
+                            let mut arr_str = format!("{}{} = [\n", content_indent, escaped_key);
+                            for (i, elem) in elems.iter().enumerate() {
+                                let elem_forced = self.force_value(*elem)?;
+                                let elem_forced = match elem_forced {
+                                    Value::Closure(c) => {
+                                        if self.memory_manager.load_closure(c).is_thunk {
+                                            self.force_thunk(c)?
+                                        } else {
+                                            self.execute_thunk_sync(c, None, None)?
+                                        }
+                                    }
+                                    other => other,
+                                };
+                                let val_str = self.manifest_toml_inline_value(
+                                    elem_forced,
+                                    span.clone(),
+                                    source_id.clone(),
+                                )?;
+                                if i < elems.len() - 1 {
+                                    arr_str.push_str(&format!("{}{},\n", inner_indent, val_str));
+                                } else {
+                                    arr_str.push_str(&format!("{}{}\n", inner_indent, val_str));
+                                }
+                            }
+                            arr_str.push_str(&format!("{}]\n", content_indent));
+                            scalars.push_str(&arr_str);
+                        }
                     }
+                    self.memory_manager.external_roots.pop(); // elems
                 }
                 scalar => {
+                    let escaped_key = toml_escape_key(&key);
                     let val_str =
                         self.manifest_toml_scalar(scalar, span.clone(), source_id.clone())?;
-                    scalars.push_str(&format!("{} = {}\n", key, val_str));
+                    scalars.push_str(&format!(
+                        "{}{} = {}\n",
+                        content_indent, escaped_key, val_str
+                    ));
                 }
             }
         }
 
-        Ok(format!("{}{}{}", scalars, tables, array_tables))
+        // Now render sub-sections in alphabetical order (they are already sorted by key)
+        let mut sections_str = String::new();
+        for sub_section in &sub_sections {
+            match sub_section {
+                SubSection::Table { key, sub_obj_idx } => {
+                    let mut sub_path = path.to_vec();
+                    sub_path.push(key.clone());
+                    let path_str = toml_format_path(&sub_path);
+                    let indent_owned = indent.to_string();
+                    let sub_content = self.manifest_toml_table(
+                        *sub_obj_idx,
+                        &indent_owned,
+                        &sub_path,
+                        depth + 1,
+                        span.clone(),
+                        source_id.clone(),
+                    )?;
+                    sections_str.push_str(&format!(
+                        "\n{}[{}]\n{}",
+                        content_indent, path_str, sub_content
+                    ));
+                }
+                SubSection::ArrayOfTables { key, elem_objs } => {
+                    let mut sub_path = path.to_vec();
+                    sub_path.push(key.clone());
+                    let path_str = toml_format_path(&sub_path);
+                    for sub_obj_idx in elem_objs {
+                        let indent_owned = indent.to_string();
+                        let sub_content = self.manifest_toml_table(
+                            *sub_obj_idx,
+                            &indent_owned,
+                            &sub_path,
+                            depth + 1,
+                            span.clone(),
+                            source_id.clone(),
+                        )?;
+                        sections_str.push_str(&format!(
+                            "\n{}[[{}]]\n{}",
+                            content_indent, path_str, sub_content
+                        ));
+                    }
+                }
+            }
+        }
+
+        self.memory_manager.external_roots.pop(); // sub-section roots
+        self.memory_manager.external_roots.pop(); // field values
+        self.memory_manager.external_roots.pop(); // object
+        Ok(format!("{}{}", scalars, sections_str))
     }
 
     fn manifest_toml_scalar(
@@ -8518,19 +10729,122 @@ impl VirtualMachine {
         span: Range<usize>,
         source_id: String,
     ) -> Result<String, RuntimeError> {
+        self.force_all_array_elements(arr_idx)?;
         let elems = self.memory_manager.load_array(arr_idx).elements.clone();
+        self.memory_manager.external_roots.push(elems.clone());
+        if elems.is_empty() {
+            self.memory_manager.external_roots.pop();
+            return Ok("[]".to_string());
+        }
         let mut parts = Vec::new();
         for elem in elems {
             let forced = self.force_value(elem)?;
             let forced = match forced {
-                Value::Closure(c) => self.execute_thunk_sync(c, None, None)?,
+                Value::Closure(c) => {
+                    if self.memory_manager.load_closure(c).is_thunk {
+                        self.force_thunk(c)?
+                    } else {
+                        self.execute_thunk_sync(c, None, None)?
+                    }
+                }
                 other => other,
             };
-            let s = self.manifest_toml_scalar(forced, span.clone(), source_id.clone())?;
+            let s = self.manifest_toml_inline_value(forced, span.clone(), source_id.clone())?;
             parts.push(s);
         }
-        Ok(format!("[{}]", parts.join(", ")))
+        self.memory_manager.external_roots.pop();
+        Ok(format!("[ {} ]", parts.join(", ")))
     }
+
+    /// Format a value as an inline TOML value (for use in inline arrays/tables).
+    fn manifest_toml_inline_value(
+        &mut self,
+        value: Value,
+        span: Range<usize>,
+        source_id: String,
+    ) -> Result<String, RuntimeError> {
+        match value {
+            Value::Array(arr_idx) => {
+                // Render as inline TOML array: [ elem1, elem2 ]
+                self.manifest_toml_inline_array(arr_idx, span, source_id)
+            }
+            Value::Object(obj_idx) => {
+                // Render as inline TOML table: { key = val, key2 = val2 }
+                self.memory_manager
+                    .push_external_roots(vec![Value::Object(obj_idx)], Vec::new());
+                let fields: Vec<(String, Value, Option<ObjectIndex>)> = {
+                    let obj = self.memory_manager.load_object(obj_idx);
+                    let mut f: Vec<(String, Value, Option<ObjectIndex>)> = obj
+                        .properties
+                        .iter()
+                        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
+                        .map(|(k, field)| {
+                            (
+                                self.memory_manager.load_string(*k).to_string(),
+                                field.value,
+                                field.super_obj,
+                            )
+                        })
+                        .collect();
+                    f.sort_by(|a, b| a.0.cmp(&b.0));
+                    f
+                };
+                let mut pairs = Vec::new();
+                for (key, val, super_obj) in fields {
+                    let forced_val = match val {
+                        Value::Closure(c) => {
+                            self.execute_thunk_sync(c, Some(obj_idx), super_obj)?
+                        }
+                        other => self.force_value(other)?,
+                    };
+                    let forced_val = match forced_val {
+                        Value::Closure(c) => {
+                            self.execute_thunk_sync(c, Some(obj_idx), super_obj)?
+                        }
+                        other => other,
+                    };
+                    let val_str = self.manifest_toml_inline_value(
+                        forced_val,
+                        span.clone(),
+                        source_id.clone(),
+                    )?;
+                    let escaped_key = toml_escape_key(&key);
+                    pairs.push(format!("{} = {}", escaped_key, val_str));
+                }
+                self.memory_manager.pop_external_roots();
+                Ok(format!("{{ {} }}", pairs.join(", ")))
+            }
+            _ => self.manifest_toml_scalar(value, span, source_id),
+        }
+    }
+}
+
+/// Check if a TOML key needs quoting. Bare keys may only contain ASCII letters,
+/// digits, dashes, and underscores.
+fn toml_key_needs_quoting(key: &str) -> bool {
+    if key.is_empty() {
+        return true;
+    }
+    !key.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Escape a TOML key: if it contains special characters, wrap in quotes with escaping.
+fn toml_escape_key(key: &str) -> String {
+    if toml_key_needs_quoting(key) {
+        let escaped = key.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{}\"", escaped)
+    } else {
+        key.to_string()
+    }
+}
+
+/// Format a TOML section path like `section."e$caped".nested`
+fn toml_format_path(path: &[String]) -> String {
+    path.iter()
+        .map(|p| toml_escape_key(p))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// Returns true if a YAML string value needs to be quoted
@@ -8546,27 +10860,151 @@ fn yaml_needs_quoting(s: &str) -> bool {
     if s.is_empty() {
         return true;
     }
-    let lower = s.to_lowercase();
+
+    let bytes = s.as_bytes();
+
+    // Contains whitespace (space or tab) → quote
+    if s.contains(' ') || s.contains('\t') {
+        return true;
+    }
+
+    // Contains '#' → quote (YAML comment indicator)
+    if s.contains('#') {
+        return true;
+    }
+
+    // Starts with a YAML indicator character → quote
+    let first = bytes[0];
+    if b"{[],&*?|<>=!%@`'\"~+.".contains(&first) {
+        return true;
+    }
+
+    // Is exactly '-' or '---', or starts with '- ' (dash-space, caught by space check)
+    if s == "-" || s == "---" {
+        return true;
+    }
+
+    // YAML boolean keywords (case-insensitive)
+    let lower = s.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
-        "true" | "false" | "null" | "yes" | "no" | "on" | "off"
+        "true" | "false" | "yes" | "no" | "on" | "off" | "y" | "n"
     ) {
         return true;
     }
-    // Starts with a special YAML character
-    if let Some(first) = s.chars().next() {
-        if ":{[],&*?|-<>=!%@`'\"".contains(first) {
+
+    // YAML null (case-insensitive)
+    if lower == "null" {
+        return true;
+    }
+
+    // Starts with '-' followed by '.' or digit → check if the remainder is a YAML number.
+    // E.g. "-1_0" and "-.inf" need quoting, but "-0B1010..." (uppercase B) does not.
+    if first == b'-' && bytes.len() > 1 && (bytes[1] == b'.' || bytes[1].is_ascii_digit()) {
+        return yaml_looks_like_number(&s[1..]);
+    }
+
+    // Starts with a digit → check if YAML would interpret as number or timestamp
+    if first.is_ascii_digit() {
+        return yaml_looks_like_number(s);
+    }
+
+    false
+}
+
+/// Check if a YAML string value needs quoting (for top-level document values).
+/// This is more comprehensive than key quoting since values can contain more special chars.
+fn yaml_value_needs_quoting(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    // Contains newlines
+    if s.contains('\n') || s.contains('\r') {
+        return true;
+    }
+    // Contains colon-space or trailing colon
+    if s.contains(": ") || s.ends_with(':') {
+        return true;
+    }
+    // Use the key quoting logic for the rest (booleans, numbers, special chars, etc.)
+    yaml_needs_quoting(s)
+}
+
+/// Check if a string (starting with a digit or '.') looks like a YAML 1.1 numeric
+/// or timestamp value. Called on the portion after an optional leading '-'.
+fn yaml_looks_like_number(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+
+    // Starts with '.' → .inf, .NaN, or float like .5 — already handled by indicator check
+    // in the caller, but if we get here after stripping '-', check for -.inf etc.
+    if bytes[0] == b'.' {
+        // After stripping '-', we have ".inf", ".NaN", ".5" etc. → quote
+        return true;
+    }
+
+    // Must start with a digit at this point
+    if !bytes[0].is_ascii_digit() {
+        return false;
+    }
+
+    // Hex literal: 0x (lowercase x only, YAML 1.1)
+    if bytes.len() > 1 && bytes[0] == b'0' && bytes[1] == b'x' {
+        return true;
+    }
+
+    // Binary literal: 0b (lowercase b only, YAML 1.1)
+    if bytes.len() > 1 && bytes[0] == b'0' && bytes[1] == b'b' {
+        return true;
+    }
+
+    // Octal: starts with 0 followed by only digits and underscores
+    if bytes[0] == b'0'
+        && bytes.len() > 1
+        && bytes[1..].iter().all(|&b| b.is_ascii_digit() || b == b'_')
+    {
+        return true;
+    }
+
+    // Contains ':' → sexagesimal or timestamp → quote
+    if s.contains(':') {
+        return true;
+    }
+
+    let dot_count = s.chars().filter(|&c| c == '.').count();
+
+    // Multiple dots like 192.168.0.1 → not a YAML number → safe
+    if dot_count > 1 {
+        return false;
+    }
+
+    // Count dashes in the string (excluding those in scientific notation exponent)
+    // A dash is "in exponent" if preceded by 'e' or 'E'
+    let has_non_exponent_dash = s.char_indices().any(|(i, c)| {
+        c == '-' && (i == 0 || !matches!(s.as_bytes().get(i - 1), Some(b'e') | Some(b'E')))
+    });
+
+    if has_non_exponent_dash {
+        // Has dashes not in scientific notation position.
+        // Check if it's a timestamp pattern (4 digits then dash)
+        if bytes.len() >= 5 && bytes[0..4].iter().all(|b| b.is_ascii_digit()) && bytes[4] == b'-' {
             return true;
         }
+        // Otherwise dashes make it not a YAML number (e.g. 1-234-567-8901)
+        return false;
     }
-    // Contains ': ' or ' #' (YAML comment/mapping indicators in flow context)
-    if s.contains(": ") || s.contains(" #") {
+
+    // Check if all chars are in the YAML number character set
+    // (digits, underscores, dot, e, E, +, -) which would make it a YAML number
+    let is_yaml_number = s.chars().all(|c| {
+        c.is_ascii_digit() || c == '_' || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-'
+    });
+    if is_yaml_number {
         return true;
     }
-    // Looks like a number
-    if s.parse::<f64>().is_ok() {
-        return true;
-    }
+
     false
 }
 
@@ -8575,7 +11013,7 @@ pub fn execute(
     chunk: Chunk,
     memory_manager: MemoryManager,
 ) -> Result<serde_json::Value, RuntimeError> {
-    execute_with_ext_vars(chunk, memory_manager, &[])
+    execute_with_ext_vars(chunk, memory_manager, &[], &[])
 }
 
 /// Execute with external variables set via --ext-str / --ext-code CLI flags
@@ -8583,11 +11021,17 @@ pub fn execute_with_ext_vars(
     chunk: Chunk,
     memory_manager: MemoryManager,
     ext_strs: &[(String, String)],
+    ext_codes: &[(String, String)],
 ) -> Result<serde_json::Value, RuntimeError> {
     let mut vm = VirtualMachine::new(chunk, memory_manager);
 
     for (k, v) in ext_strs {
         vm.set_ext_var_string(k, v);
+    }
+
+    // Compile and set ext-code vars
+    for (k, code) in ext_codes {
+        vm.set_ext_var_code(k, code)?;
     }
 
     let value = vm.interpret()?;
