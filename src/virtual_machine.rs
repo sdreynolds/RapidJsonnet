@@ -683,7 +683,7 @@ impl VirtualMachine {
             Ok(Value::String(idx.index))
         } else if id == chunk::NativeFuncId::ManifestJson {
             let value = args[0];
-            let mut result =
+            let result =
                 self.manifest_json_value(value, "   ", "\n", ": ", 0, span.clone(), &source_id)?;
             let result = Self::fix_manifest_json_empties(&result);
             let idx = self.memory_manager.allocate_string(&result);

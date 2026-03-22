@@ -1552,7 +1552,6 @@ impl<'a> Compiler<'a> {
                     }
                 }
 
-                let arg_count = positional_count + named_count;
                 // Call/StdCall consumes callee + all args (+ name strings for named args)
                 self.anon_stack_depth -= 1 + positional_count as usize + (named_count as usize * 2);
 
@@ -1759,10 +1758,10 @@ impl<'a> Compiler<'a> {
             .write_opcode_u16(Opcode::CreateObject, 0, start_token.span.clone());
 
         // Parse fields and assertions
-        let mut field_key_name: Option<String> = None;
-        let mut key_token_span: std::ops::Range<usize> = 0..0;
         loop {
-            field_key_name = None;
+            let mut field_key_name: Option<String> = None;
+            let mut key_token_span: std::ops::Range<usize> = 0..0;
+
             if let Some(key_token) = self.parser.current_token().cloned() {
                 key_token_span = key_token.span.clone();
                 if key_token.token == Token::RightBrace {

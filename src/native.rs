@@ -4903,45 +4903,6 @@ fn std_omit(
     Ok(Value::Object(obj_alloc.index))
 }
 
-// ─── std.toPairs ──────────────────────────────────────────────────────────────
-
-/// std.toPairs(obj): Convert an object to an array of [key, value] pairs.
-fn std_to_pairs(
-    obj_val: Value,
-    memory_manager: &mut MemoryManager,
-    span: Range<usize>,
-    source_id: String,
-) -> Result<Value, RuntimeError> {
-    let obj_idx = match obj_val {
-        Value::Object(i) => i,
-        _ => {
-            return Err(RuntimeError {
-                span,
-                message: "std.toPairs: argument must be an object".to_string(),
-                source_id,
-            });
-        }
-    };
-    // Two-phase borrow: collect visible fields
-    let all_pairs: Vec<(StringIndex, Value)> = memory_manager
-        .load_object(obj_idx)
-        .properties
-        .iter()
-        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-        .map(|(k, v)| (*k, v.value))
-        .collect();
-    let mut pairs: Vec<Value> = Vec::with_capacity(all_pairs.len());
-    for (key_idx, val) in all_pairs {
-        let key_str = memory_manager.load_string(key_idx).to_string();
-        let k_alloc = memory_manager.allocate_string(&key_str);
-        let k_val = Value::String(k_alloc.index);
-        let pair_alloc = memory_manager.allocate_array(vec![k_val, val]);
-        pairs.push(Value::Array(pair_alloc.index));
-    }
-    let alloc = memory_manager.allocate_array(pairs);
-    Ok(Value::Array(alloc.index))
-}
-
 // ─── std.product ──────────────────────────────────────────────────────────────
 
 /// std.product(arrs): Cartesian product of an array of arrays.
