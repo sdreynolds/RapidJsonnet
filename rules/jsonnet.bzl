@@ -88,7 +88,7 @@ def _jsonnet_to_json_impl(ctx):
         outputs = [output],
         inputs = all_inputs,
         tools = [ctx.executable._tool],
-        command = "{tool} -q {src} > {out}".format(
+        command = "{tool} -q -J . {src} > {out}".format(
             tool = _q(ctx.executable._tool.path),
             src = _q(main_src.path),
             out = _q(output.path),

@@ -72,6 +72,8 @@ pub struct VirtualMachine {
     pending_field_name: Option<StringIndex>,
     /// Cached std object (created on first LoadStd, reused after)
     std_object: Option<Value>,
+    /// Library search paths for import resolution (like -J / --jpath)
+    jpaths: Vec<String>,
 }
 
 impl VirtualMachine {
@@ -109,7 +111,38 @@ impl VirtualMachine {
             ext_vars: std::collections::HashMap::new(),
             pending_field_name: None,
             std_object: None,
+            jpaths: Vec::new(),
         }
+    }
+
+    /// Set library search paths for import resolution
+    pub fn set_jpaths(&mut self, jpaths: Vec<String>) {
+        self.jpaths = jpaths;
+    }
+
+    /// Resolve an import path: try relative to the importing file first,
+    /// then fall back to searching each JPATH directory.
+    fn resolve_import_path(&self, import_path: &str) -> String {
+        let current_dir = std::path::Path::new(&self.current_chunk().source_id)
+            .parent()
+            .unwrap_or(std::path::Path::new(""));
+        let relative_path = current_dir.join(import_path);
+
+        // Try relative to the importing file first
+        if relative_path.exists() {
+            return relative_path.to_string_lossy().to_string();
+        }
+
+        // Fall back to JPATH search
+        for jpath in &self.jpaths {
+            let candidate = std::path::Path::new(jpath).join(import_path);
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+
+        // Default: return the relative path (will produce a "file not found" error later)
+        relative_path.to_string_lossy().to_string()
     }
 
     /// Set an external variable as a string value (for --ext-str CLI flag)
@@ -1315,6 +1348,7 @@ impl VirtualMachine {
                 std::mem::replace(&mut self.memory_manager, dummy_memory_manager);
 
             let mut sub_vm = VirtualMachine::new_from_owned(owned_chunk, actual_memory_manager);
+            sub_vm.jpaths = self.jpaths.clone();
             let result = sub_vm.interpret();
 
             self.memory_manager = sub_vm.memory_manager;
@@ -5142,12 +5176,7 @@ impl VirtualMachine {
 
                     let path_str = self.memory_manager.load_string(path_str_idx).to_string();
 
-                    // Resolve the path relative to the current chunk's source_id
-                    let current_dir = std::path::Path::new(&self.current_chunk().source_id)
-                        .parent()
-                        .unwrap_or(std::path::Path::new(""));
-                    let target_path = current_dir.join(&path_str);
-                    let target_path_str = target_path.to_string_lossy().to_string();
+                    let target_path_str = self.resolve_import_path(&path_str);
 
                     let import_idx = self.memory_manager.allocate_import(&target_path_str).index;
                     self.push(Value::Import(import_idx))?;
@@ -5171,12 +5200,7 @@ impl VirtualMachine {
 
                     let path_str = self.memory_manager.load_string(path_str_idx).to_string();
 
-                    // Resolve the path relative to the current chunk's source_id
-                    let current_dir = std::path::Path::new(&self.current_chunk().source_id)
-                        .parent()
-                        .unwrap_or(std::path::Path::new(""));
-                    let target_path = current_dir.join(&path_str);
-                    let target_path_str = target_path.to_string_lossy().to_string();
+                    let target_path_str = self.resolve_import_path(&path_str);
 
                     // Read the file content
                     let content =
@@ -5220,12 +5244,7 @@ impl VirtualMachine {
 
                     let path_str = self.memory_manager.load_string(path_str_idx).to_string();
 
-                    // Resolve the path relative to the current chunk's source_id
-                    let current_dir = std::path::Path::new(&self.current_chunk().source_id)
-                        .parent()
-                        .unwrap_or(std::path::Path::new(""));
-                    let target_path = current_dir.join(&path_str);
-                    let target_path_str = target_path.to_string_lossy().to_string();
+                    let target_path_str = self.resolve_import_path(&path_str);
 
                     // Read the file content as binary
                     let content = std::fs::read(&target_path_str).map_err(|e| RuntimeError {
@@ -11013,7 +11032,7 @@ pub fn execute(
     chunk: Chunk,
     memory_manager: MemoryManager,
 ) -> Result<serde_json::Value, RuntimeError> {
-    execute_with_ext_vars(chunk, memory_manager, &[], &[])
+    execute_with_ext_vars(chunk, memory_manager, &[], &[], &[])
 }
 
 /// Execute with external variables set via --ext-str / --ext-code CLI flags
@@ -11022,8 +11041,10 @@ pub fn execute_with_ext_vars(
     memory_manager: MemoryManager,
     ext_strs: &[(String, String)],
     ext_codes: &[(String, String)],
+    jpaths: &[String],
 ) -> Result<serde_json::Value, RuntimeError> {
     let mut vm = VirtualMachine::new(chunk, memory_manager);
+    vm.set_jpaths(jpaths.to_vec());
 
     for (k, v) in ext_strs {
         vm.set_ext_var_string(k, v);

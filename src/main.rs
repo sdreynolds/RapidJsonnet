@@ -28,11 +28,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse flags before the filename argument
     let mut ext_strs: Vec<(String, String)> = Vec::new();
     let mut ext_codes: Vec<(String, String)> = Vec::new();
+    let mut jpaths: Vec<String> = Vec::new();
     let mut quiet = false;
     let mut args_iter = env::args().skip(1).peekable();
     while let Some(arg) = args_iter.peek().cloned() {
         if arg == "-q" || arg == "--quiet" {
             quiet = true;
+            args_iter.next();
+        } else if arg == "-J" || arg == "--jpath" {
+            args_iter.next();
+            if let Some(path) = args_iter.next() {
+                jpaths.push(path);
+            }
+        } else if arg.starts_with("-J") && arg.len() > 2 {
+            // Support -J<path> (no space)
+            jpaths.push(arg[2..].to_string());
+            args_iter.next();
+        } else if arg.starts_with("--jpath=") {
+            jpaths.push(arg.trim_start_matches("--jpath=").to_string());
             args_iter.next();
         } else if arg.starts_with("--ext-str=") {
             let kv = arg.trim_start_matches("--ext-str=");
@@ -69,24 +82,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(filename) = file_arg {
         // File mode: read from file, compile, and execute
         let content = fs::read_to_string(&filename)?;
-        // Use just the filename (basename) as source_id.
-        // Import resolution uses the file's parent directory as cwd context.
         let path = std::path::Path::new(&filename);
-        let source_name = path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or(&filename)
-            .to_string();
-        // Change to the file's directory so that imports resolve correctly
-        if let Some(parent) = path.parent() {
-            if parent != std::path::Path::new("") {
-                std::env::set_current_dir(parent)?;
+
+        let source_name = if jpaths.is_empty() {
+            // No JPATHs: use basename as source_id, chdir to file's directory
+            // so that relative imports resolve correctly.
+            let basename = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(&filename)
+                .to_string();
+            if let Some(parent) = path.parent() {
+                if parent != std::path::Path::new("") {
+                    std::env::set_current_dir(parent)?;
+                }
             }
-        }
-        if quiet {
-            compile_and_execute_quiet(&content, &source_name, &ext_strs, &ext_codes)?;
+            basename
         } else {
-            compile_and_execute(&content, &source_name, &ext_strs, &ext_codes)?;
+            // JPATHs provided: use the full path as source_id so that
+            // relative-to-file resolution still works, and JPATH search
+            // handles workspace-relative imports.
+            filename.clone()
+        };
+
+        if quiet {
+            compile_and_execute_quiet(&content, &source_name, &ext_strs, &ext_codes, &jpaths)?;
+        } else {
+            compile_and_execute(&content, &source_name, &ext_strs, &ext_codes, &jpaths)?;
         }
     } else {
         // REPL mode: read from stdin, compile, and execute
@@ -204,12 +226,13 @@ fn compile_and_execute_quiet(
     source_id: &str,
     ext_strs: &[(String, String)],
     ext_codes: &[(String, String)],
+    jpaths: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut scanner = Scanner::new(content, source_id);
     let mut memory_manager = MemoryManager::new();
     let compiler = Compiler::new(&mut scanner, source_id);
     match compiler.compile(&mut memory_manager) {
-        Ok(chunk) => match execute_with_ext_vars(chunk, memory_manager, ext_strs, ext_codes) {
+        Ok(chunk) => match execute_with_ext_vars(chunk, memory_manager, ext_strs, ext_codes, jpaths) {
             Ok(result) => {
                 // Format with 3-space indent to match official jsonnet output
                 println!("{}", jsonnet_manifest(&result));
@@ -250,6 +273,7 @@ fn compile_and_execute(
     source_id: &str,
     ext_strs: &[(String, String)],
     ext_codes: &[(String, String)],
+    jpaths: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = Source::from(content);
 
@@ -271,7 +295,7 @@ fn compile_and_execute(
             debug_report.print((source_id, &source))?;
 
             // Execute the compiled chunk with ext vars
-            match execute_with_ext_vars(chunk, memory_manager, ext_strs, ext_codes) {
+            match execute_with_ext_vars(chunk, memory_manager, ext_strs, ext_codes, jpaths) {
                 Ok(result) => {
                     println!("🎯 Execution result: {}", result);
                     Ok(())
