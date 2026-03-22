@@ -1,0 +1,40 @@
+load("//rules:jsonnet.bzl", "jsonnet_library", "jsonnet_to_json")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+jsonnet_library(
+    name = "utils",
+    src = "utils.libsonnet",
+)
+
+jsonnet_library(
+    name = "greeting_lib",
+    src = "greeting.jsonnet",
+    deps = [":utils"],
+)
+
+jsonnet_to_json(
+    name = "greeting_json",
+    main = ":greeting_lib",
+)
+
+jsonnet_to_json(
+    name = "greeting_custom_out",
+    main = ":greeting_lib",
+    out = "custom_name.json",
+)
+
+sh_test(
+    name = "greeting_test",
+    size = "small",
+    srcs = ["verify_output.sh"],
+    args = ["$(location :greeting_json)"],
+    data = [":greeting_json"],
+)
+
+sh_test(
+    name = "custom_out_test",
+    size = "small",
+    srcs = ["verify_output.sh"],
+    args = ["$(location :greeting_custom_out)"],
+    data = [":greeting_custom_out"],
+)

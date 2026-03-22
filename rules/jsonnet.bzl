@@ -1,6 +1,8 @@
 """Bazel rules for building JSON from Jsonnet using RapidJsonnet."""
 
-load("@bazel_tools//tools/build_defs/shell:shell.bzl", "shell")
+def _q(s):
+    """Minimally shell-quote a path by wrapping in single quotes."""
+    return "'" + s.replace("'", "'\\''") + "'"
 
 JsonnetLibraryInfo = provider(
     doc = "Provides transitive Jsonnet sources and data files.",
@@ -87,9 +89,9 @@ def _jsonnet_to_json_impl(ctx):
         inputs = all_inputs,
         tools = [ctx.executable._tool],
         command = "{tool} -q {src} > {out}".format(
-            tool = shell.quote(ctx.executable._tool.path),
-            src = shell.quote(main_src.path),
-            out = shell.quote(output.path),
+            tool = _q(ctx.executable._tool.path),
+            src = _q(main_src.path),
+            out = _q(output.path),
         ),
         mnemonic = "Jsonnet",
         progress_message = "Compiling Jsonnet to JSON: %s" % ctx.label,
