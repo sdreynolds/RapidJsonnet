@@ -28,8 +28,22 @@ def _jsonnet_library_impl(ctx):
     src_file = ctx.file.src
     transitive_srcs_deps, transitive_data_deps = _collect_transitive(ctx.attr.deps)
 
+    direct_files = [src_file]
+
+    if ctx.attr.precompile_bytecode:
+        compiled = ctx.actions.declare_file(src_file.basename + "c")
+        ctx.actions.run(
+            outputs = [compiled],
+            inputs = [src_file],
+            executable = ctx.executable._compiler,
+            arguments = [src_file.path, compiled.path],
+            mnemonic = "JsonnetCompile",
+            progress_message = "Precompiling Jsonnet bytecode: %s" % ctx.label,
+        )
+        direct_files.append(compiled)
+
     srcs_depset = depset([src_file])
-    transitive_srcs_depset = depset([src_file], transitive = transitive_srcs_deps)
+    transitive_srcs_depset = depset(direct_files, transitive = transitive_srcs_deps)
     data_depset = depset(ctx.files.data, transitive = transitive_data_deps)
 
     all_files = depset(transitive = [transitive_srcs_depset, data_depset])
@@ -58,6 +72,15 @@ jsonnet_library = rule(
         "data": attr.label_list(
             allow_files = True,
             doc = "Data files available at runtime.",
+        ),
+        "precompile_bytecode": attr.bool(
+            default = False,
+            doc = "If True, ahead-of-time compile the source to bytecode using jsonnet_compiler.",
+        ),
+        "_compiler": attr.label(
+            default = Label("//:jsonnet_compiler"),
+            executable = True,
+            cfg = "exec",
         ),
     },
     doc = "Collects a Jsonnet source file and its dependencies for use by jsonnet_to_json.",
