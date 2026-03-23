@@ -15,12 +15,18 @@ Add an optional `precompile_bytecode` boolean attribute to the `jsonnet_library`
 - **Default:** `False`
 - **Location:** `jsonnet_library` rule in `rules/jsonnet.bzl`
 
+### Prerequisite: `jsonnet_compiler` CLI change
+
+The current `jsonnet_compiler` binary hardcodes output next to the input file (`format!("{}c", filename)`). This is incompatible with Bazel's sandboxed actions where inputs are read-only and outputs must be pre-declared. The compiler must be modified to accept an explicit output path: `jsonnet_compiler <input> <output>`. When only one argument is provided, the existing behavior (writing next to input) is preserved for backwards compatibility.
+
 ### Behavior when `precompile_bytecode = True`
 
-1. The rule declares an output file with the same path as the source file plus a `c` suffix (e.g., `utils.libsonnet` → `utils.libsonnetc`).
-2. The rule runs `//:jsonnet_compiler` via `ctx.actions.run` to compile the source into the `.jsonnetc` output.
-3. Both the original source file and the `.jsonnetc` file are included in `transitive_srcs` and propagated to downstream rules.
-4. The `.jsonnetc` file is placed next to the source file in the sandbox so the VM's existing lookup logic (`{filename}c`) finds it.
+1. The rule declares an output file using `ctx.actions.declare_file(src_file.basename + "c")` (e.g., `utils.libsonnet` → `utils.libsonnetc`). Using `basename` ensures the output is declared in the same package directory, so it ends up adjacent to the source file in the sandbox.
+2. The rule runs `//:jsonnet_compiler` via `ctx.actions.run` with both the input source path and the declared output path as arguments.
+3. Both the original source file and the precompiled bytecode file are included in `transitive_srcs` and propagated to downstream rules.
+4. The bytecode file ends up next to the source file in the sandbox, so the VM's existing lookup logic (`{filename}c`) finds it automatically.
+
+**Note:** Precompilation surfaces compile errors at `bazel build` time rather than at runtime. This only applies to `import` — `importstr` and `importbin` do not use bytecode lookup.
 
 ### Behavior when `precompile_bytecode = False` (default)
 
