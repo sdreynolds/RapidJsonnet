@@ -85,20 +85,54 @@ impl ScanError {
             || msg.contains("found eof")
     }
 
-    pub fn into_report(&self) -> Report<'static, (&str, Range<usize>)> {
-        let color = ariadne::Color::Red;
+    pub fn into_report(&self) -> (Report<'static, (String, Range<usize>)>, Vec<String>) {
+        let red = ariadne::Color::Red;
+        let yellow = ariadne::Color::Yellow;
 
-        Report::build(
+        // Collect all errors in the chain (outermost first, root cause last)
+        let mut chain: Vec<&ScanError> = Vec::new();
+        let mut current = self;
+        loop {
+            chain.push(current);
+            match &current.cause {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+
+        // Root cause is the last element
+        let root_cause = chain.last().unwrap();
+
+        // Build report with root cause as primary
+        let mut builder = Report::build(
             ReportKind::Error,
-            (self.source_id.as_str(), self.span.clone()),
+            (root_cause.source_id.clone(), root_cause.span.clone()),
         )
-        .with_message(&self.message)
+        .with_message(&root_cause.message)
         .with_label(
-            Label::new((self.source_id.as_str(), self.span.clone()))
-                .with_message(&self.message)
-                .with_color(color),
-        )
-        .finish()
+            Label::new((root_cause.source_id.clone(), root_cause.span.clone()))
+                .with_message(&root_cause.message)
+                .with_color(red),
+        );
+
+        // Add caller frames as additional labels (all except the last/root cause)
+        for frame in chain.iter().take(chain.len().saturating_sub(1)) {
+            builder = builder.with_label(
+                Label::new((frame.source_id.clone(), frame.span.clone()))
+                    .with_message(&frame.message)
+                    .with_color(yellow),
+            );
+        }
+
+        // Collect unique source IDs
+        let mut source_ids: Vec<String> = Vec::new();
+        for frame in &chain {
+            if !source_ids.contains(&frame.source_id) {
+                source_ids.push(frame.source_id.clone());
+            }
+        }
+
+        (builder.finish(), source_ids)
     }
 }
 
@@ -863,9 +897,10 @@ mod tests {
         let error = scanner.scan_next().unwrap_err();
         assert_eq!(error.source_id, "test.jsonnet");
 
-        let report = error.into_report();
+        let (report, source_ids) = error.into_report();
         // Test that report can be created without panicking
         let _ = report;
+        assert!(!source_ids.is_empty());
     }
 
     #[test]

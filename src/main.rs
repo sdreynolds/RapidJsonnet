@@ -1,4 +1,4 @@
-use ariadne::Source;
+use ariadne::{Source, sources};
 use compiler::Compiler;
 use memory_manager::MemoryManager;
 use scanner::Scanner;
@@ -240,34 +240,42 @@ fn compile_and_execute_quiet(
                     Ok(())
                 }
                 Err(runtime_error) => {
-                    let error_source_id = runtime_error.source_id.clone();
-                    let error_content = if error_source_id == source_id {
-                        content.to_string()
-                    } else {
-                        fs::read_to_string(&error_source_id)
-                            .unwrap_or_else(|_| "<file not found>".to_string())
-                    };
-                    let error_source = Source::from(error_content);
-                    let report = runtime_error.into_report();
-                    report.eprint((error_source_id.as_str(), error_source))?;
+                    print_error_report(&runtime_error, source_id, content, true)?;
                     Err(Box::new(MainError::RuntimeError))
                 }
             }
         }
         Err(compile_error) => {
-            let error_source_id = compile_error.source_id.clone();
-            let error_content = if error_source_id == source_id {
-                content.to_string()
-            } else {
-                fs::read_to_string(&error_source_id)
-                    .unwrap_or_else(|_| "<file not found>".to_string())
-            };
-            let error_source = Source::from(error_content);
-            let report = compile_error.into_report();
-            report.eprint((error_source_id.as_str(), error_source))?;
+            print_error_report(&compile_error, source_id, content, true)?;
             Err(Box::new(MainError::CompilerError))
         }
     }
+}
+
+fn print_error_report(
+    error: &scanner::ScanError,
+    primary_source_id: &str,
+    primary_content: &str,
+    use_stderr: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (report, source_ids) = error.into_report();
+    let srcs: Vec<(String, String)> = source_ids
+        .iter()
+        .map(|sid| {
+            let content = if sid == primary_source_id {
+                primary_content.to_string()
+            } else {
+                fs::read_to_string(sid).unwrap_or_else(|_| "<file not found>".to_string())
+            };
+            (sid.clone(), content)
+        })
+        .collect();
+    if use_stderr {
+        report.eprint(sources(srcs))?;
+    } else {
+        report.print(sources(srcs))?;
+    }
+    Ok(())
 }
 
 fn compile_and_execute(
@@ -304,32 +312,14 @@ fn compile_and_execute(
                 }
                 Err(runtime_error) => {
                     println!("❌ Runtime error during execution:");
-                    let error_source_id = runtime_error.source_id.clone();
-                    let error_content = if error_source_id == source_id {
-                        content.to_string()
-                    } else {
-                        fs::read_to_string(&error_source_id)
-                            .unwrap_or_else(|_| "<file not found>".to_string())
-                    };
-                    let error_source = Source::from(error_content);
-                    let report = runtime_error.into_report();
-                    report.print((error_source_id.as_str(), error_source))?;
+                    print_error_report(&runtime_error, source_id, content, false)?;
                     Err(Box::new(MainError::RuntimeError))
                 }
             }
         }
         Err(compile_error) => {
             println!("❌ Compilation failed:");
-            let error_source_id = compile_error.source_id.clone();
-            let error_content = if error_source_id == source_id {
-                content.to_string()
-            } else {
-                fs::read_to_string(&error_source_id)
-                    .unwrap_or_else(|_| "<file not found>".to_string())
-            };
-            let error_source = Source::from(error_content);
-            let report = compile_error.into_report();
-            report.print((error_source_id.as_str(), error_source))?;
+            print_error_report(&compile_error, source_id, content, false)?;
             Err(Box::new(MainError::CompilerError))
         }
     }
@@ -413,16 +403,7 @@ fn process_repl_input(content: &str) -> ReplResult {
                 }
                 Err(runtime_error) => {
                     println!("❌ Runtime error during execution:");
-                    let error_source_id = runtime_error.source_id.clone();
-                    let error_content = if error_source_id == source_id {
-                        content.to_string()
-                    } else {
-                        fs::read_to_string(&error_source_id)
-                            .unwrap_or_else(|_| "<file not found>".to_string())
-                    };
-                    let error_source = Source::from(error_content);
-                    let report = runtime_error.into_report();
-                    let _ = report.print((error_source_id.as_str(), error_source));
+                    let _ = print_error_report(&runtime_error, source_id, content, false);
                     ReplResult::Error
                 }
             }
@@ -433,16 +414,7 @@ fn process_repl_input(content: &str) -> ReplResult {
             }
 
             println!("❌ Compilation failed:");
-            let error_source_id = compile_error.source_id.clone();
-            let error_content = if error_source_id == source_id {
-                content.to_string()
-            } else {
-                fs::read_to_string(&error_source_id)
-                    .unwrap_or_else(|_| "<file not found>".to_string())
-            };
-            let error_source = Source::from(error_content);
-            let report = compile_error.into_report();
-            let _ = report.print((error_source_id.as_str(), error_source));
+            let _ = print_error_report(&compile_error, source_id, content, false);
             ReplResult::Error
         }
     }

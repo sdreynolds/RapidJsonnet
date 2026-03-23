@@ -1335,14 +1335,12 @@ impl VirtualMachine {
                             .load_import(import_idx)
                             .evaluating
                             .set(false);
-                        return Err(RuntimeError::new(
-                            self.get_current_span(),
-                            format!(
-                                "Failed to compile imported file '{}': {:?}",
-                                target_path_str, e
-                            ),
-                            self.current_chunk().source_id.to_string(),
-                        ));
+                        return Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!("while evaluating import \"{}\"", target_path_str),
+                            source_id: self.current_chunk().source_id.to_string(),
+                            cause: Some(Box::new(e)),
+                        });
                     }
                 }
             };
@@ -1363,7 +1361,19 @@ impl VirtualMachine {
                 Ok(evaluated_value) => {
                     // Recursively force the result (e.g. if the imported file itself
                     // returns an import or a thunk)
-                    let forced = self.force_value(evaluated_value)?;
+                    let forced = match self.force_value(evaluated_value) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let import = self.memory_manager.load_import_mut(import_idx);
+                            import.evaluating.set(false);
+                            return Err(RuntimeError {
+                                span: self.get_current_span(),
+                                message: format!("while evaluating import \"{}\"", target_path_str),
+                                source_id: self.current_chunk().source_id.to_string(),
+                                cause: Some(Box::new(e)),
+                            });
+                        }
+                    };
                     let import = self.memory_manager.load_import_mut(import_idx);
                     import.cached_result = Some(forced);
                     import.evaluating.set(false);
@@ -1374,7 +1384,12 @@ impl VirtualMachine {
                         .load_import_mut(import_idx)
                         .evaluating
                         .set(false);
-                    Err(e)
+                    Err(RuntimeError {
+                        span: self.get_current_span(),
+                        message: format!("while evaluating import \"{}\"", target_path_str),
+                        source_id: self.current_chunk().source_id.to_string(),
+                        cause: Some(Box::new(e)),
+                    })
                 }
             }
         } else {
