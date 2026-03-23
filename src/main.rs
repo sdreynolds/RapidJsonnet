@@ -232,26 +232,28 @@ fn compile_and_execute_quiet(
     let mut memory_manager = MemoryManager::new();
     let compiler = Compiler::new(&mut scanner, source_id);
     match compiler.compile(&mut memory_manager) {
-        Ok(chunk) => match execute_with_ext_vars(chunk, memory_manager, ext_strs, ext_codes, jpaths) {
-            Ok(result) => {
-                // Format with 3-space indent to match official jsonnet output
-                println!("{}", jsonnet_manifest(&result));
-                Ok(())
+        Ok(chunk) => {
+            match execute_with_ext_vars(chunk, memory_manager, ext_strs, ext_codes, jpaths) {
+                Ok(result) => {
+                    // Format with 3-space indent to match official jsonnet output
+                    println!("{}", jsonnet_manifest(&result));
+                    Ok(())
+                }
+                Err(runtime_error) => {
+                    let error_source_id = runtime_error.source_id.clone();
+                    let error_content = if error_source_id == source_id {
+                        content.to_string()
+                    } else {
+                        fs::read_to_string(&error_source_id)
+                            .unwrap_or_else(|_| "<file not found>".to_string())
+                    };
+                    let error_source = Source::from(error_content);
+                    let report = runtime_error.into_report();
+                    report.eprint((error_source_id.as_str(), error_source))?;
+                    Err(Box::new(MainError::RuntimeError))
+                }
             }
-            Err(runtime_error) => {
-                let error_source_id = runtime_error.source_id.clone();
-                let error_content = if error_source_id == source_id {
-                    content.to_string()
-                } else {
-                    fs::read_to_string(&error_source_id)
-                        .unwrap_or_else(|_| "<file not found>".to_string())
-                };
-                let error_source = Source::from(error_content);
-                let report = runtime_error.into_report();
-                report.eprint((error_source_id.as_str(), error_source))?;
-                Err(Box::new(MainError::RuntimeError))
-            }
-        },
+        }
         Err(compile_error) => {
             let error_source_id = compile_error.source_id.clone();
             let error_content = if error_source_id == source_id {

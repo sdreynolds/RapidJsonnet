@@ -166,10 +166,12 @@ impl VirtualMachine {
                 // Not valid JSON — try as a Jsonnet expression by writing to temp file
                 // and using the import mechanism
                 let temp_path = format!("/tmp/jsonnet_ext_code_{}.jsonnet", key);
-                std::fs::write(&temp_path, code).map_err(|e| RuntimeError {
-                    span: 0..0,
-                    message: format!("Failed to write ext-code temp file: {}", e),
-                    source_id: "<main>".to_string(),
+                std::fs::write(&temp_path, code).map_err(|e| {
+                    RuntimeError::new(
+                        0..0,
+                        format!("Failed to write ext-code temp file: {}", e),
+                        "<main>".to_string(),
+                    )
                 })?;
                 let import_alloc = self.memory_manager.allocate_import(&temp_path);
                 let import_val = Value::Import(import_alloc.index);
@@ -209,11 +211,11 @@ impl VirtualMachine {
         const MAX_STACK_SIZE: usize = 65536;
 
         if self.stack.len() >= MAX_STACK_SIZE {
-            return Err(RuntimeError {
-                span: self.get_current_span(),
-                message: "Stack overflow - maximum stack size exceeded".to_string(),
-                source_id: self.current_chunk().source_id.to_string(),
-            });
+            return Err(RuntimeError::new(
+                self.get_current_span(),
+                "Stack overflow - maximum stack size exceeded".to_string(),
+                self.current_chunk().source_id.to_string(),
+            ));
         }
 
         // Grow stack capacity if needed
@@ -228,10 +230,12 @@ impl VirtualMachine {
 
     /// Pop a value from the stack, checking for underflow
     fn pop(&mut self) -> Result<Value, RuntimeError> {
-        self.stack.pop().ok_or_else(|| RuntimeError {
-            span: self.get_current_span(),
-            message: "Stack underflow - attempted to pop from empty stack".to_string(),
-            source_id: self.current_chunk().source_id.to_string(),
+        self.stack.pop().ok_or_else(|| {
+            RuntimeError::new(
+                self.get_current_span(),
+                "Stack underflow - attempted to pop from empty stack".to_string(),
+                self.current_chunk().source_id.to_string(),
+            )
         })
     }
 
@@ -243,10 +247,12 @@ impl VirtualMachine {
 
     /// Peek at the top value without popping
     fn peek(&self) -> Result<&Value, RuntimeError> {
-        self.stack.last().ok_or_else(|| RuntimeError {
-            span: self.get_current_span(),
-            message: "Stack underflow - attempted to peek empty stack".to_string(),
-            source_id: self.current_chunk().source_id.to_string(),
+        self.stack.last().ok_or_else(|| {
+            RuntimeError::new(
+                self.get_current_span(),
+                "Stack underflow - attempted to peek empty stack".to_string(),
+                self.current_chunk().source_id.to_string(),
+            )
         })
     }
 
@@ -262,10 +268,12 @@ impl VirtualMachine {
     fn read_u8_operand(&mut self) -> Result<u8, RuntimeError> {
         let frame = self.current_frame();
         let chunk = self.current_chunk();
-        let operand = chunk.read_u8(frame.ip + 1).ok_or_else(|| RuntimeError {
-            span: self.get_current_span(),
-            message: "Invalid bytecode - missing operand".to_string(),
-            source_id: chunk.source_id.to_string(),
+        let operand = chunk.read_u8(frame.ip + 1).ok_or_else(|| {
+            RuntimeError::new(
+                self.get_current_span(),
+                "Invalid bytecode - missing operand".to_string(),
+                chunk.source_id.to_string(),
+            )
         })?;
 
         self.current_frame_mut().ip += 2; // opcode + 1 byte for u8
@@ -276,10 +284,12 @@ impl VirtualMachine {
     fn read_u16_operand(&mut self) -> Result<u16, RuntimeError> {
         let frame = self.current_frame();
         let chunk = self.current_chunk();
-        let operand = chunk.read_u16(frame.ip + 1).ok_or_else(|| RuntimeError {
-            span: self.get_current_span(),
-            message: "Invalid bytecode - missing operand".to_string(),
-            source_id: chunk.source_id.to_string(),
+        let operand = chunk.read_u16(frame.ip + 1).ok_or_else(|| {
+            RuntimeError::new(
+                self.get_current_span(),
+                "Invalid bytecode - missing operand".to_string(),
+                chunk.source_id.to_string(),
+            )
         })?;
 
         self.current_frame_mut().ip += 3; // opcode + 2 bytes for u16
@@ -292,10 +302,12 @@ impl VirtualMachine {
         let chunk = self.current_chunk();
         let operand = chunk
             .read_i32(frame.ip + OPCODE_SIZE_BYTES)
-            .ok_or_else(|| RuntimeError {
-                span: self.get_current_span(),
-                message: "Invalid bytecode - missing i32 operand".to_string(),
-                source_id: chunk.source_id.to_string(),
+            .ok_or_else(|| {
+                RuntimeError::new(
+                    self.get_current_span(),
+                    "Invalid bytecode - missing i32 operand".to_string(),
+                    chunk.source_id.to_string(),
+                )
             })?;
 
         self.current_frame_mut().ip += OPCODE_SIZE_BYTES + I32_SIZE_BYTES;
@@ -431,11 +443,11 @@ impl VirtualMachine {
                 let source_id = self.current_chunk().source_id.to_string();
                 self.call_native_checked(id, &[arg], span, source_id)
             }
-            _ => Err(RuntimeError {
-                span: self.get_current_span(),
-                message: format!("keyF argument must be a function, got {:?}", func),
-                source_id: self.current_chunk().source_id.to_string(),
-            }),
+            _ => Err(RuntimeError::new(
+                self.get_current_span(),
+                format!("keyF argument must be a function, got {:?}", func),
+                self.current_chunk().source_id.to_string(),
+            )),
         }
     }
 
@@ -460,11 +472,11 @@ impl VirtualMachine {
                 let source_id = self.current_chunk().source_id.to_string();
                 self.call_native_checked(id, &[arg1, arg2], span, source_id)
             }
-            _ => Err(RuntimeError {
-                span: self.get_current_span(),
-                message: "expected function as callback".to_string(),
-                source_id: self.current_chunk().source_id.to_string(),
-            }),
+            _ => Err(RuntimeError::new(
+                self.get_current_span(),
+                "expected function as callback".to_string(),
+                self.current_chunk().source_id.to_string(),
+            )),
         }
     }
 
@@ -498,11 +510,11 @@ impl VirtualMachine {
             let msg = match args[0] {
                 Value::String(s) => self.memory_manager.load_string(s).to_string(),
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.trace() first argument must be a string".to_string(),
+                        "std.trace() first argument must be a string".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             // Compute file:line from source_id and span
@@ -543,14 +555,14 @@ impl VirtualMachine {
             } else {
                 let a_display = native::display_value(a, &self.memory_manager);
                 let b_display = native::display_value(b, &self.memory_manager);
-                Err(RuntimeError {
+                Err(RuntimeError::new(
                     span,
-                    message: format!(
+                    format!(
                         "Assertion failed: {} was not equal to {}",
                         a_display, b_display
                     ),
                     source_id,
-                })
+                ))
             }
         } else if id == chunk::NativeFuncId::Length && args.len() == 1 {
             // Handle std.length for functions (returns arity)
@@ -574,14 +586,14 @@ impl VirtualMachine {
             let sz = match sz_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: format!(
+                        format!(
                             "std.makeArray expected positive integer for size, got {:?}",
                             sz_val
                         ),
                         source_id,
-                    });
+                    ));
                 }
             };
             let mut elements = Vec::with_capacity(sz);
@@ -601,22 +613,22 @@ impl VirtualMachine {
                 Value::Boolean(b) => b,
                 Value::Null => false, // default
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "manifestYamlDoc: indent_array_in_object must be bool".to_string(),
+                        "manifestYamlDoc: indent_array_in_object must be bool".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let quote_keys = match args[2] {
                 Value::Boolean(b) => b,
                 Value::Null => true, // default
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "manifestYamlDoc: quote_keys must be bool".to_string(),
+                        "manifestYamlDoc: quote_keys must be bool".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let result = self.manifest_yaml_doc(
@@ -635,34 +647,33 @@ impl VirtualMachine {
                 Value::Boolean(b) => b,
                 Value::Null => false,
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "manifestYamlStream: indent_array_in_object must be bool"
-                            .to_string(),
+                        "manifestYamlStream: indent_array_in_object must be bool".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let c_document_end = match args[2] {
                 Value::Boolean(b) => b,
                 Value::Null => true,
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "manifestYamlStream: c_document_end must be bool".to_string(),
+                        "manifestYamlStream: c_document_end must be bool".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let quote_keys = match args[3] {
                 Value::Boolean(b) => b,
                 Value::Null => true,
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "manifestYamlStream: quote_keys must be bool".to_string(),
+                        "manifestYamlStream: quote_keys must be bool".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let result = self.manifest_yaml_stream(
@@ -680,11 +691,11 @@ impl VirtualMachine {
             let indent_str = match args[1] {
                 Value::String(s) => self.memory_manager.load_string(s).to_string(),
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "manifestJsonEx: indent must be string".to_string(),
+                        "manifestJsonEx: indent must be string".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let newline = if args.len() > 2 {
@@ -770,15 +781,15 @@ impl VirtualMachine {
         let arr_idx = match arr_val {
             Value::Array(a) => a,
             other => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: format!(
+                    format!(
                         "std.{} expected array, got {}",
                         id.name(),
                         other.type_name()
                     ),
                     source_id,
-                });
+                ));
             }
         };
 
@@ -801,11 +812,11 @@ impl VirtualMachine {
                     return Ok(v);
                 }
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: format!("std.{}: empty array", id.name()),
+                        format!("std.{}: empty array", id.name()),
                         source_id,
-                    });
+                    ));
                 }
             }
         }
@@ -914,11 +925,11 @@ impl VirtualMachine {
                 let indent = match args[1] {
                     Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
                     _ => {
-                        return Err(RuntimeError {
+                        return Err(RuntimeError::new(
                             span,
-                            message: "manifestTomlEx: indent must be a string".to_string(),
+                            "manifestTomlEx: indent must be a string".to_string(),
                             source_id,
-                        });
+                        ));
                     }
                 };
                 let result = self.manifest_toml_ex(args[0], &indent, span, source_id)?;
@@ -1029,20 +1040,20 @@ impl VirtualMachine {
         let required = function.required_params as usize;
         if arg_count < required || arg_count > arity {
             if required == arity {
-                return Err(RuntimeError {
-                    span: self.get_current_span(),
-                    message: format!("Function expects {} argument(s), got {}", arity, arg_count),
-                    source_id: self.current_chunk().source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    self.get_current_span(),
+                    format!("Function expects {} argument(s), got {}", arity, arg_count),
+                    self.current_chunk().source_id.to_string(),
+                ));
             } else {
-                return Err(RuntimeError {
-                    span: self.get_current_span(),
-                    message: format!(
+                return Err(RuntimeError::new(
+                    self.get_current_span(),
+                    format!(
                         "Function expects {}-{} argument(s), got {}",
                         required, arity, arg_count
                     ),
-                    source_id: self.current_chunk().source_id.to_string(),
-                });
+                    self.current_chunk().source_id.to_string(),
+                ));
             }
         }
 
@@ -1054,14 +1065,14 @@ impl VirtualMachine {
 
         // Check stack depth
         if self.frame_count >= MAX_FRAMES {
-            return Err(RuntimeError {
-                span: self.get_current_span(),
-                message: format!(
+            return Err(RuntimeError::new(
+                self.get_current_span(),
+                format!(
                     "Stack overflow - exceeded maximum call depth of {}",
                     MAX_FRAMES
                 ),
-                source_id: self.current_chunk().source_id.to_string(),
-            });
+                self.current_chunk().source_id.to_string(),
+            ));
         }
 
         // Calculate stack_base: points to the closure on the stack
@@ -1227,14 +1238,14 @@ impl VirtualMachine {
                 if import.evaluating.get() {
                     let path_str_idx = import.path;
                     let path_str = self.memory_manager.load_string(path_str_idx).to_string();
-                    return Err(RuntimeError {
-                        span: self.get_current_span(),
-                        message: format!(
+                    return Err(RuntimeError::new(
+                        self.get_current_span(),
+                        format!(
                             "Cyclic import detected: file '{}' is already being evaluated",
                             path_str
                         ),
-                        source_id: self.current_chunk().source_id.to_string(),
-                    });
+                        self.current_chunk().source_id.to_string(),
+                    ));
                 }
 
                 // Mark as evaluating
@@ -1288,14 +1299,11 @@ impl VirtualMachine {
                             .load_import(import_idx)
                             .evaluating
                             .set(false);
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!(
-                                "Failed to read compiled file '{}': {}",
-                                compiled_path, e
-                            ),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Failed to read compiled file '{}': {}", compiled_path, e),
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
                 };
                 serialized_chunk::deserialize_program(&bytes, &mut self.memory_manager)
@@ -1309,14 +1317,11 @@ impl VirtualMachine {
                             .load_import(import_idx)
                             .evaluating
                             .set(false);
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!(
-                                "Failed to read imported file '{}': {}",
-                                target_path_str, e
-                            ),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Failed to read imported file '{}': {}", target_path_str, e),
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
                 };
 
@@ -1330,14 +1335,14 @@ impl VirtualMachine {
                             .load_import(import_idx)
                             .evaluating
                             .set(false);
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!(
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!(
                                 "Failed to compile imported file '{}': {:?}",
                                 target_path_str, e
                             ),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
                 }
             };
@@ -1392,50 +1397,54 @@ impl VirtualMachine {
 
             // Check if we've reached the end
             if frame.ip >= chunk.count() {
-                return Err(RuntimeError {
-                    span: self.get_current_span(),
-                    message: "Unexpected end of bytecode - missing Return instruction".to_string(),
-                    source_id: chunk.source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    self.get_current_span(),
+                    "Unexpected end of bytecode - missing Return instruction".to_string(),
+                    chunk.source_id.to_string(),
+                ));
             }
 
-            let opcode = chunk.read_opcode(frame.ip).ok_or_else(|| RuntimeError {
-                span: self.get_current_span(),
-                message: "Invalid opcode in bytecode".to_string(),
-                source_id: chunk.source_id.to_string(),
+            let opcode = chunk.read_opcode(frame.ip).ok_or_else(|| {
+                RuntimeError::new(
+                    self.get_current_span(),
+                    "Invalid opcode in bytecode".to_string(),
+                    chunk.source_id.to_string(),
+                )
             })?;
 
             match opcode {
                 Opcode::LoadSelf => {
-                    let self_obj = self.current_frame().self_obj.ok_or_else(|| RuntimeError {
-                        span: self.get_current_span(),
-                        message: "'self' used outside of object scope".to_string(),
-                        source_id: self.current_chunk().source_id.to_string(),
+                    let self_obj = self.current_frame().self_obj.ok_or_else(|| {
+                        RuntimeError::new(
+                            self.get_current_span(),
+                            "'self' used outside of object scope".to_string(),
+                            self.current_chunk().source_id.to_string(),
+                        )
                     })?;
                     self.push(Value::Object(self_obj))?;
                     self.advance_pc();
                 }
 
                 Opcode::LoadSuper => {
-                    let super_obj = self.current_frame().super_obj.ok_or_else(|| RuntimeError {
-                        span: self.get_current_span(),
-                        message: "'super' used outside of object scope".to_string(),
-                        source_id: self.current_chunk().source_id.to_string(),
+                    let super_obj = self.current_frame().super_obj.ok_or_else(|| {
+                        RuntimeError::new(
+                            self.get_current_span(),
+                            "'super' used outside of object scope".to_string(),
+                            self.current_chunk().source_id.to_string(),
+                        )
                     })?;
                     self.push(Value::Object(super_obj))?;
                     self.advance_pc();
                 }
 
                 Opcode::LoadFieldName => {
-                    let field_name =
-                        self.current_frame()
-                            .field_name
-                            .ok_or_else(|| RuntimeError {
-                                span: self.get_current_span(),
-                                message: "LoadFieldName used outside of field thunk context"
-                                    .to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            })?;
+                    let field_name = self.current_frame().field_name.ok_or_else(|| {
+                        RuntimeError::new(
+                            self.get_current_span(),
+                            "LoadFieldName used outside of field thunk context".to_string(),
+                            self.current_chunk().source_id.to_string(),
+                        )
+                    })?;
                     self.push(Value::String(field_name))?;
                     self.advance_pc();
                 }
@@ -1453,14 +1462,14 @@ impl VirtualMachine {
                             self.push(Value::Boolean(has_field))?;
                         }
                         (key, obj) => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!(
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!(
                                     "'in' operator requires (string, object), got ({:?}, {:?})",
                                     key, obj
                                 ),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     }
                     self.advance_pc();
@@ -1488,15 +1497,19 @@ impl VirtualMachine {
 
                     let (self_obj_key, super_obj_key) = {
                         let frame = self.current_frame();
-                        let s = frame.self_obj.ok_or_else(|| RuntimeError {
-                            span: self.get_current_span(),
-                            message: "'super' used outside of object scope".to_string(),
-                            source_id: self.current_chunk().source_id.to_string(),
+                        let s = frame.self_obj.ok_or_else(|| {
+                            RuntimeError::new(
+                                self.get_current_span(),
+                                "'super' used outside of object scope".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            )
                         })?;
-                        let su = frame.super_obj.ok_or_else(|| RuntimeError {
-                            span: self.get_current_span(),
-                            message: "'super' used outside of object scope".to_string(),
-                            source_id: self.current_chunk().source_id.to_string(),
+                        let su = frame.super_obj.ok_or_else(|| {
+                            RuntimeError::new(
+                                self.get_current_span(),
+                                "'super' used outside of object scope".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            )
                         })?;
                         (s, su)
                     };
@@ -1535,11 +1548,11 @@ impl VirtualMachine {
                             self.push(Value::Null)?;
                         }
                     } else {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!("Super index must be a string, got {:?}", field_name),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Super index must be a string, got {:?}", field_name),
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
                     self.advance_pc();
                 }
@@ -1564,11 +1577,11 @@ impl VirtualMachine {
                     let chunk = self.current_chunk();
 
                     if index as usize >= chunk.constants.len() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!("Invalid constant index: {}", index),
-                            source_id: chunk.source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Invalid constant index: {}", index),
+                            chunk.source_id.to_string(),
+                        ));
                     }
 
                     let constant = chunk.constants[index as usize].clone();
@@ -1584,15 +1597,15 @@ impl VirtualMachine {
 
                     // Validate stack slot
                     if stack_slot >= self.stack.len() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!(
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!(
                                 "Invalid stack slot {} (stack size: {})",
                                 stack_slot,
                                 self.stack.len()
                             ),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
 
                     // Copy value from slot to top of stack
@@ -1681,18 +1694,18 @@ impl VirtualMachine {
                             }
                         }
                         (Value::Array(_), _) | (_, Value::Array(_)) => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Must concatenate arrays with other arrays".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "Must concatenate arrays with other arrays".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                         (Value::Object(_), _) | (_, Value::Object(_)) => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Must concatenate objects with other objects".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "Must concatenate objects with other objects".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                         // Numeric addition for all other cases
                         _ => {
@@ -1724,11 +1737,11 @@ impl VirtualMachine {
                     let a = self.pop_forced()?;
                     let b_num = self.to_number(b)?;
                     if b_num == 0.0 {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Division by zero".to_string(),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            "Division by zero".to_string(),
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
                     let result = self.to_number(a)? / b_num;
                     self.push(Value::Number(result))?;
@@ -1761,11 +1774,11 @@ impl VirtualMachine {
                     } else {
                         let b_num = self.to_number(b)?;
                         if b_num == 0.0 {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Modulo by zero".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "Modulo by zero".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                         let result = self.to_number(a)? % b_num;
                         self.push(Value::Number(result))?;
@@ -1907,11 +1920,11 @@ impl VirtualMachine {
                     let a = self.pop_forced()?;
                     let shift_count = (self.to_integer(b)? % 64) as u32;
                     if shift_count >= 64 {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Invalid shift count".to_string(),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            "Invalid shift count".to_string(),
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
                     let result = (self.to_integer(a)? << shift_count) as f64;
                     self.push(Value::Number(result))?;
@@ -2012,15 +2025,15 @@ impl VirtualMachine {
                     let abs_slot = frame_base + slot;
 
                     if abs_slot >= self.stack.len() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!(
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!(
                                 "StoreVar: slot {} is out of range (stack size: {})",
                                 slot,
                                 self.stack.len()
                             ),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
 
                     self.stack[abs_slot] = value;
@@ -2070,14 +2083,11 @@ impl VirtualMachine {
                                 // Null keys are omitted as per Jsonnet spec
                             }
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "Object key must be a string or null, got {:?}",
-                                        key
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("Object key must be a string or null, got {:?}", key),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         }
                     }
@@ -2116,14 +2126,14 @@ impl VirtualMachine {
                             self.push(Value::Object(obj_idx))?;
                         }
                         (c, o) => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!(
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!(
                                     "Invalid operands for Opcode::Assert: expected closure and object, got {:?} and {:?}",
                                     c, o
                                 ),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     }
                     self.advance_pc();
@@ -2163,14 +2173,14 @@ impl VirtualMachine {
                                     // Null keys are omitted
                                 }
                                 _ => {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "Object key must be a string or null, got {:?}",
                                             key
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             }
 
@@ -2191,14 +2201,11 @@ impl VirtualMachine {
                             }
                         }
                         _ => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!(
-                                    "Expected object for ObjectInsert, got {:?}",
-                                    object_val
-                                ),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!("Expected object for ObjectInsert, got {:?}", object_val),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     }
                     // No advance_pc() here because read_u8_operand already moved it to the start of the next instruction
@@ -2279,24 +2286,18 @@ impl VirtualMachine {
                                 self.push(Value::Null)?;
                             }
                         } else {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!(
-                                    "Object index must be a string, got {:?}",
-                                    field_name
-                                ),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!("Object index must be a string, got {:?}", field_name),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     } else {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!(
-                                "Cannot index into non-object value: {:?}",
-                                object_value
-                            ),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Cannot index into non-object value: {:?}", object_value),
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
                     self.advance_pc();
                 }
@@ -2311,26 +2312,26 @@ impl VirtualMachine {
                             if let Value::Number(index_num) = index_value {
                                 // Check for negative index
                                 if index_num < 0.0 {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "Array index cannot be negative, got {}",
                                             index_num
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
 
                                 // Check for non-integer index
                                 if index_num.fract() != 0.0 {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "Array index must be an integer, got {}",
                                             index_num
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
 
                                 let index = index_num as usize;
@@ -2338,15 +2339,15 @@ impl VirtualMachine {
 
                                 // Bounds check
                                 if index >= array.len() {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "Array index {} out of bounds (length: {})",
                                             index,
                                             array.len()
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
 
                                 let element = array.elements[index];
@@ -2354,14 +2355,11 @@ impl VirtualMachine {
                                 let forced = self.force_array_element(array_key, index, element)?;
                                 self.push(forced)?;
                             } else {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "Array index must be a number, got {:?}",
-                                        index_value
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("Array index must be a number, got {:?}", index_value),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         }
                         Value::Binary(binary_key) => {
@@ -2369,26 +2367,26 @@ impl VirtualMachine {
                             if let Value::Number(index_num) = index_value {
                                 // Check for negative index
                                 if index_num < 0.0 {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "Binary index cannot be negative, got {}",
                                             index_num
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
 
                                 // Check for non-integer index
                                 if index_num.fract() != 0.0 {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "Binary index must be an integer, got {}",
                                             index_num
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
 
                                 let index = index_num as usize;
@@ -2396,27 +2394,24 @@ impl VirtualMachine {
 
                                 // Bounds check
                                 if index >= binary.data.len() {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "Binary index {} out of bounds (length: {})",
                                             index,
                                             binary.data.len()
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
 
                                 self.push(Value::Number(binary.data[index] as f64))?;
                             } else {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "Binary index must be a number, got {:?}",
-                                        index_value
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("Binary index must be a number, got {:?}", index_value),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         }
                         Value::Object(object_key) => {
@@ -2457,74 +2452,68 @@ impl VirtualMachine {
                                     self.push(Value::Null)?;
                                 }
                             } else {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "Object index must be a string, got {:?}",
-                                        index_value
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("Object index must be a string, got {:?}", index_value),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         }
                         Value::String(string_key) => {
                             // String indexing with number - returns single character string
                             if let Value::Number(index_num) = index_value {
                                 if index_num < 0.0 {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "String index cannot be negative, got {}",
                                             index_num
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                                 if index_num.fract() != 0.0 {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "String index must be an integer, got {}",
                                             index_num
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                                 let index = index_num as usize;
                                 let s = self.memory_manager.load_string(string_key).to_string();
                                 let chars: Vec<char> = s.chars().collect();
                                 if index >= chars.len() {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "String index {} out of bounds (length: {})",
                                             index,
                                             chars.len()
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                                 let ch = chars[index].to_string();
                                 let str_alloc = self.memory_manager.allocate_string(&ch);
                                 let str_idx = str_alloc.index;
                                 self.push(Value::String(str_idx))?;
                             } else {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "String index must be a number, got {:?}",
-                                        index_value
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("String index must be a number, got {:?}", index_value),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         }
                         _ => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!("Cannot index into value: {:?}", container_value),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!("Cannot index into value: {:?}", container_value),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     }
 
@@ -2546,14 +2535,11 @@ impl VirtualMachine {
                             self.push(Value::Number(length))?;
                         }
                         _ => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!(
-                                    "Cannot get length of non-array value: {:?}",
-                                    array_value
-                                ),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!("Cannot get length of non-array value: {:?}", array_value),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     }
 
@@ -2587,14 +2573,11 @@ impl VirtualMachine {
                             }
                         }
                         _ => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!(
-                                    "Cannot append to non-array value: {:?}",
-                                    array_value
-                                ),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!("Cannot append to non-array value: {:?}", array_value),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     }
 
@@ -2658,11 +2641,11 @@ impl VirtualMachine {
                             self.run_garbage_collection();
                         }
                     } else {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Object merge requires two objects".to_string(),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            "Object merge requires two objects".to_string(),
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
                     self.advance_pc();
                 }
@@ -2672,23 +2655,24 @@ impl VirtualMachine {
                     let chunk = self.current_chunk();
 
                     if frame.ip + 3 >= chunk.count() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Invalid bytecode - missing StdCall operands".to_string(),
-                            source_id: chunk.source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            "Invalid bytecode - missing StdCall operands".to_string(),
+                            chunk.source_id.to_string(),
+                        ));
                     }
 
                     let func_id_val = chunk.read_u16(frame.ip + 1).unwrap();
                     let arg_count = chunk.read_u8(frame.ip + 3).unwrap() as usize;
                     self.current_frame_mut().ip += 4; // opcode + u16 + u8
 
-                    let func_id =
-                        chunk::NativeFuncId::from_u16(func_id_val).ok_or_else(|| RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!("Invalid native function ID: {}", func_id_val),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        })?;
+                    let func_id = chunk::NativeFuncId::from_u16(func_id_val).ok_or_else(|| {
+                        RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Invalid native function ID: {}", func_id_val),
+                            self.current_chunk().source_id.to_string(),
+                        )
+                    })?;
 
                     // Extract arguments from stack
                     let args = self.stack[self.stack.len() - arg_count..].to_vec();
@@ -2709,12 +2693,11 @@ impl VirtualMachine {
                         let o_idx = match o_val {
                             Value::Object(o) => o,
                             _ => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: "std.get() first argument must be an object"
-                                        .to_string(),
+                                    "std.get() first argument must be an object".to_string(),
                                     source_id,
-                                });
+                                ));
                             }
                         };
                         let field_name = match f_val {
@@ -2722,24 +2705,23 @@ impl VirtualMachine {
                                 self.memory_manager.load_string(s_idx).to_string()
                             }
                             _ => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: "std.get() second argument must be a string"
-                                        .to_string(),
+                                    "std.get() second argument must be a string".to_string(),
                                     source_id,
-                                });
+                                ));
                             }
                         };
                         let inc_hidden = match inc_hidden_val {
                             Value::Boolean(b) => b,
                             Value::Null => true,
                             _ => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: "std.get() fourth argument must be a boolean or null"
+                                    "std.get() fourth argument must be a boolean or null"
                                         .to_string(),
                                     source_id,
-                                });
+                                ));
                             }
                         };
 
@@ -2840,14 +2822,14 @@ impl VirtualMachine {
                         let sz = match sz_val {
                             Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.makeArray expected positive integer for size, got {}",
                                         sz_val
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
 
@@ -2922,12 +2904,11 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(a) => a,
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "std.sort() expected array as first argument"
-                                        .to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    "std.sort() expected array as first argument".to_string(),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements: Vec<Value> =
@@ -2977,15 +2958,15 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(a) => a,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.{} expected array, got {}",
                                         func_id.name(),
                                         other.type_name()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
 
@@ -3010,11 +2991,11 @@ impl VirtualMachine {
                                     continue;
                                 }
                                 None => {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!("std.{}: empty array", func_id.name()),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!("std.{}: empty array", func_id.name()),
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             }
                         }
@@ -3105,12 +3086,11 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(a) => a,
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "std.uniq() expected array as first argument"
-                                        .to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    "std.uniq() expected array as first argument".to_string(),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         // Root keyF before force_all_array_elements which may trigger GC
@@ -3253,12 +3233,12 @@ impl VirtualMachine {
                                         self.memory_manager.load_string(s_idx).to_string()
                                     }
                                     _ => {
-                                        return Err(RuntimeError {
+                                        return Err(RuntimeError::new(
                                             span,
-                                            message: "std.manifestJsonEx: indent must be a string"
+                                            "std.manifestJsonEx: indent must be a string"
                                                 .to_string(),
                                             source_id,
-                                        });
+                                        ));
                                     }
                                 };
                                 let n = if args.len() > 2 {
@@ -3267,34 +3247,33 @@ impl VirtualMachine {
                                             self.memory_manager.load_string(s_idx).to_string()
                                         }
                                         _ => {
-                                            return Err(RuntimeError {
+                                            return Err(RuntimeError::new(
                                                 span,
-                                                message:
-                                                    "std.manifestJsonEx: newline must be a string"
-                                                        .to_string(),
+                                                "std.manifestJsonEx: newline must be a string"
+                                                    .to_string(),
                                                 source_id,
-                                            });
+                                            ));
                                         }
                                     }
                                 } else {
                                     "\n".to_string()
                                 };
-                                let k = if args.len() > 3 {
-                                    match args[3] {
-                                        Value::String(s_idx) => {
-                                            self.memory_manager.load_string(s_idx).to_string()
-                                        }
-                                        _ => return Err(RuntimeError {
-                                            span,
-                                            message:
+                                let k =
+                                    if args.len() > 3 {
+                                        match args[3] {
+                                            Value::String(s_idx) => {
+                                                self.memory_manager.load_string(s_idx).to_string()
+                                            }
+                                            _ => return Err(RuntimeError::new(
+                                                span,
                                                 "std.manifestJsonEx: key_val_sep must be a string"
                                                     .to_string(),
-                                            source_id,
-                                        }),
-                                    }
-                                } else {
-                                    ": ".to_string()
-                                };
+                                                source_id,
+                                            )),
+                                        }
+                                    } else {
+                                        ": ".to_string()
+                                    };
                                 (i, n, k)
                             }
                             _ => unreachable!(),
@@ -3325,12 +3304,11 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(a) => a,
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "std.map: second argument must be an array"
-                                        .to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    "std.map: second argument must be an array".to_string(),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements = self.memory_manager.load_array(arr_idx).elements.clone();
@@ -3368,12 +3346,11 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(a) => a,
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "std.filter: second argument must be an array"
-                                        .to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    "std.filter: second argument must be an array".to_string(),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements = self.memory_manager.load_array(arr_idx).elements.clone();
@@ -3398,14 +3375,14 @@ impl VirtualMachine {
                                 Value::Boolean(true) => results.push(elem),
                                 Value::Boolean(false) => {}
                                 other => {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "std.filter: function must return boolean, got {:?}",
                                             other
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             }
                         }
@@ -3422,12 +3399,11 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(a) => a,
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "std.foldl: second argument must be an array"
-                                        .to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    "std.foldl: second argument must be an array".to_string(),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements = self.memory_manager.load_array(arr_idx).elements.clone();
@@ -3485,16 +3461,11 @@ impl VirtualMachine {
                                             results.extend(sub_elems);
                                         }
                                         _ => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message:
-                                                    "std.flatMap: function must return array for array input"
-                                                        .to_string(),
-                                                source_id: self
+                                            return Err(RuntimeError::new(self.get_current_span(), "std.flatMap: function must return array for array input"
+                                                        .to_string(), self
                                                     .current_chunk()
                                                     .source_id
-                                                    .to_string(),
-                                            });
+                                                    .to_string()));
                                         }
                                     }
                                 }
@@ -3531,16 +3502,11 @@ impl VirtualMachine {
                                             out.push_str(self.memory_manager.load_string(rs))
                                         }
                                         _ => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message:
-                                                    "std.flatMap: function must return string for string input"
-                                                        .to_string(),
-                                                source_id: self
+                                            return Err(RuntimeError::new(self.get_current_span(), "std.flatMap: function must return string for string input"
+                                                        .to_string(), self
                                                     .current_chunk()
                                                     .source_id
-                                                    .to_string(),
-                                            });
+                                                    .to_string()));
                                         }
                                     }
                                 }
@@ -3548,12 +3514,12 @@ impl VirtualMachine {
                                 self.push(Value::String(alloc.index))?;
                             }
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "std.flatMap: second argument must be array or string"
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    "std.flatMap: second argument must be array or string"
                                         .to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         }
                         continue;
@@ -3565,12 +3531,12 @@ impl VirtualMachine {
                         let arr_idx = match args[1] {
                             Value::Array(a) => a,
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "std.mapWithIndex: second argument must be an array"
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    "std.mapWithIndex: second argument must be an array"
                                         .to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements = self.memory_manager.load_array(arr_idx).elements.clone();
@@ -3609,12 +3575,11 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(a) => a,
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "std.foldr: second argument must be an array"
-                                        .to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    "std.foldr: second argument must be an array".to_string(),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements: Vec<Value> =
@@ -3647,12 +3612,11 @@ impl VirtualMachine {
                         let o_idx = match obj_val {
                             Value::Object(o) => o,
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "std.mapWithKey: second argument must be an object"
-                                        .to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    "std.mapWithKey: second argument must be an object".to_string(),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         // Collect visible fields: (key StringIndex, raw value, visibility)
@@ -3726,12 +3690,11 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(a) => a,
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: "std.filterMap: third argument must be an array"
-                                        .to_string(),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    "std.filterMap: third argument must be an array".to_string(),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements: Vec<Value> =
@@ -3776,13 +3739,12 @@ impl VirtualMachine {
                                 }
                                 Value::Boolean(false) => {}
                                 _ => {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message:
-                                            "std.filterMap: filter function must return a boolean"
-                                                .to_string(),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        "std.filterMap: filter function must return a boolean"
+                                            .to_string(),
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             }
                         }
@@ -3798,14 +3760,14 @@ impl VirtualMachine {
                         let key = match args[0] {
                             Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
                             other => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: format!(
+                                    format!(
                                         "std.extVar: argument must be a string, got {}",
                                         other.type_name()
                                     ),
                                     source_id,
-                                });
+                                ));
                             }
                         };
                         match self.ext_vars.get(&key).copied() {
@@ -3814,11 +3776,11 @@ impl VirtualMachine {
                                 continue;
                             }
                             None => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: format!("Undefined external variable: '{}'", key),
+                                    format!("Undefined external variable: '{}'", key),
                                     source_id,
-                                });
+                                ));
                             }
                         }
                     }
@@ -3831,27 +3793,21 @@ impl VirtualMachine {
                         let a_idx = match a_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "setInter: expected array, got {}",
-                                        other.type_name()
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("setInter: expected array, got {}", other.type_name()),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let b_idx = match b_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "setInter: expected array, got {}",
-                                        other.type_name()
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("setInter: expected array, got {}", other.type_name()),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let a_elems: Vec<Value> =
@@ -3924,27 +3880,21 @@ impl VirtualMachine {
                         let a_idx = match a_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "setDiff: expected array, got {}",
-                                        other.type_name()
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("setDiff: expected array, got {}", other.type_name()),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let b_idx = match b_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "setDiff: expected array, got {}",
-                                        other.type_name()
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("setDiff: expected array, got {}", other.type_name()),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let a_elems: Vec<Value> =
@@ -4026,14 +3976,11 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "setMember: expected array, got {}",
-                                        other.type_name()
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("setMember: expected array, got {}", other.type_name()),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let arr_elems: Vec<Value> =
@@ -4101,27 +4048,21 @@ impl VirtualMachine {
                         let a_idx = match a_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "setUnion: expected array, got {}",
-                                        other.type_name()
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("setUnion: expected array, got {}", other.type_name()),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let b_idx = match b_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "setUnion: expected array, got {}",
-                                        other.type_name()
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("setUnion: expected array, got {}", other.type_name()),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let mut combined = self.memory_manager.load_array(a_idx).elements.clone();
@@ -4181,11 +4122,11 @@ impl VirtualMachine {
                         let s_idx = match args[0] {
                             Value::String(s) => s,
                             _ => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: "std.parseJson: argument must be a string".to_string(),
+                                    "std.parseJson: argument must be a string".to_string(),
                                     source_id,
-                                });
+                                ));
                             }
                         };
                         let s = self.memory_manager.load_string(s_idx).to_string();
@@ -4246,13 +4187,12 @@ impl VirtualMachine {
                                         i
                                     }
                                     _ => {
-                                        return Err(RuntimeError {
+                                        return Err(RuntimeError::new(
                                             span,
-                                            message:
-                                                "std.setUnion: first argument must be an array"
-                                                    .to_string(),
+                                            "std.setUnion: first argument must be an array"
+                                                .to_string(),
                                             source_id,
-                                        });
+                                        ));
                                     }
                                 };
                                 let b_idx = match b_val {
@@ -4261,13 +4201,12 @@ impl VirtualMachine {
                                         i
                                     }
                                     _ => {
-                                        return Err(RuntimeError {
+                                        return Err(RuntimeError::new(
                                             span,
-                                            message:
-                                                "std.setUnion: second argument must be an array"
-                                                    .to_string(),
+                                            "std.setUnion: second argument must be an array"
+                                                .to_string(),
                                             source_id,
-                                        });
+                                        ));
                                     }
                                 };
                                 let mut combined =
@@ -4334,24 +4273,23 @@ impl VirtualMachine {
                                 Value::Boolean(b) => b,
                                 Value::Null => false,
                                 _ => {
-                                    return Err(RuntimeError {
+                                    return Err(RuntimeError::new(
                                         span,
-                                        message:
-                                            "manifestYamlDoc: indent_array_in_object must be bool"
-                                                .to_string(),
+                                        "manifestYamlDoc: indent_array_in_object must be bool"
+                                            .to_string(),
                                         source_id,
-                                    });
+                                    ));
                                 }
                             };
                         let quote_keys = match args.get(2).copied().unwrap_or(Value::Null) {
                             Value::Boolean(b) => b,
                             Value::Null => true,
                             _ => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: "manifestYamlDoc: quote_keys must be bool".to_string(),
+                                    "manifestYamlDoc: quote_keys must be bool".to_string(),
                                     source_id,
-                                });
+                                ));
                             }
                         };
                         let result = self.manifest_yaml_doc(
@@ -4377,37 +4315,34 @@ impl VirtualMachine {
                                 Value::Boolean(b) => b,
                                 Value::Null => false,
                                 _ => {
-                                    return Err(RuntimeError {
-                                    span,
-                                    message:
+                                    return Err(RuntimeError::new(
+                                        span,
                                         "manifestYamlStream: indent_array_in_object must be bool"
                                             .to_string(),
-                                    source_id,
-                                });
+                                        source_id,
+                                    ));
                                 }
                             };
                         let c_document_end = match args.get(2).copied().unwrap_or(Value::Null) {
                             Value::Boolean(b) => b,
                             Value::Null => true,
                             _ => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: "manifestYamlStream: c_document_end must be bool"
-                                        .to_string(),
+                                    "manifestYamlStream: c_document_end must be bool".to_string(),
                                     source_id,
-                                });
+                                ));
                             }
                         };
                         let quote_keys = match args.get(3).copied().unwrap_or(Value::Null) {
                             Value::Boolean(b) => b,
                             Value::Null => true,
                             _ => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: "manifestYamlStream: quote_keys must be bool"
-                                        .to_string(),
+                                    "manifestYamlStream: quote_keys must be bool".to_string(),
                                     source_id,
-                                });
+                                ));
                             }
                         };
                         let result = self.manifest_yaml_stream(
@@ -4430,11 +4365,11 @@ impl VirtualMachine {
                         let s = match args[0] {
                             Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
                             _ => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: "parseYaml: argument must be a string".to_string(),
+                                    "parseYaml: argument must be a string".to_string(),
                                     source_id,
-                                });
+                                ));
                             }
                         };
                         let result = self.parse_yaml_multi_doc(&s, span, source_id)?;
@@ -4461,11 +4396,11 @@ impl VirtualMachine {
                         let indent = match args[1] {
                             Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
                             _ => {
-                                return Err(RuntimeError {
+                                return Err(RuntimeError::new(
                                     span,
-                                    message: "manifestTomlEx: indent must be a string".to_string(),
+                                    "manifestTomlEx: indent must be a string".to_string(),
                                     source_id,
-                                });
+                                ));
                             }
                         };
                         let result =
@@ -4482,14 +4417,14 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.groupBy: expected array, got {}",
                                         other.type_name()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements: Vec<Value> =
@@ -4520,14 +4455,14 @@ impl VirtualMachine {
                                     self.memory_manager.load_string(idx).to_string()
                                 }
                                 other => {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "std.groupBy: keyF must return string, got {}",
                                             other.type_name()
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             };
                             if !groups.contains_key(&key_str) {
@@ -4567,14 +4502,14 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.sortBy: expected array, got {}",
                                         other.type_name()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements: Vec<Value> =
@@ -4619,14 +4554,14 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.countBy: expected array, got {}",
                                         other.type_name()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements: Vec<Value> =
@@ -4654,14 +4589,14 @@ impl VirtualMachine {
                                     self.memory_manager.load_string(idx).to_string()
                                 }
                                 other => {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "std.countBy: keyF must return string, got {}",
                                             other.type_name()
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             };
                             if !counts.contains_key(&key_str) {
@@ -4699,14 +4634,14 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.uniqBy: expected array, got {}",
                                         other.type_name()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let elements: Vec<Value> =
@@ -4735,14 +4670,14 @@ impl VirtualMachine {
                                     self.memory_manager.load_string(idx).to_string()
                                 }
                                 other => {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "std.uniqBy: keyF must return string, got {}",
                                             other.type_name()
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             };
                             if seen.insert(key_str) {
@@ -4763,15 +4698,15 @@ impl VirtualMachine {
                         let arr_idx = match arr_val {
                             Value::Array(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.{}: expected array, got {}",
                                         func_id.name(),
                                         other.type_name()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         // Root keyF before forcing array elements (which may trigger GC)
@@ -4783,11 +4718,11 @@ impl VirtualMachine {
                             self.memory_manager.load_array(arr_idx).elements.clone();
                         if elements.is_empty() {
                             self.memory_manager.external_roots.pop();
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!("std.{}: array must not be empty", func_id.name()),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!("std.{}: array must not be empty", func_id.name()),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                         // Compute key for first element
                         let (mut best_key, mut best_elem) = {
@@ -4845,14 +4780,14 @@ impl VirtualMachine {
                         let o_idx = match obj_val {
                             Value::Object(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.toPairs: expected object, got {}",
                                         other.type_name()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let field_data: Vec<(chunk::StringIndex, Value)> = {
@@ -4892,14 +4827,14 @@ impl VirtualMachine {
                         let o_idx = match obj_val {
                             Value::Object(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.mapKeys: expected object, got {}",
                                         other.type_name()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = {
@@ -4950,14 +4885,14 @@ impl VirtualMachine {
                                     self.memory_manager.load_string(idx).to_string()
                                 }
                                 other => {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "std.mapKeys: func must return string, got {}",
                                             other.type_name()
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             };
                             let new_k_alloc = self.memory_manager.allocate_string(&new_key_str);
@@ -4984,14 +4919,14 @@ impl VirtualMachine {
                         let o_idx = match obj_val {
                             Value::Object(i) => i,
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.filterObject: expected object, got {}",
                                         other.type_name()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = {
@@ -5049,14 +4984,14 @@ impl VirtualMachine {
                                 }
                                 Value::Boolean(false) => {}
                                 other => {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "std.filterObject: func must return bool, got {}",
                                             other.type_name()
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             }
                         }
@@ -5074,14 +5009,14 @@ impl VirtualMachine {
                         let sep = match sep_val {
                             Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
                             other => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "std.objectFlatten: sep must be string, got {}",
                                         other.type_name()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         };
                         let mut flat_fields: Vec<(String, Value)> = Vec::new();
@@ -5151,11 +5086,11 @@ impl VirtualMachine {
                     let error_message = json_value.to_string();
 
                     // Return RuntimeError with the converted message
-                    return Err(RuntimeError {
-                        span: self.get_current_span(),
-                        message: error_message,
-                        source_id: self.current_chunk().source_id.to_string(),
-                    });
+                    return Err(RuntimeError::new(
+                        self.get_current_span(),
+                        error_message,
+                        self.current_chunk().source_id.to_string(),
+                    ));
                 }
 
                 Opcode::Import => {
@@ -5166,11 +5101,11 @@ impl VirtualMachine {
                     {
                         Some(Value::String(idx)) => *idx,
                         _ => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Import operand must be a string constant".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "Import operand must be a string constant".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     };
 
@@ -5190,11 +5125,11 @@ impl VirtualMachine {
                     {
                         Some(Value::String(idx)) => *idx,
                         _ => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "ImportStr operand must be a string constant".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "ImportStr operand must be a string constant".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     };
 
@@ -5203,12 +5138,13 @@ impl VirtualMachine {
                     let target_path_str = self.resolve_import_path(&path_str);
 
                     // Read the file content
-                    let content =
-                        std::fs::read_to_string(&target_path_str).map_err(|e| RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!("Failed to read file '{}': {}", target_path_str, e),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        })?;
+                    let content = std::fs::read_to_string(&target_path_str).map_err(|e| {
+                        RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Failed to read file '{}': {}", target_path_str, e),
+                            self.current_chunk().source_id.to_string(),
+                        )
+                    })?;
 
                     // Allocate content as string
                     let allocation_result = self.memory_manager.allocate_string(&content);
@@ -5234,11 +5170,11 @@ impl VirtualMachine {
                     {
                         Some(Value::String(idx)) => *idx,
                         _ => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "ImportBin operand must be a string constant".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "ImportBin operand must be a string constant".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     };
 
@@ -5247,10 +5183,12 @@ impl VirtualMachine {
                     let target_path_str = self.resolve_import_path(&path_str);
 
                     // Read the file content as binary
-                    let content = std::fs::read(&target_path_str).map_err(|e| RuntimeError {
-                        span: self.get_current_span(),
-                        message: format!("Failed to read file '{}': {}", target_path_str, e),
-                        source_id: self.current_chunk().source_id.to_string(),
+                    let content = std::fs::read(&target_path_str).map_err(|e| {
+                        RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Failed to read file '{}': {}", target_path_str, e),
+                            self.current_chunk().source_id.to_string(),
+                        )
                     })?;
 
                     // Allocate content as binary object
@@ -5303,11 +5241,11 @@ impl VirtualMachine {
                     let chunk = self.current_chunk();
 
                     if frame.ip + 2 >= chunk.count() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Invalid bytecode - missing Call operands".to_string(),
-                            source_id: chunk.source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            "Invalid bytecode - missing Call operands".to_string(),
+                            chunk.source_id.to_string(),
+                        ));
                     }
 
                     let positional_count = chunk.code[frame.ip + 1] as usize;
@@ -5341,11 +5279,11 @@ impl VirtualMachine {
                                 if let Value::String(name_idx) = name_val {
                                     named_args.push((name_idx, value));
                                 } else {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: "Named argument name must be a string".to_string(),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        "Named argument name must be a string".to_string(),
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             }
 
@@ -5376,27 +5314,24 @@ impl VirtualMachine {
                                     if !matches!(args[pos], Value::Uninitialized) {
                                         let name_str =
                                             self.memory_manager.load_string(name_idx).to_string();
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
+                                        return Err(RuntimeError::new(
+                                            self.get_current_span(),
+                                            format!(
                                                 "Argument '{}' already provided positionally",
                                                 name_str,
                                             ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
+                                            self.current_chunk().source_id.to_string(),
+                                        ));
                                     }
                                     args[pos] = val;
                                 } else {
                                     let name_str =
                                         self.memory_manager.load_string(name_idx).to_string();
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
-                                            "Function has no parameter named '{}'",
-                                            name_str,
-                                        ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!("Function has no parameter named '{}'", name_str,),
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             }
 
@@ -5419,11 +5354,11 @@ impl VirtualMachine {
                                 if let Value::String(name_idx) = name_val {
                                     named_args.push((name_idx, value));
                                 } else {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: "Named argument name must be a string".to_string(),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        "Named argument name must be a string".to_string(),
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             }
 
@@ -5448,15 +5383,15 @@ impl VirtualMachine {
                                 {
                                     args[pos] = val;
                                 } else {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        format!(
                                             "std.{} has no parameter named '{}'",
                                             id.name(),
                                             name_str,
                                         ),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             }
 
@@ -5480,11 +5415,11 @@ impl VirtualMachine {
                             let result = self.call_native_checked(id, &args, span, source_id)?;
                             self.push(result)?;
                         } else {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Named arguments only supported for functions".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "Named arguments only supported for functions".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     } else {
                         let arg_count = positional_count;
@@ -5550,30 +5485,24 @@ impl VirtualMachine {
                                             let a_val = args[0];
                                             let b_val = args[1];
                                             let a_idx = match a_val {
-                                            Value::Array(i) => {
-                                                self.force_all_array_elements(i)?;
-                                                i
-                                            }
-                                            _ => return Err(RuntimeError {
-                                                span,
-                                                message:
+                                                Value::Array(i) => {
+                                                    self.force_all_array_elements(i)?;
+                                                    i
+                                                }
+                                                _ => return Err(RuntimeError::new(
+                                                    span,
                                                     "std.setUnion: first argument must be an array"
                                                         .to_string(),
-                                                source_id,
-                                            }),
-                                        };
+                                                    source_id,
+                                                )),
+                                            };
                                             let b_idx = match b_val {
                                             Value::Array(i) => {
                                                 self.force_all_array_elements(i)?;
                                                 i
                                             }
-                                            _ => return Err(RuntimeError {
-                                                span,
-                                                message:
-                                                    "std.setUnion: second argument must be an array"
-                                                        .to_string(),
-                                                source_id,
-                                            }),
+                                            _ => return Err(RuntimeError::new(span, "std.setUnion: second argument must be an array"
+                                                        .to_string(), source_id)),
                                         };
                                             let mut combined = self
                                                 .memory_manager
@@ -5653,13 +5582,8 @@ impl VirtualMachine {
                                         Value::Boolean(b) => b,
                                         Value::Null => false,
                                         _ => {
-                                            return Err(RuntimeError {
-                                            span,
-                                            message:
-                                                "manifestYamlDoc: indent_array_in_object must be bool"
-                                                    .to_string(),
-                                            source_id,
-                                        });
+                                            return Err(RuntimeError::new(span, "manifestYamlDoc: indent_array_in_object must be bool"
+                                                    .to_string(), source_id));
                                         }
                                     };
                                     let quote_keys =
@@ -5667,13 +5591,12 @@ impl VirtualMachine {
                                             Value::Boolean(b) => b,
                                             Value::Null => true,
                                             _ => {
-                                                return Err(RuntimeError {
+                                                return Err(RuntimeError::new(
                                                     span,
-                                                    message:
-                                                        "manifestYamlDoc: quote_keys must be bool"
-                                                            .to_string(),
+                                                    "manifestYamlDoc: quote_keys must be bool"
+                                                        .to_string(),
                                                     source_id,
-                                                });
+                                                ));
                                             }
                                         };
                                     let result = self.manifest_yaml_doc(
@@ -5702,11 +5625,7 @@ impl VirtualMachine {
                                         Value::Boolean(b) => b,
                                         Value::Null => false,
                                         _ => {
-                                            return Err(RuntimeError {
-                                            span,
-                                            message: "manifestYamlStream: indent_array_in_object must be bool".to_string(),
-                                            source_id,
-                                        });
+                                            return Err(RuntimeError::new(span, "manifestYamlStream: indent_array_in_object must be bool".to_string(), source_id));
                                         }
                                     };
                                     let c_document_end =
@@ -5714,13 +5633,12 @@ impl VirtualMachine {
                                             Value::Boolean(b) => b,
                                             Value::Null => true,
                                             _ => {
-                                                return Err(RuntimeError {
-                                            span,
-                                            message:
+                                                return Err(RuntimeError::new(
+                                                span,
                                                 "manifestYamlStream: c_document_end must be bool"
                                                     .to_string(),
-                                            source_id,
-                                        });
+                                                source_id,
+                                            ));
                                             }
                                         };
                                     let quote_keys =
@@ -5728,13 +5646,12 @@ impl VirtualMachine {
                                             Value::Boolean(b) => b,
                                             Value::Null => true,
                                             _ => {
-                                                return Err(RuntimeError {
-                                                span,
-                                                message:
+                                                return Err(RuntimeError::new(
+                                                    span,
                                                     "manifestYamlStream: quote_keys must be bool"
                                                         .to_string(),
-                                                source_id,
-                                            });
+                                                    source_id,
+                                                ));
                                             }
                                         };
                                     let result = self.manifest_yaml_stream(
@@ -5759,12 +5676,11 @@ impl VirtualMachine {
                                             self.memory_manager.load_string(idx).to_string()
                                         }
                                         _ => {
-                                            return Err(RuntimeError {
+                                            return Err(RuntimeError::new(
                                                 span,
-                                                message: "parseYaml: argument must be a string"
-                                                    .to_string(),
+                                                "parseYaml: argument must be a string".to_string(),
                                                 source_id,
-                                            });
+                                            ));
                                         }
                                     };
                                     let result = self.parse_yaml_multi_doc(&s, span, source_id)?;
@@ -5794,12 +5710,12 @@ impl VirtualMachine {
                                             self.memory_manager.load_string(idx).to_string()
                                         }
                                         _ => {
-                                            return Err(RuntimeError {
+                                            return Err(RuntimeError::new(
                                                 span,
-                                                message: "manifestTomlEx: indent must be a string"
+                                                "manifestTomlEx: indent must be a string"
                                                     .to_string(),
                                                 source_id,
-                                            });
+                                            ));
                                         }
                                     };
                                     let result = self.manifest_toml_ex(
@@ -5826,18 +5742,15 @@ impl VirtualMachine {
                                     let arr_idx = match arr_val {
                                         Value::Array(a) => a,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "std.{} expected array, got {}",
                                                     id.name(),
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
 
@@ -5862,17 +5775,11 @@ impl VirtualMachine {
                                                 continue;
                                             }
                                             None => {
-                                                return Err(RuntimeError {
-                                                    span: self.get_current_span(),
-                                                    message: format!(
-                                                        "std.{}: empty array",
-                                                        id.name()
-                                                    ),
-                                                    source_id: self
-                                                        .current_chunk()
-                                                        .source_id
-                                                        .to_string(),
-                                                });
+                                                return Err(RuntimeError::new(
+                                                    self.get_current_span(),
+                                                    format!("std.{}: empty array", id.name()),
+                                                    self.current_chunk().source_id.to_string(),
+                                                ));
                                             }
                                         }
                                     }
@@ -5976,14 +5883,14 @@ impl VirtualMachine {
                                             self.memory_manager.load_string(idx).to_string()
                                         }
                                         other => {
-                                            return Err(RuntimeError {
+                                            return Err(RuntimeError::new(
                                                 span,
-                                                message: format!(
+                                                format!(
                                                     "std.extVar: argument must be a string, got {}",
                                                     other.type_name()
                                                 ),
                                                 source_id,
-                                            });
+                                            ));
                                         }
                                     };
                                     match self.ext_vars.get(&key).copied() {
@@ -5992,14 +5899,11 @@ impl VirtualMachine {
                                             continue;
                                         }
                                         None => {
-                                            return Err(RuntimeError {
+                                            return Err(RuntimeError::new(
                                                 span,
-                                                message: format!(
-                                                    "Undefined external variable: '{}'",
-                                                    key
-                                                ),
+                                                format!("Undefined external variable: '{}'", key),
                                                 source_id,
-                                            });
+                                            ));
                                         }
                                     }
                                 }
@@ -6012,33 +5916,27 @@ impl VirtualMachine {
                                     let a_idx = match a_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "setInter: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let b_idx = match b_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "setInter: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let a_elems: Vec<Value> =
@@ -6114,33 +6012,27 @@ impl VirtualMachine {
                                     let a_idx = match a_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "setDiff: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let b_idx = match b_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "setDiff: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let a_elems: Vec<Value> =
@@ -6225,17 +6117,14 @@ impl VirtualMachine {
                                     let arr_idx = match arr_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "setMember: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let arr_elems: Vec<Value> =
@@ -6307,33 +6196,27 @@ impl VirtualMachine {
                                     let a_idx = match a_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "setUnion: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let b_idx = match b_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "setUnion: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let mut combined =
@@ -6395,18 +6278,17 @@ impl VirtualMachine {
                                 if id == chunk::NativeFuncId::Sort && args.len() == 2 {
                                     let arr_val = args[0];
                                     let key_f = args[1];
-                                    let arr_idx =
-                                        match arr_val {
-                                            Value::Array(a) => a,
-                                            _ => {
-                                                return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: "std.sort() expected array as first argument"
-                                                .to_string(),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
-                                            }
-                                        };
+                                    let arr_idx = match arr_val {
+                                        Value::Array(a) => a,
+                                        _ => {
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                "std.sort() expected array as first argument"
+                                                    .to_string(),
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
+                                        }
+                                    };
                                     let elements: Vec<Value> =
                                         self.memory_manager.load_array(arr_idx).elements.clone();
 
@@ -6451,17 +6333,14 @@ impl VirtualMachine {
                                     let arr_idx = match arr_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "std.groupBy: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let elements: Vec<Value> =
@@ -6492,17 +6371,14 @@ impl VirtualMachine {
                                                 self.memory_manager.load_string(idx).to_string()
                                             }
                                             other => {
-                                                return Err(RuntimeError {
-                                                    span: self.get_current_span(),
-                                                    message: format!(
+                                                return Err(RuntimeError::new(
+                                                    self.get_current_span(),
+                                                    format!(
                                                         "std.groupBy: keyF must return string, got {}",
                                                         other.type_name()
                                                     ),
-                                                    source_id: self
-                                                        .current_chunk()
-                                                        .source_id
-                                                        .to_string(),
-                                                });
+                                                    self.current_chunk().source_id.to_string(),
+                                                ));
                                             }
                                         };
                                         if !groups.contains_key(&key_str) {
@@ -6544,17 +6420,14 @@ impl VirtualMachine {
                                     let arr_idx = match arr_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "std.sortBy: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let elements: Vec<Value> =
@@ -6598,17 +6471,14 @@ impl VirtualMachine {
                                     let arr_idx = match arr_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "std.countBy: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let elements: Vec<Value> =
@@ -6636,17 +6506,14 @@ impl VirtualMachine {
                                                 self.memory_manager.load_string(idx).to_string()
                                             }
                                             other => {
-                                                return Err(RuntimeError {
-                                                    span: self.get_current_span(),
-                                                    message: format!(
+                                                return Err(RuntimeError::new(
+                                                    self.get_current_span(),
+                                                    format!(
                                                         "std.countBy: keyF must return string, got {}",
                                                         other.type_name()
                                                     ),
-                                                    source_id: self
-                                                        .current_chunk()
-                                                        .source_id
-                                                        .to_string(),
-                                                });
+                                                    self.current_chunk().source_id.to_string(),
+                                                ));
                                             }
                                         };
                                         if !counts.contains_key(&key_str) {
@@ -6684,17 +6551,14 @@ impl VirtualMachine {
                                     let arr_idx = match arr_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "std.uniqBy: expected array, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let elements: Vec<Value> =
@@ -6723,17 +6587,14 @@ impl VirtualMachine {
                                                 self.memory_manager.load_string(idx).to_string()
                                             }
                                             other => {
-                                                return Err(RuntimeError {
-                                                    span: self.get_current_span(),
-                                                    message: format!(
+                                                return Err(RuntimeError::new(
+                                                    self.get_current_span(),
+                                                    format!(
                                                         "std.uniqBy: keyF must return string, got {}",
                                                         other.type_name()
                                                     ),
-                                                    source_id: self
-                                                        .current_chunk()
-                                                        .source_id
-                                                        .to_string(),
-                                                });
+                                                    self.current_chunk().source_id.to_string(),
+                                                ));
                                             }
                                         };
                                         if seen.insert(key_str) {
@@ -6754,18 +6615,15 @@ impl VirtualMachine {
                                     let arr_idx = match arr_val {
                                         Value::Array(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "std.{}: expected array, got {}",
                                                     id.name(),
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     // Root keyF before forcing array elements (which may trigger GC)
@@ -6777,14 +6635,11 @@ impl VirtualMachine {
                                         self.memory_manager.load_array(arr_idx).elements.clone();
                                     if elements.is_empty() {
                                         self.memory_manager.external_roots.pop();
-                                        return Err(RuntimeError {
-                                            span: self.get_current_span(),
-                                            message: format!(
-                                                "std.{}: array must not be empty",
-                                                id.name()
-                                            ),
-                                            source_id: self.current_chunk().source_id.to_string(),
-                                        });
+                                        return Err(RuntimeError::new(
+                                            self.get_current_span(),
+                                            format!("std.{}: array must not be empty", id.name()),
+                                            self.current_chunk().source_id.to_string(),
+                                        ));
                                     }
                                     let (mut best_key, mut best_elem) = {
                                         let mut roots = Vec::from(self.stack.clone());
@@ -6845,17 +6700,14 @@ impl VirtualMachine {
                                     let o_idx = match obj_val {
                                         Value::Object(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "std.toPairs: expected object, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let field_data: Vec<(chunk::StringIndex, Value)> = {
@@ -6903,17 +6755,14 @@ impl VirtualMachine {
                                     let o_idx = match obj_val {
                                         Value::Object(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "std.mapKeys: expected object, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let field_data: Vec<(
@@ -6976,17 +6825,14 @@ impl VirtualMachine {
                                                 self.memory_manager.load_string(idx).to_string()
                                             }
                                             other => {
-                                                return Err(RuntimeError {
-                                                    span: self.get_current_span(),
-                                                    message: format!(
+                                                return Err(RuntimeError::new(
+                                                    self.get_current_span(),
+                                                    format!(
                                                         "std.mapKeys: func must return string, got {}",
                                                         other.type_name()
                                                     ),
-                                                    source_id: self
-                                                        .current_chunk()
-                                                        .source_id
-                                                        .to_string(),
-                                                });
+                                                    self.current_chunk().source_id.to_string(),
+                                                ));
                                             }
                                         };
                                         let new_k_alloc =
@@ -7014,17 +6860,14 @@ impl VirtualMachine {
                                     let o_idx = match obj_val {
                                         Value::Object(i) => i,
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "std.filterObject: expected object, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let field_data: Vec<(
@@ -7095,17 +6938,14 @@ impl VirtualMachine {
                                             }
                                             Value::Boolean(false) => {}
                                             other => {
-                                                return Err(RuntimeError {
-                                                    span: self.get_current_span(),
-                                                    message: format!(
+                                                return Err(RuntimeError::new(
+                                                    self.get_current_span(),
+                                                    format!(
                                                         "std.filterObject: func must return bool, got {}",
                                                         other.type_name()
                                                     ),
-                                                    source_id: self
-                                                        .current_chunk()
-                                                        .source_id
-                                                        .to_string(),
-                                                });
+                                                    self.current_chunk().source_id.to_string(),
+                                                ));
                                             }
                                         }
                                     }
@@ -7125,17 +6965,14 @@ impl VirtualMachine {
                                             self.memory_manager.load_string(idx).to_string()
                                         }
                                         other => {
-                                            return Err(RuntimeError {
-                                                span: self.get_current_span(),
-                                                message: format!(
+                                            return Err(RuntimeError::new(
+                                                self.get_current_span(),
+                                                format!(
                                                     "std.objectFlatten: sep must be string, got {}",
                                                     other.type_name()
                                                 ),
-                                                source_id: self
-                                                    .current_chunk()
-                                                    .source_id
-                                                    .to_string(),
-                                            });
+                                                self.current_chunk().source_id.to_string(),
+                                            ));
                                         }
                                     };
                                     let mut flat_fields: Vec<(String, Value)> = Vec::new();
@@ -7197,14 +7034,11 @@ impl VirtualMachine {
                             }
 
                             _ => {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
-                                        "Cannot call non-function value: {:?}",
-                                        callee
-                                    ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!("Cannot call non-function value: {:?}", callee),
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                         } // close match callee
                     } // close else
@@ -7216,11 +7050,11 @@ impl VirtualMachine {
                     let chunk = self.current_chunk();
 
                     if frame.ip + 2 >= chunk.count() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Invalid bytecode - missing TailCall operands".to_string(),
-                            source_id: chunk.source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            "Invalid bytecode - missing TailCall operands".to_string(),
+                            chunk.source_id.to_string(),
+                        ));
                     }
 
                     let positional_count = chunk.code[frame.ip + 1] as usize;
@@ -7253,11 +7087,11 @@ impl VirtualMachine {
                                 if let Value::String(name_idx) = name_val {
                                     named_args.push((name_idx, value));
                                 } else {
-                                    return Err(RuntimeError {
-                                        span: self.get_current_span(),
-                                        message: "Named argument name must be a string".to_string(),
-                                        source_id: self.current_chunk().source_id.to_string(),
-                                    });
+                                    return Err(RuntimeError::new(
+                                        self.get_current_span(),
+                                        "Named argument name must be a string".to_string(),
+                                        self.current_chunk().source_id.to_string(),
+                                    ));
                                 }
                             }
 
@@ -7292,11 +7126,11 @@ impl VirtualMachine {
                                 self.push(val)?;
                             }
                         } else {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Named arguments only supported for closures".to_string(),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "Named arguments only supported for closures".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     }
 
@@ -7328,14 +7162,14 @@ impl VirtualMachine {
                             };
 
                             if arg_count < required || arg_count > arity {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "Function expects {}-{} argument(s), got {}",
                                         required, arity, arg_count
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
 
                             // Pad missing optional arguments
@@ -7431,31 +7265,30 @@ impl VirtualMachine {
                                     chunk::NativeFuncId::SetUnion => {
                                         let a_val = args[0];
                                         let b_val = args[1];
-                                        let a_idx = match a_val {
-                                            Value::Array(i) => {
-                                                self.force_all_array_elements(i)?;
-                                                i
-                                            }
-                                            _ => return Err(RuntimeError {
-                                                span,
-                                                message:
+                                        let a_idx =
+                                            match a_val {
+                                                Value::Array(i) => {
+                                                    self.force_all_array_elements(i)?;
+                                                    i
+                                                }
+                                                _ => return Err(RuntimeError::new(
+                                                    span,
                                                     "std.setUnion: first argument must be an array"
                                                         .to_string(),
-                                                source_id,
-                                            }),
-                                        };
+                                                    source_id,
+                                                )),
+                                            };
                                         let b_idx = match b_val {
                                             Value::Array(i) => {
                                                 self.force_all_array_elements(i)?;
                                                 i
                                             }
-                                            _ => return Err(RuntimeError {
+                                            _ => return Err(RuntimeError::new(
                                                 span,
-                                                message:
-                                                    "std.setUnion: second argument must be an array"
-                                                        .to_string(),
+                                                "std.setUnion: second argument must be an array"
+                                                    .to_string(),
                                                 source_id,
-                                            }),
+                                            )),
                                         };
                                         let mut combined =
                                             self.memory_manager.load_array(a_idx).elements.clone();
@@ -7485,11 +7318,11 @@ impl VirtualMachine {
                             self.push(result)?;
                         }
                         _ => {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!("Cannot call non-function value: {:?}", callee),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!("Cannot call non-function value: {:?}", callee),
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                     }
                 }
@@ -7524,15 +7357,15 @@ impl VirtualMachine {
                     let current_closure = self.memory_manager.load_closure(frame.closure);
 
                     if upvalue_slot >= current_closure.upvalues.len() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!(
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!(
                                 "Invalid upvalue slot {} (closure has {} upvalues)",
                                 upvalue_slot,
                                 current_closure.upvalues.len()
                             ),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     }
 
                     let upvalue_index = current_closure.upvalues[upvalue_slot];
@@ -7541,15 +7374,15 @@ impl VirtualMachine {
                     let value = if let Some(location) = upvalue.stack_location {
                         // Upvalue is open - read from stack
                         if location >= self.stack.len() {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: format!(
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!(
                                     "Invalid upvalue stack location {} (stack size: {})",
                                     location,
                                     self.stack.len()
                                 ),
-                                source_id: self.current_chunk().source_id.to_string(),
-                            });
+                                self.current_chunk().source_id.to_string(),
+                            ));
                         }
                         let val = self.stack[location];
                         // Force thunk if needed
@@ -7585,12 +7418,11 @@ impl VirtualMachine {
                             closed_value
                         }
                     } else {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Upvalue has neither stack location nor closed value"
-                                .to_string(),
-                            source_id: self.current_chunk().source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            "Upvalue has neither stack location nor closed value".to_string(),
+                            self.current_chunk().source_id.to_string(),
+                        ));
                     };
 
                     self.push(value)?;
@@ -7610,35 +7442,32 @@ impl VirtualMachine {
                     let chunk = self.current_chunk();
 
                     if func_index_in_constants as usize >= chunk.constants.len() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!("Invalid constant index: {}", func_index_in_constants),
-                            source_id: chunk.source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Invalid constant index: {}", func_index_in_constants),
+                            chunk.source_id.to_string(),
+                        ));
                     }
 
                     let func_value = chunk.constants[func_index_in_constants as usize];
                     let func_index = if let Value::Function(idx) = func_value {
                         idx
                     } else {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!(
-                                "Expected function in constants, got {:?}",
-                                func_value
-                            ),
-                            source_id: chunk.source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Expected function in constants, got {:?}", func_value),
+                            chunk.source_id.to_string(),
+                        ));
                     };
 
                     // Read upvalue count from bytecode
                     let frame = self.current_frame();
                     if frame.ip >= chunk.count() {
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: "Invalid bytecode - missing upvalue count".to_string(),
-                            source_id: chunk.source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            "Invalid bytecode - missing upvalue count".to_string(),
+                            chunk.source_id.to_string(),
+                        ));
                     }
                     let upvalue_count = chunk.code[frame.ip] as usize;
                     self.current_frame_mut().ip += 1;
@@ -7652,12 +7481,11 @@ impl VirtualMachine {
 
                         // Read is_local flag
                         if frame.ip >= chunk.count() {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Invalid bytecode - missing upvalue is_local flag"
-                                    .to_string(),
-                                source_id: chunk.source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "Invalid bytecode - missing upvalue is_local flag".to_string(),
+                                chunk.source_id.to_string(),
+                            ));
                         }
                         let is_local = chunk.code[frame.ip] != 0;
                         self.current_frame_mut().ip += 1;
@@ -7666,11 +7494,11 @@ impl VirtualMachine {
                         let frame = self.current_frame();
                         let chunk = self.current_chunk();
                         if frame.ip + 1 >= chunk.count() {
-                            return Err(RuntimeError {
-                                span: self.get_current_span(),
-                                message: "Invalid bytecode - missing upvalue index".to_string(),
-                                source_id: chunk.source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "Invalid bytecode - missing upvalue index".to_string(),
+                                chunk.source_id.to_string(),
+                            ));
                         }
                         let index_bytes = [chunk.code[frame.ip], chunk.code[frame.ip + 1]];
                         let index = u16::from_le_bytes(index_bytes) as usize;
@@ -7687,15 +7515,15 @@ impl VirtualMachine {
                             let frame = self.current_frame();
                             let current_closure = self.memory_manager.load_closure(frame.closure);
                             if index >= current_closure.upvalues.len() {
-                                return Err(RuntimeError {
-                                    span: self.get_current_span(),
-                                    message: format!(
+                                return Err(RuntimeError::new(
+                                    self.get_current_span(),
+                                    format!(
                                         "Invalid upvalue index {} (closure has {} upvalues)",
                                         index,
                                         current_closure.upvalues.len()
                                     ),
-                                    source_id: self.current_chunk().source_id.to_string(),
-                                });
+                                    self.current_chunk().source_id.to_string(),
+                                ));
                             }
                             current_closure.upvalues[index]
                         };
@@ -7733,11 +7561,11 @@ impl VirtualMachine {
 
                 // All other opcodes result in runtime error
                 _ => {
-                    return Err(RuntimeError {
-                        span: self.get_current_span(),
-                        message: format!("Unimplemented opcode: {:?}", opcode),
-                        source_id: self.current_chunk().source_id.to_string(),
-                    });
+                    return Err(RuntimeError::new(
+                        self.get_current_span(),
+                        format!("Unimplemented opcode: {:?}", opcode),
+                        self.current_chunk().source_id.to_string(),
+                    ));
                 }
             }
         }
@@ -7902,11 +7730,11 @@ impl VirtualMachine {
                 }
                 Ok(a_len.cmp(&b_len))
             }
-            _ => Err(RuntimeError {
-                span: self.get_current_span(),
-                message: format!("Cannot compare {:?} with {:?}", a, b),
-                source_id: self.current_chunk().source_id.to_string(),
-            }),
+            _ => Err(RuntimeError::new(
+                self.get_current_span(),
+                format!("Cannot compare {:?} with {:?}", a, b),
+                self.current_chunk().source_id.to_string(),
+            )),
         }
     }
 
@@ -7964,10 +7792,12 @@ impl VirtualMachine {
                 Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
                 Value::Number(n) => serde_json::Number::from_f64(n)
                     .map(serde_json::Value::Number)
-                    .ok_or_else(|| RuntimeError {
-                        span: 0..0,
-                        message: "Invalid number for JSON conversion".to_string(),
-                        source_id: "serialization".to_string(),
+                    .ok_or_else(|| {
+                        RuntimeError::new(
+                            0..0,
+                            "Invalid number for JSON conversion".to_string(),
+                            "serialization".to_string(),
+                        )
                     }),
                 Value::String(s) => Ok(serde_json::Value::String(
                     self.memory_manager.load_string(s).to_owned(),
@@ -7977,11 +7807,11 @@ impl VirtualMachine {
                     self.check_object_assertions(object_key)?;
                     // Check for circular references
                     if visited.contains(&object_key) {
-                        return Err(RuntimeError {
-                            span: 0..0,
-                            message: "Circular reference detected in object".to_string(),
-                            source_id: "serialization".to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            0..0,
+                            "Circular reference detected in object".to_string(),
+                            "serialization".to_string(),
+                        ));
                     }
 
                     visited.insert(object_key);
@@ -8036,11 +7866,11 @@ impl VirtualMachine {
                         .collect();
                     Ok(serde_json::Value::Array(json_array))
                 }
-                _ => Err(RuntimeError {
-                    span: self.get_current_span(),
-                    message: format!("Cannot serialize value to JSON: {:?}", value),
-                    source_id: "serialization".to_string(),
-                }),
+                _ => Err(RuntimeError::new(
+                    self.get_current_span(),
+                    format!("Cannot serialize value to JSON: {:?}", value),
+                    "serialization".to_string(),
+                )),
             }
         })();
 
@@ -8106,29 +7936,29 @@ impl VirtualMachine {
                 // @TODO: this is weird. should refactor to map_err or someother
                 match self.memory_manager.load_string(key).parse::<f64>() {
                     Ok(n) => Ok(n),
-                    Err(e) => Err(RuntimeError {
-                        span: self.get_current_span(),
-                        message: format!("Failed to parse string {} to f64", e),
-                        source_id: self.current_chunk().source_id.to_string(),
-                    }),
+                    Err(e) => Err(RuntimeError::new(
+                        self.get_current_span(),
+                        format!("Failed to parse string {} to f64", e),
+                        self.current_chunk().source_id.to_string(),
+                    )),
                 }
             }
-            _ => Err(RuntimeError {
-                span: self.get_current_span(),
-                message: format!("Cannot convert {:?} to f64", value),
-                source_id: self.current_chunk().source_id.to_string(),
-            }),
+            _ => Err(RuntimeError::new(
+                self.get_current_span(),
+                format!("Cannot convert {:?} to f64", value),
+                self.current_chunk().source_id.to_string(),
+            )),
         }
     }
 
     fn to_integer(&mut self, value: Value) -> Result<i64, RuntimeError> {
         let n = self.to_number(value)?;
         if n.is_nan() || n.is_infinite() {
-            Err(RuntimeError {
-                span: self.get_current_span(),
-                message: "Cannot convert NaN or Infinity to integer".to_string(),
-                source_id: self.current_chunk().source_id.to_string(),
-            })
+            Err(RuntimeError::new(
+                self.get_current_span(),
+                "Cannot convert NaN or Infinity to integer".to_string(),
+                self.current_chunk().source_id.to_string(),
+            ))
         } else {
             Ok(n as i64)
         }
@@ -8187,14 +8017,14 @@ impl VirtualMachine {
             pos += 1;
         }
         if pos != bytes.len() {
-            return Err(RuntimeError {
-                span: span.clone(),
-                message: format!(
+            return Err(RuntimeError::new(
+                span.clone(),
+                format!(
                     "std.parseJson: unexpected trailing content at position {}",
                     pos
                 ),
-                source_id: source_id.to_string(),
-            });
+                source_id.to_string(),
+            ));
         }
         Ok(result)
     }
@@ -8208,11 +8038,11 @@ impl VirtualMachine {
     ) -> Result<Value, RuntimeError> {
         self.skip_json_ws(bytes, pos);
         if *pos >= bytes.len() {
-            return Err(RuntimeError {
-                span: span.clone(),
-                message: "std.parseJson: unexpected end of input".to_string(),
-                source_id: source_id.to_string(),
-            });
+            return Err(RuntimeError::new(
+                span.clone(),
+                "std.parseJson: unexpected end of input".to_string(),
+                source_id.to_string(),
+            ));
         }
         match bytes[*pos] {
             b'n' => {
@@ -8220,11 +8050,11 @@ impl VirtualMachine {
                     *pos += 4;
                     Ok(Value::Null)
                 } else {
-                    Err(RuntimeError {
-                        span: span.clone(),
-                        message: "std.parseJson: expected 'null'".to_string(),
-                        source_id: source_id.to_string(),
-                    })
+                    Err(RuntimeError::new(
+                        span.clone(),
+                        "std.parseJson: expected 'null'".to_string(),
+                        source_id.to_string(),
+                    ))
                 }
             }
             b't' => {
@@ -8232,11 +8062,11 @@ impl VirtualMachine {
                     *pos += 4;
                     Ok(Value::Boolean(true))
                 } else {
-                    Err(RuntimeError {
-                        span: span.clone(),
-                        message: "std.parseJson: expected 'true'".to_string(),
-                        source_id: source_id.to_string(),
-                    })
+                    Err(RuntimeError::new(
+                        span.clone(),
+                        "std.parseJson: expected 'true'".to_string(),
+                        source_id.to_string(),
+                    ))
                 }
             }
             b'f' => {
@@ -8244,22 +8074,22 @@ impl VirtualMachine {
                     *pos += 5;
                     Ok(Value::Boolean(false))
                 } else {
-                    Err(RuntimeError {
-                        span: span.clone(),
-                        message: "std.parseJson: expected 'false'".to_string(),
-                        source_id: source_id.to_string(),
-                    })
+                    Err(RuntimeError::new(
+                        span.clone(),
+                        "std.parseJson: expected 'false'".to_string(),
+                        source_id.to_string(),
+                    ))
                 }
             }
             b'"' => self.parse_json_string(bytes, pos, span, source_id),
             b'[' => self.parse_json_array(bytes, pos, span, source_id),
             b'{' => self.parse_json_object(bytes, pos, span, source_id),
             b'-' | b'0'..=b'9' => self.parse_json_number(bytes, pos, span, source_id),
-            c => Err(RuntimeError {
-                span: span.clone(),
-                message: format!("std.parseJson: unexpected character '{}'", c as char),
-                source_id: source_id.to_string(),
-            }),
+            c => Err(RuntimeError::new(
+                span.clone(),
+                format!("std.parseJson: unexpected character '{}'", c as char),
+                source_id.to_string(),
+            )),
         }
     }
 
@@ -8299,14 +8129,13 @@ impl VirtualMachine {
             }
         }
         let num_str = std::str::from_utf8(&bytes[start..*pos]).unwrap_or("");
-        num_str
-            .parse::<f64>()
-            .map(Value::Number)
-            .map_err(|_| RuntimeError {
-                span: span.clone(),
-                message: format!("std.parseJson: invalid number '{}'", num_str),
-                source_id: source_id.to_string(),
-            })
+        num_str.parse::<f64>().map(Value::Number).map_err(|_| {
+            RuntimeError::new(
+                span.clone(),
+                format!("std.parseJson: invalid number '{}'", num_str),
+                source_id.to_string(),
+            )
+        })
     }
 
     fn parse_json_string(
@@ -8322,11 +8151,11 @@ impl VirtualMachine {
             if bytes[*pos] == b'\\' {
                 *pos += 1;
                 if *pos >= bytes.len() {
-                    return Err(RuntimeError {
-                        span: span.clone(),
-                        message: "std.parseJson: unterminated string escape".to_string(),
-                        source_id: source_id.to_string(),
-                    });
+                    return Err(RuntimeError::new(
+                        span.clone(),
+                        "std.parseJson: unterminated string escape".to_string(),
+                        source_id.to_string(),
+                    ));
                 }
                 match bytes[*pos] {
                     b'"' => s.push('"'),
@@ -8340,17 +8169,19 @@ impl VirtualMachine {
                     b'u' => {
                         *pos += 1;
                         if *pos + 4 > bytes.len() {
-                            return Err(RuntimeError {
-                                span: span.clone(),
-                                message: "std.parseJson: incomplete unicode escape".to_string(),
-                                source_id: source_id.to_string(),
-                            });
+                            return Err(RuntimeError::new(
+                                span.clone(),
+                                "std.parseJson: incomplete unicode escape".to_string(),
+                                source_id.to_string(),
+                            ));
                         }
                         let hex = std::str::from_utf8(&bytes[*pos..*pos + 4]).unwrap_or("");
-                        let cp = u32::from_str_radix(hex, 16).map_err(|_| RuntimeError {
-                            span: span.clone(),
-                            message: format!("std.parseJson: invalid unicode escape \\u{}", hex),
-                            source_id: source_id.to_string(),
+                        let cp = u32::from_str_radix(hex, 16).map_err(|_| {
+                            RuntimeError::new(
+                                span.clone(),
+                                format!("std.parseJson: invalid unicode escape \\u{}", hex),
+                                source_id.to_string(),
+                            )
                         })?;
                         *pos += 4;
                         // Handle surrogate pairs: \uD800-\uDBFF followed by \uDC00-\uDFFF
@@ -8379,11 +8210,11 @@ impl VirtualMachine {
                         *pos -= 1; // will be incremented below
                     }
                     c => {
-                        return Err(RuntimeError {
-                            span: span.clone(),
-                            message: format!("std.parseJson: invalid escape '\\{}'", c as char),
-                            source_id: source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            span.clone(),
+                            format!("std.parseJson: invalid escape '\\{}'", c as char),
+                            source_id.to_string(),
+                        ));
                     }
                 }
             } else {
@@ -8402,11 +8233,11 @@ impl VirtualMachine {
             *pos += 1;
         }
         if *pos >= bytes.len() {
-            return Err(RuntimeError {
-                span: span.clone(),
-                message: "std.parseJson: unterminated string".to_string(),
-                source_id: source_id.to_string(),
-            });
+            return Err(RuntimeError::new(
+                span.clone(),
+                "std.parseJson: unterminated string".to_string(),
+                source_id.to_string(),
+            ));
         }
         *pos += 1; // skip closing "
         let alloc = self.memory_manager.allocate_string(&s);
@@ -8433,22 +8264,22 @@ impl VirtualMachine {
             elements.push(val);
             self.skip_json_ws(bytes, pos);
             if *pos >= bytes.len() {
-                return Err(RuntimeError {
-                    span: span.clone(),
-                    message: "std.parseJson: unterminated array".to_string(),
-                    source_id: source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    span.clone(),
+                    "std.parseJson: unterminated array".to_string(),
+                    source_id.to_string(),
+                ));
             }
             if bytes[*pos] == b']' {
                 *pos += 1;
                 break;
             }
             if bytes[*pos] != b',' {
-                return Err(RuntimeError {
-                    span: span.clone(),
-                    message: "std.parseJson: expected ',' or ']' in array".to_string(),
-                    source_id: source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    span.clone(),
+                    "std.parseJson: expected ',' or ']' in array".to_string(),
+                    source_id.to_string(),
+                ));
             }
             *pos += 1; // skip comma
         }
@@ -8481,11 +8312,11 @@ impl VirtualMachine {
             };
             self.skip_json_ws(bytes, pos);
             if *pos >= bytes.len() || bytes[*pos] != b':' {
-                return Err(RuntimeError {
-                    span: span.clone(),
-                    message: "std.parseJson: expected ':'".to_string(),
-                    source_id: source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    span.clone(),
+                    "std.parseJson: expected ':'".to_string(),
+                    source_id.to_string(),
+                ));
             }
             *pos += 1; // skip :
             let val = self.parse_json_inner(bytes, pos, span, source_id)?;
@@ -8499,22 +8330,22 @@ impl VirtualMachine {
             );
             self.skip_json_ws(bytes, pos);
             if *pos >= bytes.len() {
-                return Err(RuntimeError {
-                    span: span.clone(),
-                    message: "std.parseJson: unterminated object".to_string(),
-                    source_id: source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    span.clone(),
+                    "std.parseJson: unterminated object".to_string(),
+                    source_id.to_string(),
+                ));
             }
             if bytes[*pos] == b'}' {
                 *pos += 1;
                 break;
             }
             if bytes[*pos] != b',' {
-                return Err(RuntimeError {
-                    span: span.clone(),
-                    message: "std.parseJson: expected ',' or '}' in object".to_string(),
-                    source_id: source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    span.clone(),
+                    "std.parseJson: expected ',' or '}' in object".to_string(),
+                    source_id.to_string(),
+                ));
             }
             *pos += 1; // skip comma
         }
@@ -8734,18 +8565,18 @@ impl VirtualMachine {
                 Value::Boolean(false) => Ok("false".to_string()),
                 Value::Number(n) => {
                     if n.is_nan() {
-                        return Err(RuntimeError {
+                        return Err(RuntimeError::new(
                             span,
-                            message: "std.manifestJson: cannot serialize NaN".to_string(),
-                            source_id: source_id.to_string(),
-                        });
+                            "std.manifestJson: cannot serialize NaN".to_string(),
+                            source_id.to_string(),
+                        ));
                     }
                     if n.is_infinite() {
-                        return Err(RuntimeError {
+                        return Err(RuntimeError::new(
                             span,
-                            message: "std.manifestJson: cannot serialize Infinite".to_string(),
-                            source_id: source_id.to_string(),
-                        });
+                            "std.manifestJson: cannot serialize Infinite".to_string(),
+                            source_id.to_string(),
+                        ));
                     }
                     if n.fract() == 0.0 && n.abs() < 1e15 {
                         Ok(format!("{}", n as i64))
@@ -8903,11 +8734,11 @@ impl VirtualMachine {
                         close_indent,
                     ))
                 }
-                _ => Err(RuntimeError {
+                _ => Err(RuntimeError::new(
                     span,
-                    message: "std.manifestJson: cannot manifest function".to_string(),
-                    source_id: source_id.to_string(),
-                }),
+                    "std.manifestJson: cannot manifest function".to_string(),
+                    source_id.to_string(),
+                )),
             }
         })();
 
@@ -9213,11 +9044,11 @@ impl VirtualMachine {
         let arr_idx = match arr_val {
             Value::Array(a) => a,
             _ => {
-                return Err(RuntimeError {
-                    span: self.get_current_span(),
-                    message: "std.uniq: first argument must be an array".to_string(),
-                    source_id: self.current_chunk().source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    self.get_current_span(),
+                    "std.uniq: first argument must be an array".to_string(),
+                    self.current_chunk().source_id.to_string(),
+                ));
             }
         };
         self.force_all_array_elements(arr_idx)?;
@@ -9278,14 +9109,14 @@ impl VirtualMachine {
         let obj_idx = match forced {
             Value::Object(idx) => idx,
             other => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: format!(
+                    format!(
                         "std.manifestIni: expected object, got {}",
                         other.type_name()
                     ),
                     source_id,
-                });
+                ));
             }
         };
 
@@ -9318,14 +9149,14 @@ impl VirtualMachine {
                 Value::Object(idx) => idx,
                 other => {
                     self.memory_manager.pop_external_roots(); // pop obj_idx root
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: format!(
+                        format!(
                             "std.manifestIni: 'main' must be an object, got {}",
                             other.type_name()
                         ),
                         source_id,
-                    });
+                    ));
                 }
             };
             // Root main_obj_idx
@@ -9384,14 +9215,14 @@ impl VirtualMachine {
                 Value::Object(idx) => idx,
                 other => {
                     self.memory_manager.pop_external_roots(); // pop obj_idx root
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: format!(
+                        format!(
                             "std.manifestIni: 'sections' must be an object, got {}",
                             other.type_name()
                         ),
                         source_id,
-                    });
+                    ));
                 }
             };
             // Root sections_obj_idx
@@ -9428,15 +9259,15 @@ impl VirtualMachine {
                     other => {
                         self.memory_manager.pop_external_roots(); // pop sections_obj_idx root
                         self.memory_manager.pop_external_roots(); // pop obj_idx root
-                        return Err(RuntimeError {
+                        return Err(RuntimeError::new(
                             span,
-                            message: format!(
+                            format!(
                                 "std.manifestIni: section '{}' must be an object, got {}",
                                 section_name,
                                 other.type_name()
                             ),
                             source_id,
-                        });
+                        ));
                     }
                 };
                 // Root section_obj_idx for the duration of field processing
@@ -9542,14 +9373,14 @@ impl VirtualMachine {
             }
             Value::Boolean(b) => Ok(b.to_string()),
             Value::Null => Ok("null".to_string()),
-            other => Err(RuntimeError {
+            other => Err(RuntimeError::new(
                 span,
-                message: format!(
+                format!(
                     "std.manifestIni: value must be a scalar, got {}",
                     other.type_name()
                 ),
-                source_id: source_id.to_string(),
-            }),
+                source_id.to_string(),
+            )),
         }
     }
 
@@ -9579,18 +9410,18 @@ impl VirtualMachine {
             Value::Boolean(false) => Ok("False".to_string()),
             Value::Number(n) => {
                 if n.is_nan() {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.manifestPython: cannot serialize NaN".to_string(),
+                        "std.manifestPython: cannot serialize NaN".to_string(),
                         source_id,
-                    });
+                    ));
                 }
                 if n.is_infinite() {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.manifestPython: cannot serialize Infinite".to_string(),
+                        "std.manifestPython: cannot serialize Infinite".to_string(),
                         source_id,
-                    });
+                    ));
                 }
                 if n.fract() == 0.0 && n.abs() < 1e15 {
                     Ok(format!("{}", n as i64))
@@ -9693,11 +9524,11 @@ impl VirtualMachine {
                 self.memory_manager.pop_external_roots();
                 Ok(format!("{{{}}}", pairs.join(", ")))
             }
-            _ => Err(RuntimeError {
+            _ => Err(RuntimeError::new(
                 span,
-                message: "std.manifestPython: cannot manifest function".to_string(),
+                "std.manifestPython: cannot manifest function".to_string(),
                 source_id,
-            }),
+            )),
         }
     }
 
@@ -9722,14 +9553,14 @@ impl VirtualMachine {
         let obj_idx = match forced {
             Value::Object(idx) => idx,
             other => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: format!(
+                    format!(
                         "std.manifestPythonVars: expected object, got {}",
                         other.type_name()
                     ),
                     source_id,
-                });
+                ));
             }
         };
 
@@ -9791,18 +9622,18 @@ impl VirtualMachine {
             Value::Boolean(b) => Ok(b.to_string()),
             Value::Number(n) => {
                 if n.is_nan() {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.manifestYamlDoc: cannot serialize NaN".to_string(),
+                        "std.manifestYamlDoc: cannot serialize NaN".to_string(),
                         source_id,
-                    });
+                    ));
                 }
                 if n.is_infinite() {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.manifestYamlDoc: cannot serialize Infinite".to_string(),
+                        "std.manifestYamlDoc: cannot serialize Infinite".to_string(),
                         source_id,
-                    });
+                    ));
                 }
                 if n.fract() == 0.0 && n.abs() < 1e15 {
                     Ok(format!("{}", n as i64))
@@ -10065,11 +9896,11 @@ impl VirtualMachine {
                 self.memory_manager.pop_external_roots(); // object
                 Ok(lines.join("\n"))
             }
-            other => Err(RuntimeError {
+            other => Err(RuntimeError::new(
                 span,
-                message: format!("std.manifestYamlDoc: cannot manifest {}", other.type_name()),
+                format!("std.manifestYamlDoc: cannot manifest {}", other.type_name()),
                 source_id,
-            }),
+            )),
         }
     }
 
@@ -10096,14 +9927,14 @@ impl VirtualMachine {
         let arr_idx = match forced {
             Value::Array(idx) => idx,
             other => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: format!(
+                    format!(
                         "manifestYamlStream: expected array, got {}",
                         other.type_name()
                     ),
                     source_id,
-                });
+                ));
             }
         };
 
@@ -10177,12 +10008,9 @@ impl VirtualMachine {
 
         if !has_separator {
             // Single document - parse normally
-            let yaml_val: serde_yaml::Value =
-                serde_yaml::from_str(s).map_err(|e| RuntimeError {
-                    span: span.clone(),
-                    message: format!("parseYaml: {}", e),
-                    source_id: source_id.clone(),
-                })?;
+            let yaml_val: serde_yaml::Value = serde_yaml::from_str(s).map_err(|e| {
+                RuntimeError::new(span.clone(), format!("parseYaml: {}", e), source_id.clone())
+            })?;
             return self.serde_yaml_to_jsonnet_value(yaml_val, span, source_id);
         }
 
@@ -10193,12 +10021,9 @@ impl VirtualMachine {
             if trimmed.is_empty() {
                 elements.push(Value::Null);
             } else {
-                let yaml_val: serde_yaml::Value =
-                    serde_yaml::from_str(trimmed).map_err(|e| RuntimeError {
-                        span: span.clone(),
-                        message: format!("parseYaml: {}", e),
-                        source_id: source_id.clone(),
-                    })?;
+                let yaml_val: serde_yaml::Value = serde_yaml::from_str(trimmed).map_err(|e| {
+                    RuntimeError::new(span.clone(), format!("parseYaml: {}", e), source_id.clone())
+                })?;
                 let val =
                     self.serde_yaml_to_jsonnet_value(yaml_val, span.clone(), source_id.clone())?;
                 elements.push(val);
@@ -10223,11 +10048,11 @@ impl VirtualMachine {
                 } else if let Some(f) = n.as_f64() {
                     Ok(Value::Number(f))
                 } else {
-                    Err(RuntimeError {
+                    Err(RuntimeError::new(
                         span,
-                        message: "parseYaml: unsupported number".to_string(),
+                        "parseYaml: unsupported number".to_string(),
                         source_id,
-                    })
+                    ))
                 }
             }
             serde_yaml::Value::String(s) => {
@@ -10314,13 +10139,12 @@ impl VirtualMachine {
                 self.memory_manager.external_roots.push(elements.clone());
                 if elements.is_empty() {
                     self.memory_manager.external_roots.pop();
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message:
-                            "manifestXmlJsonml: array must have at least one element (tag name)"
-                                .to_string(),
+                        "manifestXmlJsonml: array must have at least one element (tag name)"
+                            .to_string(),
                         source_id,
-                    });
+                    ));
                 }
                 // First element: tag name
                 let tag_val = self.force_value(elements[0])?;
@@ -10337,14 +10161,14 @@ impl VirtualMachine {
                 let tag = match tag_val {
                     Value::String(idx) => self.memory_manager.load_string(idx).to_string(),
                     other => {
-                        return Err(RuntimeError {
+                        return Err(RuntimeError::new(
                             span,
-                            message: format!(
+                            format!(
                                 "manifestXmlJsonml: first element must be string tag, got {}",
                                 other.type_name()
                             ),
                             source_id,
-                        });
+                        ));
                     }
                 };
 
@@ -10400,14 +10224,14 @@ impl VirtualMachine {
                                 }
                                 Value::Boolean(b) => b.to_string(),
                                 other => {
-                                    return Err(RuntimeError {
-                                        span: span.clone(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        span.clone(),
+                                        format!(
                                             "manifestXmlJsonml: attribute value must be scalar, got {}",
                                             other.type_name()
                                         ),
-                                        source_id: source_id.clone(),
-                                    });
+                                        source_id.clone(),
+                                    ));
                                 }
                             };
                             attrs.push_str(&format!(" {}=\"{}\"", k, xml_escape(&vs)));
@@ -10426,14 +10250,14 @@ impl VirtualMachine {
                 self.memory_manager.external_roots.pop();
                 Ok(format!("<{}{}>{}</{}>", tag, attrs, children, tag))
             }
-            other => Err(RuntimeError {
+            other => Err(RuntimeError::new(
                 span,
-                message: format!(
+                format!(
                     "manifestXmlJsonml: expected string or array, got {}",
                     other.type_name()
                 ),
                 source_id,
-            }),
+            )),
         }
     }
 
@@ -10458,11 +10282,11 @@ impl VirtualMachine {
         let obj_idx = match forced {
             Value::Object(idx) => idx,
             other => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: format!("manifestTomlEx: expected object, got {}", other.type_name()),
+                    format!("manifestTomlEx: expected object, got {}", other.type_name()),
                     source_id,
-                });
+                ));
             }
         };
         let indent_owned = indent.to_string();
@@ -10586,14 +10410,14 @@ impl VirtualMachine {
                                     self.memory_manager.external_roots.pop(); // sub-section roots
                                     self.memory_manager.external_roots.pop(); // field values
                                     self.memory_manager.external_roots.pop(); // object
-                                    return Err(RuntimeError {
-                                        span: span.clone(),
-                                        message: format!(
+                                    return Err(RuntimeError::new(
+                                        span.clone(),
+                                        format!(
                                             "manifestTomlEx: mixed arrays not supported, got {}",
                                             other.type_name()
                                         ),
-                                        source_id: source_id.clone(),
-                                    });
+                                        source_id.clone(),
+                                    ));
                                 }
                             };
                             // Root immediately using stable index (not last_mut which points to elems)
@@ -10713,11 +10537,11 @@ impl VirtualMachine {
         source_id: String,
     ) -> Result<String, RuntimeError> {
         match value {
-            Value::Null => Err(RuntimeError {
+            Value::Null => Err(RuntimeError::new(
                 span,
-                message: "manifestTomlEx: null values are not supported in TOML".to_string(),
+                "manifestTomlEx: null values are not supported in TOML".to_string(),
                 source_id,
-            }),
+            )),
             Value::Boolean(b) => Ok(b.to_string()),
             Value::Number(n) => {
                 if n.fract() == 0.0 && n.abs() < 1e15 {
@@ -10731,14 +10555,14 @@ impl VirtualMachine {
                 let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
                 Ok(format!("\"{}\"", escaped))
             }
-            other => Err(RuntimeError {
+            other => Err(RuntimeError::new(
                 span,
-                message: format!(
+                format!(
                     "manifestTomlEx: unexpected value type {}",
                     other.type_name()
                 ),
                 source_id,
-            }),
+            )),
         }
     }
 

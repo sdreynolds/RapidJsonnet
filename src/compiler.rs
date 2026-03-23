@@ -1176,11 +1176,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn make_error(&self, span: Range<usize>, message: String) -> CompilerError {
-        ScanError {
-            span,
-            message,
-            source_id: self.parser.source_id().to_string(),
-        }
+        ScanError::new(span, message, self.parser.source_id().to_string())
     }
 
     // Type stack management for compile-time optimizations

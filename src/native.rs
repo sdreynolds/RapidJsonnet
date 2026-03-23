@@ -29,11 +29,11 @@ fn coerce_to_sorted_array(
                 .collect();
             Ok(values)
         }
-        _ => Err(RuntimeError {
-            span: span.clone(),
-            message: format!("std.{}: {} must be an array or string", func_name, arg_name),
-            source_id: source_id.to_string(),
-        }),
+        _ => Err(RuntimeError::new(
+            span.clone(),
+            format!("std.{}: {} must be an array or string", func_name, arg_name),
+            source_id.to_string(),
+        )),
     }
 }
 
@@ -46,16 +46,16 @@ pub fn call_native(
     source_id: String,
 ) -> Result<Value, RuntimeError> {
     if args.len() != id.arity() as usize {
-        return Err(RuntimeError {
+        return Err(RuntimeError::new(
             span,
-            message: format!(
+            format!(
                 "Native function 'std.{}' expected {} arguments, but got {}",
                 id.name(),
                 id.arity(),
                 args.len()
             ),
             source_id,
-        });
+        ));
     }
 
     match id {
@@ -64,11 +64,11 @@ pub fn call_native(
         NativeFuncId::Abs => std_abs(args[0], span, source_id),
         NativeFuncId::Codepoint => std_codepoint(args[0], memory_manager, span, source_id),
         NativeFuncId::Char => std_char(args[0], memory_manager, span, source_id),
-        NativeFuncId::MakeArray => Err(RuntimeError {
+        NativeFuncId::MakeArray => Err(RuntimeError::new(
             span,
-            message: "std.makeArray must be handled specially by the VM".to_string(),
+            "std.makeArray must be handled specially by the VM".to_string(),
             source_id,
-        }),
+        )),
         NativeFuncId::ToString => std_to_string(args[0], memory_manager, span, source_id),
         NativeFuncId::Floor => std_floor(args[0], span, source_id),
         NativeFuncId::Ceil => std_ceil(args[0], span, source_id),
@@ -253,11 +253,11 @@ pub fn call_native(
         | NativeFuncId::ManifestTomlEx
         | NativeFuncId::ParseYaml
         | NativeFuncId::ManifestXmlJsonml
-        | NativeFuncId::ExtVar => Err(RuntimeError {
+        | NativeFuncId::ExtVar => Err(RuntimeError::new(
             span,
-            message: format!("std.{} must be handled by the VM", id.name()),
+            format!("std.{} must be handled by the VM", id.name()),
             source_id,
-        }),
+        )),
         NativeFuncId::Sha256 => match args[0] {
             Value::String(idx) => {
                 let s = memory_manager.load_string(idx).to_string();
@@ -268,11 +268,11 @@ pub fn call_native(
                 let interned = memory_manager.allocate_string(&hex);
                 Ok(Value::String(interned.index))
             }
-            _ => Err(RuntimeError {
+            _ => Err(RuntimeError::new(
                 span,
-                message: format!("std.sha256 expected string, got {}", args[0].type_name()),
+                format!("std.sha256 expected string, got {}", args[0].type_name()),
                 source_id,
-            }),
+            )),
         },
         NativeFuncId::Sha1 => match args[0] {
             Value::String(idx) => {
@@ -284,11 +284,11 @@ pub fn call_native(
                 let interned = memory_manager.allocate_string(&hex);
                 Ok(Value::String(interned.index))
             }
-            _ => Err(RuntimeError {
+            _ => Err(RuntimeError::new(
                 span,
-                message: format!("std.sha1 expected string, got {}", args[0].type_name()),
+                format!("std.sha1 expected string, got {}", args[0].type_name()),
                 source_id,
-            }),
+            )),
         },
         NativeFuncId::Sha512 => match args[0] {
             Value::String(idx) => {
@@ -300,11 +300,11 @@ pub fn call_native(
                 let interned = memory_manager.allocate_string(&hex);
                 Ok(Value::String(interned.index))
             }
-            _ => Err(RuntimeError {
+            _ => Err(RuntimeError::new(
                 span,
-                message: format!("std.sha512 expected string, got {}", args[0].type_name()),
+                format!("std.sha512 expected string, got {}", args[0].type_name()),
                 source_id,
-            }),
+            )),
         },
         NativeFuncId::Sha3 => match args[0] {
             Value::String(idx) => {
@@ -316,11 +316,11 @@ pub fn call_native(
                 let interned = memory_manager.allocate_string(&hex);
                 Ok(Value::String(interned.index))
             }
-            _ => Err(RuntimeError {
+            _ => Err(RuntimeError::new(
                 span,
-                message: format!("std.sha3 expected string, got {}", args[0].type_name()),
+                format!("std.sha3 expected string, got {}", args[0].type_name()),
                 source_id,
-            }),
+            )),
         },
         NativeFuncId::Map
         | NativeFuncId::Filter
@@ -340,30 +340,30 @@ pub fn call_native(
         | NativeFuncId::UniqBy
         | NativeFuncId::MinBy
         | NativeFuncId::MaxBy
-        | NativeFuncId::ToPairs => Err(RuntimeError {
+        | NativeFuncId::ToPairs => Err(RuntimeError::new(
             span,
-            message: format!("std.{} must be handled by the VM", id.name()),
+            format!("std.{} must be handled by the VM", id.name()),
             source_id,
-        }),
+        )),
         NativeFuncId::Gcd => {
             let a = match args[0] {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as u64,
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.gcd: expected non-negative integer".to_string(),
+                        "std.gcd: expected non-negative integer".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let b = match args[1] {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as u64,
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.gcd: expected non-negative integer".to_string(),
+                        "std.gcd: expected non-negative integer".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             fn gcd(mut x: u64, mut y: u64) -> u64 {
@@ -380,21 +380,21 @@ pub fn call_native(
             let a = match args[0] {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as u64,
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.lcm: expected non-negative integer".to_string(),
+                        "std.lcm: expected non-negative integer".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let b = match args[1] {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as u64,
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.lcm: expected non-negative integer".to_string(),
+                        "std.lcm: expected non-negative integer".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             fn gcd(mut x: u64, mut y: u64) -> u64 {
@@ -413,21 +413,21 @@ pub fn call_native(
             let s = match args[0] {
                 Value::String(idx) => memory_manager.load_string(idx).to_string(),
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.indent: first argument must be a string".to_string(),
+                        "std.indent: first argument must be a string".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let prefix = match args[1] {
                 Value::String(idx) => memory_manager.load_string(idx).to_string(),
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.indent: second argument must be a string".to_string(),
+                        "std.indent: second argument must be a string".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             if s.is_empty() {
@@ -540,11 +540,11 @@ pub fn call_native(
             let arr_idx = match arr_val {
                 Value::Array(i) => i,
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.setMember: second argument must be an array".to_string(),
+                        "std.setMember: second argument must be an array".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let elems = memory_manager.load_array(arr_idx).elements.clone();
@@ -570,22 +570,22 @@ pub fn call_native(
                 let (mantissa, _exp) = frexp(n);
                 Ok(Value::Number(mantissa))
             }
-            _ => Err(RuntimeError {
+            _ => Err(RuntimeError::new(
                 span,
-                message: format!("std.mantissa expected number, got {}", args[0].type_name()),
+                format!("std.mantissa expected number, got {}", args[0].type_name()),
                 source_id,
-            }),
+            )),
         },
         NativeFuncId::Exponent => match args[0] {
             Value::Number(n) => {
                 let (_mantissa, exp) = frexp(n);
                 Ok(Value::Number(exp as f64))
             }
-            _ => Err(RuntimeError {
+            _ => Err(RuntimeError::new(
                 span,
-                message: format!("std.exponent expected number, got {}", args[0].type_name()),
+                format!("std.exponent expected number, got {}", args[0].type_name()),
                 source_id,
-            }),
+            )),
         },
         NativeFuncId::Md5 => match args[0] {
             Value::String(idx) => {
@@ -595,11 +595,11 @@ pub fn call_native(
                 let interned = memory_manager.allocate_string(&hex);
                 Ok(Value::String(interned.index))
             }
-            _ => Err(RuntimeError {
+            _ => Err(RuntimeError::new(
                 span,
-                message: format!("std.md5 expected string, got {}", args[0].type_name()),
+                format!("std.md5 expected string, got {}", args[0].type_name()),
                 source_id,
-            }),
+            )),
         },
         NativeFuncId::Chunk => std_chunk(args[0], args[1], memory_manager, span, source_id),
         NativeFuncId::Zip => std_zip(args[0], args[1], memory_manager, span, source_id),
@@ -631,17 +631,17 @@ fn std_codepoint(
                 }
             }
 
-            Err(RuntimeError {
+            Err(RuntimeError::new(
                 span,
-                message: format!("std.codepoint() expected string of length 1, got '{}'", s),
+                format!("std.codepoint() expected string of length 1, got '{}'", s),
                 source_id,
-            })
+            ))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: format!("std.codepoint() expected string, but got something else"),
+            format!("std.codepoint() expected string, but got something else"),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -655,11 +655,11 @@ fn std_char(
     match val {
         Value::Number(n) => {
             if n < 0.0 || n.fract() != 0.0 {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: format!("std.char() expected a positive integer, got {}", n),
+                    format!("std.char() expected a positive integer, got {}", n),
                     source_id,
-                });
+                ));
             }
 
             let codepoint = n as u32;
@@ -668,18 +668,18 @@ fn std_char(
                     let allocation = memory_manager.allocate_string(&c.to_string());
                     Ok(Value::String(allocation.index))
                 }
-                None => Err(RuntimeError {
+                None => Err(RuntimeError::new(
                     span,
-                    message: format!("std.char() invalid unicode codepoint {}", codepoint),
+                    format!("std.char() invalid unicode codepoint {}", codepoint),
                     source_id,
-                }),
+                )),
             }
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: format!("std.char() expected number, but got something else"),
+            format!("std.char() expected number, but got something else"),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -728,13 +728,11 @@ fn std_length(
             // In Jsonnet, std.length(obj) is the number of visible fields
             Ok(Value::Number(o.len() as f64))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: format!(
-                "std.length() expected string, array, or object, but got something else"
-            ),
+            format!("std.length() expected string, array, or object, but got something else"),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -742,11 +740,11 @@ fn std_length(
 fn std_abs(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.abs())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: format!("std.abs() expected number, but got something else"),
+            format!("std.abs() expected number, but got something else"),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -773,18 +771,18 @@ fn std_to_string(
             }
         }
         Value::Array(_) | Value::Object(_) => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.toString() on objects and arrays is not yet implemented".to_string(),
+                "std.toString() on objects and arrays is not yet implemented".to_string(),
                 source_id,
-            });
+            ));
         }
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.toString() cannot convert this value type to string".to_string(),
+                "std.toString() cannot convert this value type to string".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let allocation = memory_manager.allocate_string(&s);
@@ -795,11 +793,11 @@ fn std_to_string(
 fn std_floor(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.floor())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.floor() expected number, but got something else".to_string(),
+            "std.floor() expected number, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -807,11 +805,11 @@ fn std_floor(val: Value, span: Range<usize>, source_id: String) -> Result<Value,
 fn std_ceil(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.ceil())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.ceil() expected number, but got something else".to_string(),
+            "std.ceil() expected number, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -819,11 +817,11 @@ fn std_ceil(val: Value, span: Range<usize>, source_id: String) -> Result<Value, 
 fn std_round(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number((n + 0.5).floor())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.round() expected number, but got something else".to_string(),
+            "std.round() expected number, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -836,11 +834,11 @@ fn std_min(
 ) -> Result<Value, RuntimeError> {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x.min(y))),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.min() expected two numbers".to_string(),
+            "std.min() expected two numbers".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -853,11 +851,11 @@ fn std_max(
 ) -> Result<Value, RuntimeError> {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => Ok(Value::Number(x.max(y))),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.max() expected two numbers".to_string(),
+            "std.max() expected two numbers".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -874,11 +872,11 @@ fn std_sign(val: Value, span: Range<usize>, source_id: String) -> Result<Value, 
             };
             Ok(Value::Number(sign))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.sign() expected number, but got something else".to_string(),
+            "std.sign() expected number, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -953,11 +951,11 @@ fn std_object_fields(
             let arr_alloc = memory_manager.allocate_array(elements);
             Ok(Value::Array(arr_alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.objectFields() expected object, but got something else".to_string(),
+            "std.objectFields() expected object, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -989,16 +987,16 @@ fn std_object_has(
                 .any(|key| memory_manager.load_string(*key) == field_name);
             Ok(Value::Boolean(found))
         }
-        (Value::Object(_), _) => Err(RuntimeError {
+        (Value::Object(_), _) => Err(RuntimeError::new(
             span,
-            message: "std.objectHas() second argument must be a string".to_string(),
+            "std.objectHas() second argument must be a string".to_string(),
             source_id,
-        }),
-        _ => Err(RuntimeError {
+        )),
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.objectHas() first argument must be an object".to_string(),
+            "std.objectHas() first argument must be an object".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1029,11 +1027,11 @@ fn std_object_values(
             let arr_alloc = memory_manager.allocate_array(elements);
             Ok(Value::Array(arr_alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.objectValues() expected object, but got something else".to_string(),
+            "std.objectValues() expected object, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1057,11 +1055,11 @@ fn std_range(
             let arr_alloc = memory_manager.allocate_array(elements);
             Ok(Value::Array(arr_alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.range() expected two numbers".to_string(),
+            "std.range() expected two numbers".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1077,18 +1075,18 @@ fn std_parse_int(
             let s = memory_manager.load_string(s_idx).trim().to_string();
             match s.parse::<i64>() {
                 Ok(n) => Ok(Value::Number(n as f64)),
-                Err(_) => Err(RuntimeError {
+                Err(_) => Err(RuntimeError::new(
                     span,
-                    message: format!("std.parseInt() failed to parse '{}' as integer", s),
+                    format!("std.parseInt() failed to parse '{}' as integer", s),
                     source_id,
-                }),
+                )),
             }
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.parseInt() expected string, but got something else".to_string(),
+            "std.parseInt() expected string, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1104,18 +1102,18 @@ fn std_parse_octal(
             let s = memory_manager.load_string(s_idx).trim().to_string();
             match i64::from_str_radix(&s, 8) {
                 Ok(n) => Ok(Value::Number(n as f64)),
-                Err(_) => Err(RuntimeError {
+                Err(_) => Err(RuntimeError::new(
                     span,
-                    message: format!("std.parseOctal() failed to parse '{}' as octal", s),
+                    format!("std.parseOctal() failed to parse '{}' as octal", s),
                     source_id,
-                }),
+                )),
             }
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.parseOctal() expected string, but got something else".to_string(),
+            "std.parseOctal() expected string, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1131,18 +1129,18 @@ fn std_parse_hex(
             let s = memory_manager.load_string(s_idx).trim().to_lowercase();
             match i64::from_str_radix(&s, 16) {
                 Ok(n) => Ok(Value::Number(n as f64)),
-                Err(_) => Err(RuntimeError {
+                Err(_) => Err(RuntimeError::new(
                     span,
-                    message: format!("std.parseHex() failed to parse '{}' as hex", s),
+                    format!("std.parseHex() failed to parse '{}' as hex", s),
                     source_id,
-                }),
+                )),
             }
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.parseHex() expected string, but got something else".to_string(),
+            "std.parseHex() expected string, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1163,11 +1161,11 @@ fn std_ascii_upper(
             let alloc = memory_manager.allocate_string(&upper);
             Ok(Value::String(alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.asciiUpper() expected string, but got something else".to_string(),
+            "std.asciiUpper() expected string, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1188,11 +1186,11 @@ fn std_ascii_lower(
             let alloc = memory_manager.allocate_string(&lower);
             Ok(Value::String(alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.asciiLower() expected string, but got something else".to_string(),
+            "std.asciiLower() expected string, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1255,32 +1253,32 @@ fn std_substr(
     let (s_idx, from_n, len_n) = match (str_val, from_val, len_val) {
         (Value::String(s), Value::Number(f), Value::Number(l)) => (s, f, l),
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.substr() expects (string, number, number)".to_string(),
+                "std.substr() expects (string, number, number)".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     if from_n < 0.0 || from_n.fract() != 0.0 {
-        return Err(RuntimeError {
+        return Err(RuntimeError::new(
             span,
-            message: format!(
+            format!(
                 "std.substr() 'from' must be a non-negative integer, got {}",
                 from_n
             ),
             source_id,
-        });
+        ));
     }
     if len_n < 0.0 || len_n.fract() != 0.0 {
-        return Err(RuntimeError {
+        return Err(RuntimeError::new(
             span,
-            message: format!(
+            format!(
                 "std.substr() 'len' must be a non-negative integer, got {}",
                 len_n
             ),
             source_id,
-        });
+        ));
     }
     let from = from_n as usize;
     let len = len_n as usize;
@@ -1302,11 +1300,11 @@ fn std_split(
     let (s_idx, c_idx) = match (str_val, c_val) {
         (Value::String(s), Value::String(c)) => (s, c),
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.split() expects (string, string)".to_string(),
+                "std.split() expects (string, string)".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let s = memory_manager.load_string(s_idx).to_string();
@@ -1334,11 +1332,11 @@ fn std_join(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.join() second argument must be an array".to_string(),
+                "std.join() second argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
 
@@ -1355,12 +1353,12 @@ fn std_join(
                         parts.push(memory_manager.load_string(*s_idx).to_string());
                     }
                     _ => {
-                        return Err(RuntimeError {
+                        return Err(RuntimeError::new(
                             span,
-                            message: "std.join() with string separator requires array of strings"
+                            "std.join() with string separator requires array of strings"
                                 .to_string(),
                             source_id,
-                        });
+                        ));
                     }
                 }
             }
@@ -1387,23 +1385,22 @@ fn std_join(
                         result.extend(sub_elements);
                     }
                     _ => {
-                        return Err(RuntimeError {
+                        return Err(RuntimeError::new(
                             span,
-                            message: "std.join() with array separator requires array of arrays"
-                                .to_string(),
+                            "std.join() with array separator requires array of arrays".to_string(),
                             source_id,
-                        });
+                        ));
                     }
                 }
             }
             let arr_alloc = memory_manager.allocate_array(result);
             Ok(Value::Array(arr_alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.join() first argument must be a string or array".to_string(),
+            "std.join() first argument must be a string or array".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1417,11 +1414,11 @@ fn std_lines(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.lines() expected array, but got something else".to_string(),
+                "std.lines() expected array, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -1434,11 +1431,11 @@ fn std_lines(
                 result.push('\n');
             }
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.lines() expected array of strings".to_string(),
+                    "std.lines() expected array of strings".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -1456,11 +1453,11 @@ fn std_string_chars(
     let s_idx = match str_val {
         Value::String(s) => s,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.stringChars() expected string, but got something else".to_string(),
+                "std.stringChars() expected string, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let chars: Vec<char> = memory_manager.load_string(s_idx).chars().collect();
@@ -1486,11 +1483,11 @@ fn std_flatten_arrays(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.flattenArrays() expected array, but got something else".to_string(),
+                "std.flattenArrays() expected array, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let outer: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -1502,11 +1499,11 @@ fn std_flatten_arrays(
                 result.extend(sub);
             }
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.flattenArrays() expected array of arrays".to_string(),
+                    "std.flattenArrays() expected array of arrays".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -1524,11 +1521,11 @@ fn std_reverse(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.reverse() expected array, but got something else".to_string(),
+                "std.reverse() expected array, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let mut elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -1557,23 +1554,22 @@ fn std_member(
             let needle_idx = match x_val {
                 Value::String(n) => n,
                 _ => {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: "std.member() with string haystack requires string needle"
-                            .to_string(),
+                        "std.member() with string haystack requires string needle".to_string(),
                         source_id,
-                    });
+                    ));
                 }
             };
             let haystack = memory_manager.load_string(s_idx).to_string();
             let needle = memory_manager.load_string(needle_idx).to_string();
             Ok(Value::Boolean(haystack.contains(needle.as_str())))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.member() first argument must be an array or string".to_string(),
+            "std.member() first argument must be an array or string".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1588,11 +1584,11 @@ fn std_count(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.count() expected array as first argument".to_string(),
+                "std.count() expected array as first argument".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -1614,11 +1610,11 @@ fn std_find(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.find() expected array as second argument".to_string(),
+                "std.find() expected array as second argument".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -1644,11 +1640,11 @@ fn std_clamp(
         (Value::Number(x), Value::Number(lo), Value::Number(hi)) => {
             Ok(Value::Number(x.max(lo).min(hi)))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.clamp() expected three numbers".to_string(),
+            "std.clamp() expected three numbers".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1666,11 +1662,11 @@ fn std_starts_with(
             let b = memory_manager.load_string(b_idx).to_string();
             Ok(Value::Boolean(a.starts_with(b.as_str())))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.startsWith() expected two strings".to_string(),
+            "std.startsWith() expected two strings".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1688,11 +1684,11 @@ fn std_ends_with(
             let b = memory_manager.load_string(b_idx).to_string();
             Ok(Value::Boolean(a.ends_with(b.as_str())))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.endsWith() expected two strings".to_string(),
+            "std.endsWith() expected two strings".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1732,11 +1728,11 @@ fn std_find_substr(
             let arr_alloc = memory_manager.allocate_array(indices);
             Ok(Value::Array(arr_alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.findSubstr() expected two strings".to_string(),
+            "std.findSubstr() expected two strings".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1758,11 +1754,11 @@ fn std_str_replace(
             let alloc = memory_manager.allocate_string(&result);
             Ok(Value::String(alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.strReplace() expected three strings".to_string(),
+            "std.strReplace() expected three strings".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1778,11 +1774,11 @@ fn std_is_empty(
             let s = memory_manager.load_string(s_idx);
             Ok(Value::Boolean(s.is_empty()))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.isEmpty() expected string, but got something else".to_string(),
+            "std.isEmpty() expected string, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -1796,11 +1792,11 @@ fn std_all(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.all() expected array, but got something else".to_string(),
+                "std.all() expected array, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -1812,11 +1808,11 @@ fn std_all(
                 }
             }
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.all() expected array of booleans".to_string(),
+                    "std.all() expected array of booleans".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -1833,11 +1829,11 @@ fn std_any(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.any() expected array, but got something else".to_string(),
+                "std.any() expected array, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -1849,11 +1845,11 @@ fn std_any(
                 }
             }
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.any() expected array of booleans".to_string(),
+                    "std.any() expected array of booleans".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -1870,11 +1866,11 @@ fn std_sum(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.sum() expected array, but got something else".to_string(),
+                "std.sum() expected array, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -1883,11 +1879,11 @@ fn std_sum(
         match elem {
             Value::Number(n) => total += n,
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.sum() expected array of numbers".to_string(),
+                    "std.sum() expected array of numbers".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -1907,14 +1903,14 @@ fn std_assert_equal(
     } else {
         let a_display = display_value(a_val, memory_manager);
         let b_display = display_value(b_val, memory_manager);
-        Err(RuntimeError {
+        Err(RuntimeError::new(
             span,
-            message: format!(
+            format!(
                 "Assertion failed: {} was not equal to {}",
                 a_display, b_display
             ),
             source_id,
-        })
+        ))
     }
 }
 
@@ -1954,31 +1950,33 @@ impl FormatVals {
         source_id: &str,
     ) -> Result<Value, RuntimeError> {
         match self {
-            FormatVals::Array(v) => v.get(idx).copied().ok_or_else(|| RuntimeError {
-                span: span.clone(),
-                message: format!(
-                    "std.format: index {} out of range (array has {} elements)",
-                    idx,
-                    v.len()
-                ),
-                source_id: source_id.to_string(),
+            FormatVals::Array(v) => v.get(idx).copied().ok_or_else(|| {
+                RuntimeError::new(
+                    span.clone(),
+                    format!(
+                        "std.format: index {} out of range (array has {} elements)",
+                        idx,
+                        v.len()
+                    ),
+                    source_id.to_string(),
+                )
             }),
             FormatVals::Single(v) => {
                 if idx == 0 {
                     Ok(*v)
                 } else {
-                    Err(RuntimeError {
-                        span: span.clone(),
-                        message: format!("std.format: index {} out of range (single value)", idx),
-                        source_id: source_id.to_string(),
-                    })
+                    Err(RuntimeError::new(
+                        span.clone(),
+                        format!("std.format: index {} out of range (single value)", idx),
+                        source_id.to_string(),
+                    ))
                 }
             }
-            FormatVals::Object(_) => Err(RuntimeError {
-                span: span.clone(),
-                message: "std.format: positional index used with object values".to_string(),
-                source_id: source_id.to_string(),
-            }),
+            FormatVals::Object(_) => Err(RuntimeError::new(
+                span.clone(),
+                "std.format: positional index used with object values".to_string(),
+                source_id.to_string(),
+            )),
         }
     }
 
@@ -1995,17 +1993,17 @@ impl FormatVals {
                         return Ok(*v);
                     }
                 }
-                Err(RuntimeError {
-                    span: span.clone(),
-                    message: format!("std.format: key '{}' not found in object", key),
-                    source_id: source_id.to_string(),
-                })
+                Err(RuntimeError::new(
+                    span.clone(),
+                    format!("std.format: key '{}' not found in object", key),
+                    source_id.to_string(),
+                ))
             }
-            _ => Err(RuntimeError {
-                span: span.clone(),
-                message: "std.format: named arg used but values is not an object".to_string(),
-                source_id: source_id.to_string(),
-            }),
+            _ => Err(RuntimeError::new(
+                span.clone(),
+                "std.format: named arg used but values is not an object".to_string(),
+                source_id.to_string(),
+            )),
         }
     }
 }
@@ -2131,11 +2129,11 @@ pub fn format_string(
         }
         i += 1; // skip '%'
         if i >= chars.len() {
-            return Err(RuntimeError {
-                span: span.clone(),
-                message: "std.format: trailing '%' in format string".to_string(),
-                source_id: source_id.to_string(),
-            });
+            return Err(RuntimeError::new(
+                span.clone(),
+                "std.format: trailing '%' in format string".to_string(),
+                source_id.to_string(),
+            ));
         }
 
         // Check for %% (literal percent)
@@ -2155,11 +2153,11 @@ pub fn format_string(
                 i += 1;
             }
             if i >= chars.len() {
-                return Err(RuntimeError {
-                    span: span.clone(),
-                    message: "std.format: unclosed '(' in format specifier".to_string(),
-                    source_id: source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    span.clone(),
+                    "std.format: unclosed '(' in format specifier".to_string(),
+                    source_id.to_string(),
+                ));
             }
             i += 1; // skip ')'
             key_name = Some(key);
@@ -2216,11 +2214,11 @@ pub fn format_string(
         }
 
         if i >= chars.len() {
-            return Err(RuntimeError {
-                span: span.clone(),
-                message: "std.format: incomplete format specifier".to_string(),
-                source_id: source_id.to_string(),
-            });
+            return Err(RuntimeError::new(
+                span.clone(),
+                "std.format: incomplete format specifier".to_string(),
+                source_id.to_string(),
+            ));
         }
 
         // Skip C length modifiers (ignored in Jsonnet)
@@ -2228,11 +2226,11 @@ pub fn format_string(
             i += 1;
         }
         if i >= chars.len() {
-            return Err(RuntimeError {
-                span: span.clone(),
-                message: "std.format: incomplete format specifier".to_string(),
-                source_id: source_id.to_string(),
-            });
+            return Err(RuntimeError::new(
+                span.clone(),
+                "std.format: incomplete format specifier".to_string(),
+                source_id.to_string(),
+            ));
         }
 
         let conv = chars[i];
@@ -2279,11 +2277,11 @@ pub fn format_string(
                 let n = match val {
                     Value::Number(n) => n,
                     _ => {
-                        return Err(RuntimeError {
-                            span: span.clone(),
-                            message: format!("std.format: %{} requires a number", conv),
-                            source_id: source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            span.clone(),
+                            format!("std.format: %{} requires a number", conv),
+                            source_id.to_string(),
+                        ));
                     }
                 };
                 let int_val = n as i64;
@@ -2310,11 +2308,11 @@ pub fn format_string(
                 let n = match val {
                     Value::Number(n) => n,
                     _ => {
-                        return Err(RuntimeError {
-                            span: span.clone(),
-                            message: format!("std.format: %{} requires a number", conv),
-                            source_id: source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            span.clone(),
+                            format!("std.format: %{} requires a number", conv),
+                            source_id.to_string(),
+                        ));
                     }
                 };
                 let int_val = n as i64;
@@ -2381,11 +2379,11 @@ pub fn format_string(
                 let n = match val {
                     Value::Number(n) => n,
                     _ => {
-                        return Err(RuntimeError {
-                            span: span.clone(),
-                            message: "std.format: %f requires a number".to_string(),
-                            source_id: source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            span.clone(),
+                            "std.format: %f requires a number".to_string(),
+                            source_id.to_string(),
+                        ));
                     }
                 };
                 let p = precision.unwrap_or(6);
@@ -2400,11 +2398,11 @@ pub fn format_string(
                 let n = match val {
                     Value::Number(n) => n,
                     _ => {
-                        return Err(RuntimeError {
-                            span: span.clone(),
-                            message: format!("std.format: %{} requires a number", conv),
-                            source_id: source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            span.clone(),
+                            format!("std.format: %{} requires a number", conv),
+                            source_id.to_string(),
+                        ));
                     }
                 };
                 let p = precision.unwrap_or(6);
@@ -2423,11 +2421,11 @@ pub fn format_string(
                 let n = match val {
                     Value::Number(n) => n,
                     _ => {
-                        return Err(RuntimeError {
-                            span: span.clone(),
-                            message: format!("std.format: %{} requires a number", conv),
-                            source_id: source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            span.clone(),
+                            format!("std.format: %{} requires a number", conv),
+                            source_id.to_string(),
+                        ));
                     }
                 };
                 let upper = conv == 'G';
@@ -2447,32 +2445,32 @@ pub fn format_string(
                         match s.chars().next() {
                             Some(c) => c as u32,
                             None => {
-                                return Err(RuntimeError {
-                                    span: span.clone(),
-                                    message: "std.format: %c requires non-empty string or number"
+                                return Err(RuntimeError::new(
+                                    span.clone(),
+                                    "std.format: %c requires non-empty string or number"
                                         .to_string(),
-                                    source_id: source_id.to_string(),
-                                });
+                                    source_id.to_string(),
+                                ));
                             }
                         }
                     }
                     _ => {
-                        return Err(RuntimeError {
-                            span: span.clone(),
-                            message: "std.format: %c requires a number or string".to_string(),
-                            source_id: source_id.to_string(),
-                        });
+                        return Err(RuntimeError::new(
+                            span.clone(),
+                            "std.format: %c requires a number or string".to_string(),
+                            source_id.to_string(),
+                        ));
                     }
                 };
                 let c = char::from_u32(n).unwrap_or('\u{FFFD}');
                 apply_width_align(&c.to_string(), &flags, width)
             }
             _ => {
-                return Err(RuntimeError {
-                    span: span.clone(),
-                    message: format!("std.format: unknown format specifier '%{}'", conv),
-                    source_id: source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    span.clone(),
+                    format!("std.format: unknown format specifier '%{}'", conv),
+                    source_id.to_string(),
+                ));
             }
         };
 
@@ -2622,11 +2620,11 @@ fn std_format(
     let fmt_str = match fmt_val {
         Value::String(s_idx) => memory_manager.load_string(s_idx).to_string(),
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.format() first argument must be a string".to_string(),
+                "std.format() first argument must be a string".to_string(),
                 source_id,
-            });
+            ));
         }
     };
 
@@ -2650,11 +2648,11 @@ fn std_split_limit(
     let (s_idx, c_idx, max) = match (str_val, c_val, max_val) {
         (Value::String(s), Value::String(c), Value::Number(m)) => (s, c, m as i64),
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.splitLimit() expects (string, string, number)".to_string(),
+                "std.splitLimit() expects (string, string, number)".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let s = memory_manager.load_string(s_idx).to_string();
@@ -2690,23 +2688,23 @@ fn std_repeat(
     let count = match count_val {
         Value::Number(n) => {
             if n < 0.0 || n.fract() != 0.0 {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: format!(
+                    format!(
                         "std.repeat() count must be a non-negative integer, got {}",
                         n
                     ),
                     source_id,
-                });
+                ));
             }
             n as usize
         }
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.repeat() count must be a number".to_string(),
+                "std.repeat() count must be a number".to_string(),
                 source_id,
-            });
+            ));
         }
     };
 
@@ -2726,11 +2724,11 @@ fn std_repeat(
             let arr_alloc = memory_manager.allocate_array(result);
             Ok(Value::Array(arr_alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.repeat() first argument must be a string or array".to_string(),
+            "std.repeat() first argument must be a string or array".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -2777,11 +2775,11 @@ fn std_slice(
             let arr_alloc = memory_manager.allocate_array(result);
             Ok(Value::Array(arr_alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.slice() first argument must be a string or array".to_string(),
+            "std.slice() first argument must be a string or array".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -2797,20 +2795,20 @@ fn parse_slice_args(
         Value::Null => 1usize,
         Value::Number(n) => {
             if n <= 0.0 || n.fract() != 0.0 {
-                return Err(RuntimeError {
-                    span: span.clone(),
-                    message: format!("std.slice() step must be a positive integer, got {}", n),
-                    source_id: source_id.to_string(),
-                });
+                return Err(RuntimeError::new(
+                    span.clone(),
+                    format!("std.slice() step must be a positive integer, got {}", n),
+                    source_id.to_string(),
+                ));
             }
             n as usize
         }
         _ => {
-            return Err(RuntimeError {
-                span: span.clone(),
-                message: "std.slice() step must be a number or null".to_string(),
-                source_id: source_id.to_string(),
-            });
+            return Err(RuntimeError::new(
+                span.clone(),
+                "std.slice() step must be a number or null".to_string(),
+                source_id.to_string(),
+            ));
         }
     };
 
@@ -2826,11 +2824,11 @@ fn parse_slice_args(
             }
         }
         _ => {
-            return Err(RuntimeError {
-                span: span.clone(),
-                message: "std.slice() index must be a number or null".to_string(),
-                source_id: source_id.to_string(),
-            });
+            return Err(RuntimeError::new(
+                span.clone(),
+                "std.slice() index must be a number or null".to_string(),
+                source_id.to_string(),
+            ));
         }
     };
 
@@ -2846,11 +2844,11 @@ fn parse_slice_args(
             }
         }
         _ => {
-            return Err(RuntimeError {
-                span: span.clone(),
-                message: "std.slice() end must be a number or null".to_string(),
-                source_id: source_id.to_string(),
-            });
+            return Err(RuntimeError::new(
+                span.clone(),
+                "std.slice() end must be a number or null".to_string(),
+                source_id.to_string(),
+            ));
         }
     };
 
@@ -2872,22 +2870,22 @@ fn std_get(
     let o_idx = match o_val {
         Value::Object(o) => o,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.get() first argument must be an object".to_string(),
+                "std.get() first argument must be an object".to_string(),
                 source_id,
-            });
+            ));
         }
     };
 
     let field_name = match f_val {
         Value::String(s_idx) => memory_manager.load_string(s_idx).to_string(),
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.get() second argument must be a string".to_string(),
+                "std.get() second argument must be a string".to_string(),
                 source_id,
-            });
+            ));
         }
     };
 
@@ -2895,11 +2893,11 @@ fn std_get(
         Value::Boolean(b) => b,
         Value::Null => true,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.get() fourth argument must be a boolean".to_string(),
+                "std.get() fourth argument must be a boolean".to_string(),
                 source_id,
-            });
+            ));
         }
     };
 
@@ -2942,16 +2940,16 @@ fn std_object_has_all(
                 .any(|key| memory_manager.load_string(*key) == field_name);
             Ok(Value::Boolean(found))
         }
-        (Value::Object(_), _) => Err(RuntimeError {
+        (Value::Object(_), _) => Err(RuntimeError::new(
             span,
-            message: "std.objectHasAll() second argument must be a string".to_string(),
+            "std.objectHasAll() second argument must be a string".to_string(),
             source_id,
-        }),
-        _ => Err(RuntimeError {
+        )),
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.objectHasAll() first argument must be an object".to_string(),
+            "std.objectHasAll() first argument must be an object".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -2983,11 +2981,11 @@ fn std_object_fields_all(
             let arr_alloc = memory_manager.allocate_array(elements);
             Ok(Value::Array(arr_alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.objectFieldsAll() expected object, but got something else".to_string(),
+            "std.objectFieldsAll() expected object, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3003,11 +3001,11 @@ fn std_encode_utf8(
     let s_idx = match str_val {
         Value::String(s) => s,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.encodeUTF8() expected string, but got something else".to_string(),
+                "std.encodeUTF8() expected string, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let s = memory_manager.load_string(s_idx).to_string();
@@ -3028,11 +3026,11 @@ fn std_decode_utf8(
     let a_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.decodeUTF8() expected array, but got something else".to_string(),
+                "std.decodeUTF8() expected array, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements: Vec<Value> = memory_manager.load_array(a_idx).elements.clone();
@@ -3041,20 +3039,20 @@ fn std_decode_utf8(
         match elem {
             Value::Number(n) => {
                 if *n < 0.0 || *n > 255.0 || n.fract() != 0.0 {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: format!("std.decodeUTF8() byte value out of range: {}", n),
+                        format!("std.decodeUTF8() byte value out of range: {}", n),
                         source_id,
-                    });
+                    ));
                 }
                 bytes.push(*n as u8);
             }
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.decodeUTF8() array must contain numbers".to_string(),
+                    "std.decodeUTF8() array must contain numbers".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -3063,11 +3061,11 @@ fn std_decode_utf8(
             let alloc = memory_manager.allocate_string(s);
             Ok(Value::String(alloc.index))
         }
-        Err(e) => Err(RuntimeError {
+        Err(e) => Err(RuntimeError::new(
             span,
-            message: format!("std.decodeUTF8() invalid UTF-8 sequence: {}", e),
+            format!("std.decodeUTF8() invalid UTF-8 sequence: {}", e),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3106,11 +3104,11 @@ fn std_sort(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.sort() expected array, but got something else".to_string(),
+                "std.sort() expected array, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let mut elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -3145,11 +3143,11 @@ fn std_split_limit_r(
     let (s_idx, c_idx, max) = match (str_val, c_val, max_val) {
         (Value::String(s), Value::String(c), Value::Number(m)) => (s, c, m as i64),
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.splitLimitR() expects (string, string, number)".to_string(),
+                "std.splitLimitR() expects (string, string, number)".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let s = memory_manager.load_string(s_idx).to_string();
@@ -3189,11 +3187,11 @@ fn std_strip_chars(
     let (s_idx, c_idx) = match (str_val, chars_val) {
         (Value::String(s), Value::String(c)) => (s, c),
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.stripChars() expects (string, string)".to_string(),
+                "std.stripChars() expects (string, string)".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let s = memory_manager.load_string(s_idx).to_string();
@@ -3229,11 +3227,11 @@ fn std_lstrip_chars(
     let (s_idx, c_idx) = match (str_val, chars_val) {
         (Value::String(s), Value::String(c)) => (s, c),
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.lstripChars() expects (string, string)".to_string(),
+                "std.lstripChars() expects (string, string)".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let s = memory_manager.load_string(s_idx).to_string();
@@ -3260,11 +3258,11 @@ fn std_rstrip_chars(
     let (s_idx, c_idx) = match (str_val, chars_val) {
         (Value::String(s), Value::String(c)) => (s, c),
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.rstripChars() expects (string, string)".to_string(),
+                "std.rstripChars() expects (string, string)".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let s = memory_manager.load_string(s_idx).to_string();
@@ -3291,11 +3289,11 @@ fn std_trim(
     let s_idx = match str_val {
         Value::String(s) => s,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.trim() expected string, but got something else".to_string(),
+                "std.trim() expected string, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let s = memory_manager.load_string(s_idx).to_string();
@@ -3336,12 +3334,11 @@ fn std_object_keys_values(
     let o_idx = match obj_val {
         Value::Object(o) => o,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.objectKeysValues() expected object, but got something else"
-                    .to_string(),
+                "std.objectKeysValues() expected object, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     // Collect visible (key_name, value) pairs
@@ -3401,31 +3398,31 @@ fn std_avg(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.avg() expected array, but got something else".to_string(),
+                "std.avg() expected array, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
     if elements.is_empty() {
-        return Err(RuntimeError {
+        return Err(RuntimeError::new(
             span,
-            message: "std.avg() array must be non-empty".to_string(),
+            "std.avg() array must be non-empty".to_string(),
             source_id,
-        });
+        ));
     }
     let mut total = 0.0f64;
     for elem in &elements {
         match elem {
             Value::Number(n) => total += n,
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.avg() expected array of numbers".to_string(),
+                    "std.avg() expected array of numbers".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -3445,11 +3442,11 @@ fn std_remove(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.remove() first argument must be an array".to_string(),
+                "std.remove() first argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -3554,34 +3551,34 @@ fn std_base64(
                     Value::Number(n) => {
                         let n = *n;
                         if n < 0.0 || n > 255.0 || n.fract() != 0.0 {
-                            return Err(RuntimeError {
+                            return Err(RuntimeError::new(
                                 span,
-                                message: format!(
+                                format!(
                                     "std.base64: array element must be a byte (0-255), got {}",
                                     n
                                 ),
                                 source_id,
-                            });
+                            ));
                         }
                         bytes.push(n as u8);
                     }
                     _ => {
-                        return Err(RuntimeError {
+                        return Err(RuntimeError::new(
                             span,
-                            message: "std.base64: array elements must be numbers".to_string(),
+                            "std.base64: array elements must be numbers".to_string(),
                             source_id,
-                        });
+                        ));
                     }
                 }
             }
             bytes
         }
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.base64: argument must be a string or array of bytes".to_string(),
+                "std.base64: argument must be a string or array of bytes".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let encoded = base64_encode(&bytes);
@@ -3606,18 +3603,18 @@ fn std_base64_decode_bytes(
                     let arr_alloc = memory_manager.allocate_array(elements);
                     Ok(Value::Array(arr_alloc.index))
                 }
-                Err(e) => Err(RuntimeError {
+                Err(e) => Err(RuntimeError::new(
                     span,
-                    message: format!("std.base64DecodeBytes: {}", e),
+                    format!("std.base64DecodeBytes: {}", e),
                     source_id,
-                }),
+                )),
             }
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.base64DecodeBytes: argument must be a string".to_string(),
+            "std.base64DecodeBytes: argument must be a string".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3649,11 +3646,11 @@ fn std_escape_string_json(
             let alloc = memory_manager.allocate_string(&out);
             Ok(Value::String(alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.escapeStringJson: argument must be a string".to_string(),
+            "std.escapeStringJson: argument must be a string".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3681,11 +3678,11 @@ fn std_escape_string_xml(
             let alloc = memory_manager.allocate_string(&out);
             Ok(Value::String(alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.escapeStringXml: argument must be a string".to_string(),
+            "std.escapeStringXml: argument must be a string".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3711,11 +3708,11 @@ fn std_escape_string_bash(
             let alloc = memory_manager.allocate_string(&out);
             Ok(Value::String(alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.escapeStringBash: argument must be a string".to_string(),
+            "std.escapeStringBash: argument must be a string".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3731,18 +3728,18 @@ fn std_parse_float(
             let s = memory_manager.load_string(s_idx).to_string();
             match s.parse::<f64>() {
                 Ok(n) => Ok(Value::Number(n)),
-                Err(_) => Err(RuntimeError {
+                Err(_) => Err(RuntimeError::new(
                     span,
-                    message: format!("std.parseFloat: could not parse {:?}", s),
+                    format!("std.parseFloat: could not parse {:?}", s),
                     source_id,
-                }),
+                )),
             }
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.parseFloat: argument must be a string".to_string(),
+            "std.parseFloat: argument must be a string".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3757,11 +3754,11 @@ fn std_pow(
 ) -> Result<Value, RuntimeError> {
     match (x, n) {
         (Value::Number(xv), Value::Number(nv)) => Ok(Value::Number(xv.powf(nv))),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.pow() expected two numbers".to_string(),
+            "std.pow() expected two numbers".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3771,11 +3768,11 @@ fn std_pow(
 fn std_sqrt(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.sqrt())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.sqrt() expected number".to_string(),
+            "std.sqrt() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3785,11 +3782,11 @@ fn std_sqrt(val: Value, span: Range<usize>, source_id: String) -> Result<Value, 
 fn std_exp(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.exp())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.exp() expected number".to_string(),
+            "std.exp() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3799,11 +3796,11 @@ fn std_exp(val: Value, span: Range<usize>, source_id: String) -> Result<Value, R
 fn std_log(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.ln())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.log() expected number".to_string(),
+            "std.log() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3813,11 +3810,11 @@ fn std_log(val: Value, span: Range<usize>, source_id: String) -> Result<Value, R
 fn std_is_even(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Boolean(n.trunc() % 2.0 == 0.0)),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.isEven() expected number".to_string(),
+            "std.isEven() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3827,11 +3824,11 @@ fn std_is_even(val: Value, span: Range<usize>, source_id: String) -> Result<Valu
 fn std_is_odd(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Boolean(n.trunc() % 2.0 != 0.0)),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.isOdd() expected number".to_string(),
+            "std.isOdd() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3848,11 +3845,11 @@ fn std_contains(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.contains() first argument must be an array".to_string(),
+                "std.contains() first argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements = memory_manager.load_array(arr_idx).elements.clone();
@@ -3890,11 +3887,11 @@ fn std_object_values_all(
             let arr_alloc = memory_manager.allocate_array(elements);
             Ok(Value::Array(arr_alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.objectValuesAll() expected object, but got something else".to_string(),
+            "std.objectValuesAll() expected object, but got something else".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3904,11 +3901,11 @@ fn std_object_values_all(
 fn std_sin(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.sin())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.sin() expected number".to_string(),
+            "std.sin() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3918,11 +3915,11 @@ fn std_sin(val: Value, span: Range<usize>, source_id: String) -> Result<Value, R
 fn std_cos(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.cos())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.cos() expected number".to_string(),
+            "std.cos() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3932,11 +3929,11 @@ fn std_cos(val: Value, span: Range<usize>, source_id: String) -> Result<Value, R
 fn std_tan(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.tan())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.tan() expected number".to_string(),
+            "std.tan() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3946,11 +3943,11 @@ fn std_tan(val: Value, span: Range<usize>, source_id: String) -> Result<Value, R
 fn std_log2(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.log2())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.log2() expected number".to_string(),
+            "std.log2() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3960,11 +3957,11 @@ fn std_log2(val: Value, span: Range<usize>, source_id: String) -> Result<Value, 
 fn std_log10(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.log10())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.log10() expected number".to_string(),
+            "std.log10() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3979,11 +3976,11 @@ fn std_xor(
 ) -> Result<Value, RuntimeError> {
     match (a, b) {
         (Value::Boolean(x), Value::Boolean(y)) => Ok(Value::Boolean(x ^ y)),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.xor() expected two booleans".to_string(),
+            "std.xor() expected two booleans".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -3998,11 +3995,11 @@ fn std_xnor(
 ) -> Result<Value, RuntimeError> {
     match (a, b) {
         (Value::Boolean(x), Value::Boolean(y)) => Ok(Value::Boolean(!(x ^ y))),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.xnor() expected two booleans".to_string(),
+            "std.xnor() expected two booleans".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4018,12 +4015,11 @@ fn std_object_keys_values_all(
     let o_idx = match obj_val {
         Value::Object(o) => o,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.objectKeysValuesAll() expected object, but got something else"
-                    .to_string(),
+                "std.objectKeysValuesAll() expected object, but got something else".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     // Collect all (key_name, value) pairs — no visibility filter
@@ -4076,11 +4072,11 @@ fn std_object_keys_values_all(
 fn std_asin(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.asin())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.asin() expected number".to_string(),
+            "std.asin() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4090,11 +4086,11 @@ fn std_asin(val: Value, span: Range<usize>, source_id: String) -> Result<Value, 
 fn std_acos(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.acos())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.acos() expected number".to_string(),
+            "std.acos() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4104,11 +4100,11 @@ fn std_acos(val: Value, span: Range<usize>, source_id: String) -> Result<Value, 
 fn std_atan(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n.atan())),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.atan() expected number".to_string(),
+            "std.atan() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4123,11 +4119,11 @@ fn std_atan2(
 ) -> Result<Value, RuntimeError> {
     match (y, x) {
         (Value::Number(yv), Value::Number(xv)) => Ok(Value::Number(yv.atan2(xv))),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.atan2() expected two numbers".to_string(),
+            "std.atan2() expected two numbers".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4141,11 +4137,11 @@ fn std_is_integer(
 ) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Boolean(n.fract() == 0.0)),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.isInteger() expected number".to_string(),
+            "std.isInteger() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4159,11 +4155,11 @@ fn std_is_decimal(
 ) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Boolean(n.fract() != 0.0)),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.isDecimal() expected number".to_string(),
+            "std.isDecimal() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4180,21 +4176,21 @@ fn std_object_remove_key(
     let o_idx = match obj_val {
         Value::Object(o) => o,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.objectRemoveKey() expected object as first argument".to_string(),
+                "std.objectRemoveKey() expected object as first argument".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let target_key = match key_val {
         Value::String(s_idx) => memory_manager.load_string(s_idx).to_string(),
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.objectRemoveKey() expected string as second argument".to_string(),
+                "std.objectRemoveKey() expected string as second argument".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     // Collect all (StringIndex, ObjectField) pairs from the source object
@@ -4246,33 +4242,33 @@ fn std_flatten_deep_array(
             let arr_alloc = memory_manager.allocate_array(result);
             Ok(Value::Array(arr_alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.flattenDeepArray() expected array".to_string(),
+            "std.flattenDeepArray() expected array".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
 fn std_deg2rad(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n * std::f64::consts::PI / 180.0)),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.deg2rad() expected number".to_string(),
+            "std.deg2rad() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
 fn std_rad2deg(val: Value, span: Range<usize>, source_id: String) -> Result<Value, RuntimeError> {
     match val {
         Value::Number(n) => Ok(Value::Number(n * 180.0 / std::f64::consts::PI)),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.rad2deg() expected number".to_string(),
+            "std.rad2deg() expected number".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4284,11 +4280,11 @@ fn std_hypot(
 ) -> Result<Value, RuntimeError> {
     match (a, b) {
         (Value::Number(av), Value::Number(bv)) => Ok(Value::Number(av.hypot(bv))),
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.hypot() expected two numbers".to_string(),
+            "std.hypot() expected two numbers".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4302,34 +4298,34 @@ fn std_remove_at(
     let arr_idx = match arr_val {
         Value::Array(a) => a,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.removeAt() first argument must be an array".to_string(),
+                "std.removeAt() first argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let idx = match idx_val {
         Value::Number(n) if n.fract() == 0.0 => n as i64,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.removeAt() second argument must be an integer".to_string(),
+                "std.removeAt() second argument must be an integer".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let mut elements = memory_manager.load_array(arr_idx).elements.clone();
     let len = elements.len() as i64;
     if idx < 0 || idx >= len {
-        return Err(RuntimeError {
+        return Err(RuntimeError::new(
             span,
-            source_id,
-            message: format!(
+            format!(
                 "std.removeAt() index {} out of bounds for array of length {}",
                 idx, len
             ),
-        });
+            source_id,
+        ));
     }
     elements.remove(idx as usize);
     let arr_alloc = memory_manager.allocate_array(elements);
@@ -4349,11 +4345,11 @@ fn std_escape_string_dollars(
             let alloc = memory_manager.allocate_string(&out);
             Ok(Value::String(alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.escapeStringDollars() expected string".to_string(),
+            "std.escapeStringDollars() expected string".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4370,11 +4366,11 @@ fn std_equals_ignore_case(
             let sb = memory_manager.load_string(b_idx).to_string();
             Ok(Value::Boolean(sa.eq_ignore_ascii_case(&sb)))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.equalsIgnoreCase() expected two strings".to_string(),
+            "std.equalsIgnoreCase() expected two strings".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4391,11 +4387,11 @@ fn std_trace(
             eprintln!("TRACE: {} {}", source_id, msg);
             Ok(rest_val)
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.trace() first argument must be a string".to_string(),
+            "std.trace() first argument must be a string".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4415,18 +4411,18 @@ fn std_base64_decode_string(
                     let alloc = memory_manager.allocate_string(&decoded);
                     Ok(Value::String(alloc.index))
                 }
-                Err(e) => Err(RuntimeError {
+                Err(e) => Err(RuntimeError::new(
                     span,
-                    message: format!("std.base64Decode: {}", e),
+                    format!("std.base64Decode: {}", e),
                     source_id,
-                }),
+                )),
             }
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.base64Decode: argument must be a string".to_string(),
+            "std.base64Decode: argument must be a string".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4441,11 +4437,11 @@ fn std_min_array(
         Value::Array(a_idx) => {
             let elements = memory_manager.load_array(a_idx).elements.clone();
             if elements.is_empty() {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.minArray: array must not be empty".to_string(),
+                    "std.minArray: array must not be empty".to_string(),
                     source_id,
-                });
+                ));
             }
             let mut min = elements[0];
             for elem in elements.into_iter().skip(1) {
@@ -4455,11 +4451,11 @@ fn std_min_array(
             }
             Ok(min)
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.minArray: argument must be an array".to_string(),
+            "std.minArray: argument must be an array".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4474,11 +4470,11 @@ fn std_max_array(
         Value::Array(a_idx) => {
             let elements = memory_manager.load_array(a_idx).elements.clone();
             if elements.is_empty() {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.maxArray: array must not be empty".to_string(),
+                    "std.maxArray: array must not be empty".to_string(),
                     source_id,
-                });
+                ));
             }
             let mut max = elements[0];
             for elem in elements.into_iter().skip(1) {
@@ -4488,11 +4484,11 @@ fn std_max_array(
             }
             Ok(max)
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.maxArray: argument must be an array".to_string(),
+            "std.maxArray: argument must be an array".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4526,11 +4522,11 @@ fn std_deep_join(
             let alloc = memory_manager.allocate_string(&buf);
             Ok(Value::String(alloc.index))
         }
-        _ => Err(RuntimeError {
+        _ => Err(RuntimeError::new(
             span,
-            message: "std.deepJoin: argument must be a string or array".to_string(),
+            "std.deepJoin: argument must be a string or array".to_string(),
             source_id,
-        }),
+        )),
     }
 }
 
@@ -4570,21 +4566,21 @@ fn std_chunk(
     let arr_idx = match arr_val {
         Value::Array(i) => i,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.chunk: first argument must be an array".to_string(),
+                "std.chunk: first argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let size = match size_val {
         Value::Number(n) if n >= 1.0 && n.fract() == 0.0 => n as usize,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.chunk: second argument must be a positive integer".to_string(),
+                "std.chunk: second argument must be a positive integer".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements = memory_manager.load_array(arr_idx).elements.clone();
@@ -4611,21 +4607,21 @@ fn std_zip(
     let a_idx = match arr1_val {
         Value::Array(i) => i,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.zip: first argument must be an array".to_string(),
+                "std.zip: first argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let b_idx = match arr2_val {
         Value::Array(i) => i,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.zip: second argument must be an array".to_string(),
+                "std.zip: second argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let a_elems = memory_manager.load_array(a_idx).elements.clone();
@@ -4653,11 +4649,11 @@ fn std_unzip(
     let arr_idx = match arr_val {
         Value::Array(i) => i,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.unzip: argument must be an array".to_string(),
+                "std.unzip: argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements = memory_manager.load_array(arr_idx).elements.clone();
@@ -4668,24 +4664,24 @@ fn std_unzip(
             Value::Array(pair_idx) => {
                 let pair = memory_manager.load_array(pair_idx).elements.clone();
                 if pair.len() != 2 {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: format!(
+                        format!(
                             "std.unzip: each element must be a 2-element array, got length {}",
                             pair.len()
                         ),
                         source_id,
-                    });
+                    ));
                 }
                 firsts.push(pair[0]);
                 seconds.push(pair[1]);
             }
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.unzip: each element must be an array".to_string(),
+                    "std.unzip: each element must be an array".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -4708,11 +4704,11 @@ fn std_object_from_pairs(
     let arr_idx = match arr_val {
         Value::Array(i) => i,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.objectFromPairs: argument must be an array".to_string(),
+                "std.objectFromPairs: argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let elements = memory_manager.load_array(arr_idx).elements.clone();
@@ -4723,33 +4719,33 @@ fn std_object_from_pairs(
             Value::Array(pair_idx) => {
                 let pair = memory_manager.load_array(pair_idx).elements.clone();
                 if pair.len() != 2 {
-                    return Err(RuntimeError {
+                    return Err(RuntimeError::new(
                         span,
-                        message: format!(
+                        format!(
                             "std.objectFromPairs: each element must be a 2-element array, got length {}",
                             pair.len()
                         ),
                         source_id,
-                    });
+                    ));
                 }
                 let key = match pair[0] {
                     Value::String(si) => memory_manager.load_string(si).to_string(),
                     _ => {
-                        return Err(RuntimeError {
+                        return Err(RuntimeError::new(
                             span,
-                            message: "std.objectFromPairs: keys must be strings".to_string(),
+                            "std.objectFromPairs: keys must be strings".to_string(),
                             source_id,
-                        });
+                        ));
                     }
                 };
                 pairs.push((key, pair[1]));
             }
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.objectFromPairs: elements must be 2-element arrays".to_string(),
+                    "std.objectFromPairs: elements must be 2-element arrays".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -4783,21 +4779,21 @@ fn std_pick(
     let obj_idx = match obj_val {
         Value::Object(i) => i,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.pick: first argument must be an object".to_string(),
+                "std.pick: first argument must be an object".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let keys_idx = match keys_val {
         Value::Array(i) => i,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.pick: second argument must be an array".to_string(),
+                "std.pick: second argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     // Collect desired key names
@@ -4809,11 +4805,11 @@ fn std_pick(
                 desired.insert(memory_manager.load_string(si).to_string());
             }
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.pick: keys must be strings".to_string(),
+                    "std.pick: keys must be strings".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -4850,21 +4846,21 @@ fn std_omit(
     let obj_idx = match obj_val {
         Value::Object(i) => i,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.omit: first argument must be an object".to_string(),
+                "std.omit: first argument must be an object".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let keys_idx = match keys_val {
         Value::Array(i) => i,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.omit: second argument must be an array".to_string(),
+                "std.omit: second argument must be an array".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     // Collect excluded key names
@@ -4876,11 +4872,11 @@ fn std_omit(
                 excluded.insert(memory_manager.load_string(si).to_string());
             }
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.omit: keys must be strings".to_string(),
+                    "std.omit: keys must be strings".to_string(),
                     source_id,
-                });
+                ));
             }
         }
     }
@@ -4915,11 +4911,11 @@ fn std_product(
     let arr_idx = match arr_val {
         Value::Array(i) => i,
         _ => {
-            return Err(RuntimeError {
+            return Err(RuntimeError::new(
                 span,
-                message: "std.product: argument must be an array of arrays".to_string(),
+                "std.product: argument must be an array of arrays".to_string(),
                 source_id,
-            });
+            ));
         }
     };
     let sub_arrays: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
@@ -4931,11 +4927,11 @@ fn std_product(
         let sub_idx = match sub_val {
             Value::Array(i) => *i,
             _ => {
-                return Err(RuntimeError {
+                return Err(RuntimeError::new(
                     span,
-                    message: "std.product: each element must be an array".to_string(),
+                    "std.product: each element must be an array".to_string(),
                     source_id,
-                });
+                ));
             }
         };
         let sub_elems: Vec<Value> = memory_manager.load_array(sub_idx).elements.clone();

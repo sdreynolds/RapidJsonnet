@@ -64,9 +64,19 @@ pub struct ScanError {
     pub span: Range<usize>,
     pub message: String,
     pub source_id: String,
+    pub cause: Option<Box<ScanError>>,
 }
 
 impl ScanError {
+    pub fn new(span: Range<usize>, message: String, source_id: String) -> Self {
+        Self {
+            span,
+            message,
+            source_id,
+            cause: None,
+        }
+    }
+
     pub fn is_incomplete_input(&self) -> bool {
         let msg = self.message.to_lowercase();
         msg.contains("unexpected end of input")
@@ -175,11 +185,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn make_error(&self, span: Range<usize>, message: String) -> ScanError {
-        ScanError {
-            span,
-            message,
-            source_id: self.source_id.to_string(),
-        }
+        ScanError::new(span, message, self.source_id.to_string())
     }
 
     pub fn scan_next(&mut self) -> Result<TokenInfo, ScanError> {

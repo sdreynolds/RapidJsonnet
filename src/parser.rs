@@ -65,23 +65,23 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(token)
             } else {
-                let error = ScanError {
-                    span: current.span.clone(),
-                    message: format!(
+                let error = ScanError::new(
+                    current.span.clone(),
+                    format!(
                         "{}: expected {:?}, found {:?}",
                         message, expected, current.token
                     ),
-                    source_id: self.scanner.source_id.to_string(),
-                };
+                    self.scanner.source_id.to_string(),
+                );
                 self.had_error = true;
                 Err(error)
             }
         } else {
-            let error = ScanError {
-                span: 0..0,
-                message: format!("{}: unexpected end of input", message),
-                source_id: self.scanner.source_id.to_string(),
-            };
+            let error = ScanError::new(
+                0..0,
+                format!("{}: unexpected end of input", message),
+                self.scanner.source_id.to_string(),
+            );
             self.had_error = true;
             Err(error)
         }
