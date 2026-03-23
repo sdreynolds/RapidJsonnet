@@ -38,3 +38,28 @@ sh_test(
     args = ["$(location :greeting_custom_out)"],
     data = [":greeting_custom_out"],
 )
+
+jsonnet_library(
+    name = "utils_precompiled",
+    src = "utils.libsonnet",
+    precompile_bytecode = True,
+)
+
+jsonnet_library(
+    name = "greeting_precompiled_lib",
+    src = "greeting.jsonnet",
+    deps = [":utils_precompiled"],
+)
+
+jsonnet_to_json(
+    name = "greeting_precompiled_json",
+    main = ":greeting_precompiled_lib",
+)
+
+sh_test(
+    name = "precompiled_test",
+    size = "small",
+    srcs = ["verify_output.sh"],
+    args = ["$(location :greeting_precompiled_json)"],
+    data = [":greeting_precompiled_json"],
+)
