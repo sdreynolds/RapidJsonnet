@@ -32,9 +32,9 @@ The current `jsonnet_compiler` binary hardcodes output next to the input file (`
 
 No change from current behavior. Only the raw source file is passed through.
 
-### Private `_tool` attribute
+### Private `_compiler` attribute
 
-A new private `_tool` attribute is added to `jsonnet_library`, pointing to `//:jsonnet_compiler` with `executable = True` and `cfg = "exec"`. This mirrors the pattern used by `jsonnet_to_json` for `//:main`.
+A new private `_compiler` attribute is added to `jsonnet_library`, pointing to `//:jsonnet_compiler` with `executable = True` and `cfg = "exec"`. Named `_compiler` (not `_tool`) to distinguish from `jsonnet_to_json`'s `_tool` which points to `//:main`.
 
 ### What stays the same
 
