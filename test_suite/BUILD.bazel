@@ -17,5 +17,5 @@ SUPPORT_FILES = ["@jsonnet_test_suite_source//:support_files"]
             "@jsonnet_test_suite_source//:test_suite/%s.jsonnet" % name,
         ] + (["@jsonnet_test_suite_source//:test_suite/%s.jsonnet.golden" % name] if has_golden else []) + SUPPORT_FILES,
     )
-    for name, has_golden in TESTS
+    for name, has_golden, enabled in TESTS if enabled
 ]

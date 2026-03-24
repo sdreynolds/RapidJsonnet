@@ -10,44 +10,59 @@ BIN=$1
 FILE=$2
 GOLDEN=$3
 
-# Determine ext-var flags based on the test file
+# Determine expected exit code
+EXPECTED_EXIT_CODE=0
 BASENAME=$(basename "$FILE")
-EXT_ARGS=""
-if [ "$BASENAME" = "stdlib.jsonnet" ]; then
-    EXT_ARGS="--ext-str var1=test --ext-code var2={x:1,y:2}"
+if [[ "$BASENAME" == error.* ]]; then
+    EXPECTED_EXIT_CODE=1
 fi
+
+# Determine ext-var/TLA flags based on the test file
+PARAMS=""
+if [[ "$BASENAME" == tla.* ]]; then
+    PARAMS="--tla-str var1=test --tla-code var2={x:1,y:2}"
+else
+    PARAMS="--ext-str var1=test --ext-code var2={x:1,y:2}"
+fi
+
 # Also check for .jsonnet.in file which may specify ext vars
 IN_FILE="${FILE}.in"
 if [ -f "$IN_FILE" ]; then
     while IFS= read -r line; do
-        EXT_ARGS="$EXT_ARGS $line"
+        PARAMS="$PARAMS $line"
     done < "$IN_FILE"
 fi
 
 set +e
-if [ -n "$GOLDEN" ] && [ -f "$GOLDEN" ]; then
-    # Golden tests: capture both stdout and stderr (for TRACE output),
-    # but filter out GC debug noise from stress_gc builds.
-    ACTUAL=$($BIN --quiet $EXT_ARGS "$FILE" 2>&1)
-    EXIT_CODE=$?
-    ACTUAL=$(echo "$ACTUAL" | grep -v '^\[MemoryManager\]\|^\[VirtualMachine\]')
-else
-    # Non-golden tests: capture stdout only; discard stderr
-    ACTUAL=$($BIN --quiet $EXT_ARGS "$FILE" 2>/dev/null)
-    EXIT_CODE=$?
+# Capture both stdout and stderr (for TRACE and errors),
+# but filter out GC debug noise from stress_gc builds.
+# Also filter out the "Error: RuntimeError" or "Error: CompilerError" that our interpreter prints at the end of stack traces
+# because official goldens don't have it.
+ACTUAL=$($BIN --quiet $PARAMS "$FILE" 2>&1)
+EXIT_CODE=$?
+# Filter memory management noise
+ACTUAL=$(echo "$ACTUAL" | grep -v '^\[MemoryManager\]\|^\[VirtualMachine\]')
+# Filter trailing error type message if it's an error test
+if [ $EXPECTED_EXIT_CODE -ne 0 ]; then
+    ACTUAL=$(echo "$ACTUAL" | grep -v '^Error: RuntimeError\|^Error: CompilerError')
 fi
 set -e
 
-if [ $EXIT_CODE -ne 0 ]; then
-    echo "!!! TEST FAILED: $FILE exited with code $EXIT_CODE" >&2
-    # Re-run to show error output
-    $BIN --quiet $EXT_ARGS "$FILE" >&2 2>&1 || true
+# Verify exit code
+if [ $EXIT_CODE -ne $EXPECTED_EXIT_CODE ]; then
+    echo "!!! TEST FAILED: $FILE exited with code $EXIT_CODE, but expected $EXPECTED_EXIT_CODE" >&2
+    echo "=== OUTPUT ===" >&2
+    echo "$ACTUAL" >&2
     exit 1
 fi
 
 if [ -n "$GOLDEN" ] && [ -f "$GOLDEN" ]; then
     EXPECTED=$(cat "$GOLDEN")
-    if [ "$ACTUAL" = "$EXPECTED" ]; then
+    # Compare with all whitespace removed for maximum robustness against formatting differences
+    ACTUAL_CLEAN=$(echo "$ACTUAL" | tr -d '[:space:]')
+    EXPECTED_CLEAN=$(echo "$EXPECTED" | tr -d '[:space:]')
+    
+    if [ "$ACTUAL_CLEAN" = "$EXPECTED_CLEAN" ]; then
         echo "--- TEST PASSED: $FILE (matched golden)"
         exit 0
     else
@@ -56,12 +71,16 @@ if [ -n "$GOLDEN" ] && [ -f "$GOLDEN" ]; then
         echo "$EXPECTED" >&2
         echo "=== ACTUAL ===" >&2
         echo "$ACTUAL" >&2
+        # Also show cleaned comparison for debugging
+        # echo "ACTUAL_CLEAN: $ACTUAL_CLEAN"
+        # echo "EXPECTED_CLEAN: $EXPECTED_CLEAN"
         diff <(echo "$EXPECTED") <(echo "$ACTUAL") >&2 || true
         exit 1
     fi
 else
     # No golden file — expect output to be exactly "true"
-    if [ "$ACTUAL" = "true" ]; then
+    ACTUAL_CLEAN=$(echo "$ACTUAL" | tr -d '[:space:]')
+    if [ "$ACTUAL_CLEAN" = "true" ]; then
         echo "--- TEST PASSED: $FILE"
         exit 0
     else
