@@ -1,0 +1,22 @@
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "test_files",
+    srcs = glob(["test_suite/*.jsonnet"]),
+)
+
+filegroup(
+    name = "golden_files",
+    srcs = glob(["test_suite/*.jsonnet.golden"]),
+)
+
+filegroup(
+    name = "support_files",
+    srcs = glob([
+        "test_suite/lib/**",
+        "test_suite/this_file/**",
+        "test_suite/*.jsonnet.in",
+    ]),
+)
+
+exports_files(glob(["test_suite/**"]))
