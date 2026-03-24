@@ -149,3 +149,72 @@ jsonnet_to_json = rule(
     },
     doc = "Compiles a Jsonnet file to JSON using the RapidJsonnet binary.",
 )
+
+def _jsonnet_test_impl(ctx):
+    src_file = ctx.file.src
+
+    # Collect transitive inputs from deps
+    transitive_srcs_deps = []
+    transitive_data_deps = []
+
+    dep_srcs, dep_data = _collect_transitive(ctx.attr.deps)
+    transitive_srcs_deps.extend(dep_srcs)
+    transitive_data_deps.extend(dep_data)
+
+    all_srcs = depset([src_file], transitive = transitive_srcs_deps)
+    all_data = depset(ctx.files.data, transitive = transitive_data_deps)
+    all_inputs = depset(transitive = [all_srcs, all_data])
+
+    # Build the command: runner -J <dir> <src>
+    args = ["-J", "."]
+    args.append(src_file.path)
+
+    # Create a wrapper script that invokes the runner
+    wrapper = ctx.actions.declare_file(ctx.label.name + "_runner.sh")
+    ctx.actions.write(
+        output = wrapper,
+        content = "{tool} {args}".format(
+            tool = _q(ctx.executable._runner.short_path),
+            args = " ".join([_q(a) for a in args]),
+        ),
+        is_executable = True,
+    )
+
+    runfiles = ctx.runfiles(
+        files = [ctx.executable._runner],
+        transitive_files = all_inputs,
+    )
+    runfiles = runfiles.merge(ctx.attr._runner[DefaultInfo].default_runfiles)
+
+    return [
+        DefaultInfo(
+            executable = wrapper,
+            runfiles = runfiles,
+        ),
+    ]
+
+jsonnet_test = rule(
+    implementation = _jsonnet_test_impl,
+    test = True,
+    attrs = {
+        "src": attr.label(
+            allow_single_file = True,
+            mandatory = True,
+            doc = "The Jsonnet test source file.",
+        ),
+        "deps": attr.label_list(
+            providers = [JsonnetLibraryInfo],
+            doc = "jsonnet_library dependencies.",
+        ),
+        "data": attr.label_list(
+            allow_files = True,
+            doc = "Data files available at runtime.",
+        ),
+        "_runner": attr.label(
+            default = Label("//:jsonnet_test_runner"),
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+    doc = "Runs a Jsonnet test file using the test runner. Functions prefixed with 'test' are discovered and executed.",
+)

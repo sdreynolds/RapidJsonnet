@@ -1,6 +1,7 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//rules:jsonnet.bzl", "jsonnet_test")
 
-JSONNET_FILES = glob(["*.jsonnet"])
+JSONNET_FILES = glob(["*.jsonnet"], exclude = ["*_framework_test.jsonnet", "test_runner_*.jsonnet"])
 DATA_FILES = glob(["*.libsonnet", "*.txt", "*.bin"])
 
 [
@@ -18,3 +19,8 @@ DATA_FILES = glob(["*.libsonnet", "*.txt", "*.bin"])
     )
     for f in JSONNET_FILES
 ]
+
+jsonnet_test(
+    name = "test_framework_integration_test",
+    src = "test_framework_test.jsonnet",
+)
