@@ -55,17 +55,17 @@ crate.spec(
 
 crate.spec(
     package = "fory",
-    version = "0.14"
+    version = "0.16"
 )
 
 crate.spec(
     package = "fory-core",
-    version = "0.14"
+    version = "0.16"
 )
 
 crate.spec(
     package = "fory-derive",
-    version = "0.14"
+    version = "0.16"
 )
 
 crate.from_specs()
