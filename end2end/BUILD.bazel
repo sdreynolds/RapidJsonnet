@@ -24,3 +24,16 @@ jsonnet_test(
     name = "test_framework_integration_test",
     src = "test_framework_test.jsonnet",
 )
+
+sh_test(
+    name = "test_runner_failing_integration_test",
+    srcs = ["run_failing_test.sh"],
+    args = [
+        "$(location //:jsonnet_test_runner)",
+        "$(location test_runner_failing_test.jsonnet)",
+    ],
+    data = [
+        "//:jsonnet_test_runner",
+        "test_runner_failing_test.jsonnet",
+    ],
+)
