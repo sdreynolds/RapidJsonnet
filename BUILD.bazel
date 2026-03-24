@@ -171,6 +171,22 @@ rust_binary(
     ]
 )
 
+rust_binary(
+    name = "jsonnet_test_runner",
+    srcs = ["src/jsonnet_test_runner.rs"],
+    deps = [
+        ":compiler",
+        ":memory_manager",
+        ":scanner",
+        ":test_reporter",
+        ":test_runner",
+        ":virtual_machine",
+    ],
+    crate_features = [
+        "stress_gc"
+    ]
+)
+
 rust_test(
     name = "scanner_test",
     crate = ":scanner"
@@ -231,6 +247,7 @@ rustfmt_test(
         ":coverage",
         ":test_reporter",
         ":test_runner",
+        ":jsonnet_test_runner",
     ],
 )
 
