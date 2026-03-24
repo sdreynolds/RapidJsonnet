@@ -102,6 +102,11 @@ pub fn run_tests(
 ) -> Result<bool, TestRunnerError> {
     let (obj_idx, fields) = discover_test_fields(top_level_value, vm.memory_manager())?;
 
+    // Root the top-level object to prevent GC from collecting it (and its field
+    // thunks) between test calls. Under stress_gc, GC runs aggressively and would
+    // otherwise sweep the thunk closures we haven't forced yet.
+    vm.push_external_roots(vec![*top_level_value]);
+
     let mut results = Vec::with_capacity(fields.len());
 
     for field in &fields {
@@ -151,6 +156,9 @@ pub fn run_tests(
     }
 
     reporter.on_suite_complete(&results);
+
+    // Release the GC roots
+    vm.pop_external_roots();
 
     let all_passed = results
         .iter()

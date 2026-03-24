@@ -139,6 +139,17 @@ impl VirtualMachine {
         &self.memory_manager
     }
 
+    /// Push external GC roots to protect values from garbage collection.
+    /// Used by the test runner to keep the top-level object alive across test calls.
+    pub fn push_external_roots(&mut self, roots: Vec<Value>) {
+        self.memory_manager.push_external_roots(roots, Vec::new());
+    }
+
+    /// Pop the last set of external GC roots.
+    pub fn pop_external_roots(&mut self) {
+        self.memory_manager.pop_external_roots();
+    }
+
     /// Resolve an import path: try relative to the importing file first,
     /// then fall back to searching each JPATH directory.
     fn resolve_import_path(&self, import_path: &str) -> String {
