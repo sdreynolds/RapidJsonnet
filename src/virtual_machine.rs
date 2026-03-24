@@ -134,6 +134,11 @@ impl VirtualMachine {
         self.coverage_collector.take()
     }
 
+    /// Get a reference to the memory manager (for test runner field inspection).
+    pub fn memory_manager(&self) -> &MemoryManager {
+        &self.memory_manager
+    }
+
     /// Resolve an import path: try relative to the importing file first,
     /// then fall back to searching each JPATH directory.
     fn resolve_import_path(&self, import_path: &str) -> String {
@@ -1414,6 +1419,31 @@ impl VirtualMachine {
     /// Main interpretation loop
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
         self.interpret_until(0)
+    }
+
+    /// Force a field thunk to get its actual value.
+    /// Object field values are closures with arity=2 (self, super) that must be
+    /// forced to obtain the real value. This mirrors the ObjectIndex opcode behavior.
+    pub fn force_field_thunk(
+        &mut self,
+        closure_index: ClosureIndex,
+        obj_index: ObjectIndex,
+        super_obj: Option<ObjectIndex>,
+    ) -> Result<Value, RuntimeError> {
+        self.execute_thunk_sync(closure_index, Some(obj_index), super_obj)
+    }
+
+    /// Call a zero-argument closure and run it to completion.
+    /// Used by the test runner to invoke individual test functions
+    /// after force_field_thunk has yielded the function closure.
+    pub fn call_test_closure(
+        &mut self,
+        closure_index: ClosureIndex,
+    ) -> Result<Value, RuntimeError> {
+        self.push(Value::Closure(closure_index))?;
+        let target_frame_count = self.frame_count;
+        self.call_closure(closure_index, 0, None, None)?;
+        self.interpret_until(target_frame_count)
     }
 
     fn interpret_until(&mut self, target_frame_count: usize) -> Result<Value, RuntimeError> {
@@ -11601,5 +11631,110 @@ mod tests {
         let mut vm = VirtualMachine::new(chunk, memory_manager);
         let _ = vm.interpret();
         assert!(vm.take_coverage().is_none());
+    }
+
+    #[test]
+    fn test_force_field_thunk() {
+        let source = r#"{ x: 42 }"#;
+        let mut scanner = scanner::Scanner::new(source, "test_force");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = compiler::Compiler::new(&mut scanner, "test_force");
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        if let Value::Object(obj_idx) = result {
+            let obj = vm.memory_manager().load_object(obj_idx);
+            let (thunk_ci, super_obj) = {
+                let field = obj.properties.values().next().unwrap();
+                match field.value {
+                    Value::Closure(ci) => (ci, field.super_obj),
+                    _ => panic!("Expected thunk closure"),
+                }
+            };
+            let val = vm.force_field_thunk(thunk_ci, obj_idx, super_obj).unwrap();
+            if let Value::Number(n) = val {
+                assert_eq!(n, 42.0);
+            } else {
+                panic!("Expected number, got {:?}", val);
+            }
+        } else {
+            panic!("Expected object");
+        }
+    }
+
+    #[test]
+    fn test_call_test_closure_pass() {
+        let source = r#"{ testPass(): std.assertEqual(1 + 1, 2) }"#;
+        let mut scanner = scanner::Scanner::new(source, "test_call");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = compiler::Compiler::new(&mut scanner, "test_call");
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        if let Value::Object(obj_idx) = result {
+            let obj = vm.memory_manager().load_object(obj_idx);
+            let (thunk_ci, super_obj) = {
+                let mut found = None;
+                for (key, field) in &obj.properties {
+                    let name = vm.memory_manager().load_string(*key);
+                    if name == "testPass" {
+                        if let Value::Closure(ci) = field.value {
+                            found = Some((ci, field.super_obj));
+                        }
+                    }
+                }
+                found.expect("testPass should be a thunk")
+            };
+            let forced = vm.force_field_thunk(thunk_ci, obj_idx, super_obj).unwrap();
+            if let Value::Closure(func_ci) = forced {
+                let result = vm.call_test_closure(func_ci);
+                assert!(result.is_ok(), "testPass should succeed");
+            } else {
+                panic!("Expected closure after forcing thunk");
+            }
+        } else {
+            panic!("Expected object result");
+        }
+    }
+
+    #[test]
+    fn test_call_test_closure_fail() {
+        let source = r#"{ testFail(): std.assertEqual(1, 2) }"#;
+        let mut scanner = scanner::Scanner::new(source, "test_call_fail");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = compiler::Compiler::new(&mut scanner, "test_call_fail");
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        if let Value::Object(obj_idx) = result {
+            let obj = vm.memory_manager().load_object(obj_idx);
+            let (thunk_ci, super_obj) = {
+                let mut found = None;
+                for (key, field) in &obj.properties {
+                    let name = vm.memory_manager().load_string(*key);
+                    if name == "testFail" {
+                        if let Value::Closure(ci) = field.value {
+                            found = Some((ci, field.super_obj));
+                        }
+                    }
+                }
+                found.expect("testFail should be a thunk")
+            };
+            let forced = vm.force_field_thunk(thunk_ci, obj_idx, super_obj).unwrap();
+            if let Value::Closure(func_ci) = forced {
+                let result = vm.call_test_closure(func_ci);
+                assert!(result.is_err(), "testFail should return an error");
+            } else {
+                panic!("Expected closure after forcing thunk");
+            }
+        } else {
+            panic!("Expected object result");
+        }
     }
 }
