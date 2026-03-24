@@ -5,3 +5,4 @@
 /rust-project.json
 *.libsonnetc
 *.jsonnetc
+/.worktrees
