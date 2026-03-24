@@ -8,6 +8,7 @@ use scanner;
 use serialized_chunk;
 use std::ops::Range;
 
+use coverage::CoverageCollector;
 use native::{self, call_native};
 
 extern crate serde_yaml;
@@ -74,6 +75,8 @@ pub struct VirtualMachine {
     std_object: Option<Value>,
     /// Library search paths for import resolution (like -J / --jpath)
     jpaths: Vec<String>,
+    /// Optional coverage collector for span tracking during test runs
+    coverage_collector: Option<CoverageCollector>,
 }
 
 impl VirtualMachine {
@@ -112,12 +115,23 @@ impl VirtualMachine {
             pending_field_name: None,
             std_object: None,
             jpaths: Vec::new(),
+            coverage_collector: None,
         }
     }
 
     /// Set library search paths for import resolution
     pub fn set_jpaths(&mut self, jpaths: Vec<String>) {
         self.jpaths = jpaths;
+    }
+
+    /// Enable span-level coverage collection.
+    pub fn enable_coverage(&mut self) {
+        self.coverage_collector = Some(CoverageCollector::new());
+    }
+
+    /// Extract collected coverage data, leaving None in its place.
+    pub fn take_coverage(&mut self) -> Option<CoverageCollector> {
+        self.coverage_collector.take()
     }
 
     /// Resolve an import path: try relative to the importing file first,
@@ -1406,6 +1420,16 @@ impl VirtualMachine {
         loop {
             // Store the start IP of this instruction for error reporting
             self.instruction_start_ip = self.current_frame().ip;
+
+            // Record span for coverage if enabled
+            if self.coverage_collector.is_some() {
+                let chunk = self.current_chunk();
+                let span = chunk.get_span(self.instruction_start_ip).cloned();
+                let source_id = chunk.source_id.to_string();
+                if let (Some(collector), Some(span)) = (&mut self.coverage_collector, span) {
+                    collector.record(&source_id, &span);
+                }
+            }
 
             let frame = self.current_frame();
             let chunk = self.current_chunk();
@@ -11547,5 +11571,35 @@ mod tests {
                 .contains("Undefined external variable"),
             "expected 'Undefined external variable' in error message"
         );
+    }
+
+    #[test]
+    fn test_coverage_collector_records_spans() {
+        let source = "1 + 2";
+        let mut scanner = scanner::Scanner::new(source, "test_coverage");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = compiler::Compiler::new(&mut scanner, "test_coverage");
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        vm.enable_coverage();
+        let _ = vm.interpret();
+        let collector = vm.take_coverage().unwrap();
+
+        assert!(collector.total_spans_hit() > 0);
+        assert!(collector.spans_for_source("test_coverage").is_some());
+    }
+
+    #[test]
+    fn test_coverage_disabled_by_default() {
+        let source = "1 + 2";
+        let mut scanner = scanner::Scanner::new(source, "test_no_cov");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = compiler::Compiler::new(&mut scanner, "test_no_cov");
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let _ = vm.interpret();
+        assert!(vm.take_coverage().is_none());
     }
 }
