@@ -139,6 +139,11 @@ rust_library(
     srcs = ["src/coverage.rs"],
 )
 
+rust_library(
+    name = "test_reporter",
+    srcs = ["src/test_reporter.rs"],
+)
+
 rust_binary(
     name = "jsonnet_compiler",
     srcs = ["src/jsonnet_compiler.rs"],
@@ -194,6 +199,11 @@ rust_test(
     crate = ":coverage"
 )
 
+rust_test(
+    name = "test_reporter_test",
+    crate = ":test_reporter"
+)
+
 rustfmt_test(
     name = "format_test",
     targets = [
@@ -207,6 +217,7 @@ rustfmt_test(
         ":serialized_chunk",
         ":jsonnet_compiler",
         ":coverage",
+        ":test_reporter",
     ],
 )
 
