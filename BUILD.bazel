@@ -144,6 +144,18 @@ rust_library(
     srcs = ["src/test_reporter.rs"],
 )
 
+rust_library(
+    name = "test_runner",
+    srcs = ["src/test_runner.rs"],
+    deps = [
+        ":chunk",
+        ":coverage",
+        ":memory_manager",
+        ":test_reporter",
+        ":virtual_machine",
+    ],
+)
+
 rust_binary(
     name = "jsonnet_compiler",
     srcs = ["src/jsonnet_compiler.rs"],
@@ -218,6 +230,7 @@ rustfmt_test(
         ":jsonnet_compiler",
         ":coverage",
         ":test_reporter",
+        ":test_runner",
     ],
 )
 
