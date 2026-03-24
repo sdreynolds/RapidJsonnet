@@ -4,5 +4,5 @@
   testAssertKeyword():
     assert std.type("hello") == "string" : "type check";
     true,
-  testZArrayLength(): std.assertEqual(std.length([1, 2, 3]), 3),
+  testArrayLength(): std.assertEqual(std.length([1, 2, 3]), 3),
 }

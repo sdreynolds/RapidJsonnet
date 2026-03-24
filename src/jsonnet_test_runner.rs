@@ -1,13 +1,13 @@
 use compiler::Compiler;
 use memory_manager::MemoryManager;
 use scanner::Scanner;
-use test_reporter::TextReporter;
-use test_runner;
-use virtual_machine::VirtualMachine;
 use std::env;
 use std::fs;
 use std::io;
 use std::process;
+use test_reporter::TextReporter;
+use test_runner;
+use virtual_machine::VirtualMachine;
 
 fn main() {
     let mut jpaths: Vec<String> = Vec::new();
