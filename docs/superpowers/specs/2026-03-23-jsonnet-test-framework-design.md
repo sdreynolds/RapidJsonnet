@@ -21,10 +21,23 @@ Test files are standard Jsonnet files that export a top-level object. Any field 
 }
 ```
 
+**Test field evaluation:**
+
+Test fields are zero-argument functions (`testFoo(): expr`). The runner evaluates the top-level object, then for each `test*` field:
+1. Force the field's thunk to obtain the closure value.
+2. Verify it is a `Value::Closure` wrapping a zero-argument function.
+3. Call the closure with no arguments.
+
+Non-function `test*` fields (e.g., `testFoo: expr`) are not supported — the runner reports an error for these, since the thunk evaluation itself could have side effects that make pass/fail ambiguous.
+
 **Pass/fail semantics:**
-- A test **passes** if the function returns without throwing a runtime error.
+- A test **passes** if the function call returns without throwing a runtime error.
 - A test **fails** if a runtime error is thrown (via `assert`, `std.assertEqual`, `error`, etc.).
 - The error message is captured and included in the test report.
+
+**Test ordering:**
+
+Test functions are sorted alphabetically by name before execution, ensuring deterministic output regardless of `HashMap` iteration order.
 
 ## Architecture
 
@@ -34,14 +47,19 @@ A new `CoverageCollector` struct tracks which source spans are executed:
 
 ```rust
 pub struct CoverageCollector {
-    hit_spans: HashSet<(String, Range<usize>)>,  // (source_id, span range)
+    /// Keyed by source_id, values are sets of (start, end) span pairs.
+    hit_spans: HashMap<String, HashSet<(usize, usize)>>,
 }
 ```
 
+Using `HashMap<String, HashSet<(usize, usize)>>` avoids hashing a `(String, Range)` tuple on every instruction. The source_id key is hashed once per source file, and span pairs are cheap integer tuples.
+
 Lives in `src/coverage.rs`. Provides:
-- `record(source_id, span)` — insert a span hit
-- `merge(other)` — combine coverage from multiple test runs
+- `record(source_id: &str, span: Range<usize>)` — insert a span hit
+- `merge(other: CoverageCollector)` — combine coverage from multiple test runs
 - Accessors for reporting
+
+Coverage collection is opt-in via a `--coverage` CLI flag on the test runner. When not requested, the VM's `coverage_collector` remains `None`.
 
 ### VM Integration
 
@@ -84,15 +102,19 @@ pub enum TestOutcome {
 ```
 
 **Execution flow:**
-1. Compile and evaluate the test source file to obtain a top-level object.
-2. Iterate the object's visible fields, filtering those whose name starts with `"test"`.
+1. Compile and evaluate the test source file to obtain a top-level object. If the result is not an object, report an error and exit.
+2. Iterate the object's visible fields (using `MemoryManager::load_object()` and `load_string()` to resolve `StringIndex` names), filter those starting with `"test"`, and sort alphabetically.
 3. For each test function:
-   - Enable coverage on the VM.
-   - Call the function with no arguments.
+   - Enable coverage on the VM (if `--coverage` flag is set).
+   - Force the field thunk to obtain the closure value.
+   - Verify it is a zero-argument function; report error if not.
+   - Call the closure via a new `VM::call_closure(&mut self, closure: ClosureIndex) -> Result<Value, RuntimeError>` method that pushes a new call frame and runs until it returns.
    - If it returns without error: mark as pass.
    - If it throws a runtime error: mark as fail, capture the error message.
    - Extract coverage data from the VM.
 4. Pass `Vec<TestResult>` and aggregated coverage to the reporter.
+
+**VM reuse:** A single VM instance is reused across all test functions. After evaluating the top-level object, each test call pushes/pops its own call frame via `call_closure()`. The stack is clean between calls because each frame manages its own stack window. A new public method `call_closure()` is added to `VirtualMachine` to support calling a closure after initial `interpret()` has returned.
 
 ### Reporter Trait
 
@@ -150,7 +172,8 @@ Implementation:
 - Collects transitive sources from `deps` via `JsonnetLibraryInfo` (same pattern as `jsonnet_to_json`).
 - Constructs args: test source file path + `-J` paths for import resolution.
 - The runner binary is a tool dependency.
-- Produces a `native_test` or equivalent so `bazel test` works natively.
+- Defined with `rule(test = True, ...)` making it a native Bazel test rule, so `bazel test` discovers and runs it directly.
+- Test environment variables (`TEST_TMPDIR`, etc.) are available but not required by the runner.
 
 ## File Organization
 
