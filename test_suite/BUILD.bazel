@@ -1,34 +1,21 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(":test_manifest.bzl", "TESTS")
 
-# Tests from the official Jsonnet test suite (google/jsonnet/test_suite).
-# Tests with .golden files compare output against expected.
-# Tests without .golden files expect output to be exactly "true".
-
-JSONNET_FILES = glob(["*.jsonnet"])
-
-GOLDEN_FILES = glob(["*.jsonnet.golden"])
-
-SUPPORT_FILES = glob([
-    "lib/**",
-    "this_file/**",
-    "*.jsonnet.in",
-])
-
-# Map from test file to its golden file (if it exists)
-GOLDEN_MAP = {f.replace(".golden", ""): f for f in GOLDEN_FILES}
+# Support files from the official Jsonnet test suite.
+SUPPORT_FILES = ["@jsonnet_test_suite_source//:support_files"]
 
 [
     sh_test(
-        name = f.replace(".jsonnet", "").replace(".", "_") + "_test",
+        name = name + "_test",
         srcs = ["run_test.sh"],
         args = [
             "$(location //:main)",
-            "$(location %s)" % f,
-        ] + (["$(location %s)" % GOLDEN_MAP[f]] if f in GOLDEN_MAP else []),
+            "$(location @jsonnet_test_suite_source//:test_suite/%s.jsonnet)" % name,
+        ] + (["$(location @jsonnet_test_suite_source//:test_suite/%s.jsonnet.golden)" % name] if has_golden else []),
         data = [
             "//:main",
-            f,
-        ] + ([GOLDEN_MAP[f]] if f in GOLDEN_MAP else []) + SUPPORT_FILES,
+            "@jsonnet_test_suite_source//:test_suite/%s.jsonnet" % name,
+        ] + (["@jsonnet_test_suite_source//:test_suite/%s.jsonnet.golden" % name] if has_golden else []) + SUPPORT_FILES,
     )
-    for f in JSONNET_FILES
+    for name, has_golden in TESTS
 ]
