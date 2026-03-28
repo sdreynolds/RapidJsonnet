@@ -9,11 +9,11 @@ SUPPORT_FILES = ["@jsonnet_test_suite_source//:support_files"]
         name = name + "_test",
         srcs = ["run_test.sh"],
         args = [
-            "$(location //:main)",
+            "$(location //:main_stress)",
             "$(location @jsonnet_test_suite_source//:test_suite/%s.jsonnet)" % name,
         ] + (["$(location @jsonnet_test_suite_source//:test_suite/%s.jsonnet.golden)" % name] if has_golden else []),
         data = [
-            "//:main",
+            "//:main_stress",
             "@jsonnet_test_suite_source//:test_suite/%s.jsonnet" % name,
         ] + (["@jsonnet_test_suite_source//:test_suite/%s.jsonnet.golden" % name] if has_golden else []) + SUPPORT_FILES,
     )

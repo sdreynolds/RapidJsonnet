@@ -14,9 +14,19 @@ rust_binary(
         "@crates//:ariadne",
         "@crates//:serde_json",
     ],
-    crate_features = [
-        "stress_gc"
-    ]
+)
+
+rust_binary(
+    name = "main_stress",
+    srcs = ["src/main.rs"],
+    deps = [
+        ":compiler_stress",
+        ":memory_manager_stress",
+        ":virtual_machine_stress",
+        ":scanner",
+        "@crates//:ariadne",
+        "@crates//:serde_json",
+    ],
 )
 
 rust_library(
@@ -25,9 +35,6 @@ rust_library(
     deps = [
         "@crates//:ariadne",
     ],
-    crate_features = [
-        "stress_gc"
-    ]
 )
 
 rust_library(
@@ -36,9 +43,6 @@ rust_library(
     deps = [
         ":scanner",
     ],
-    crate_features = [
-        "stress_gc"
-    ]
 )
 
 rust_library(
@@ -49,9 +53,6 @@ rust_library(
         ":scanner",
         "@crates//:slotmap"
     ],
-    crate_features = [
-        "stress_gc"
-    ]
 )
 
 rust_library(
@@ -69,9 +70,24 @@ rust_library(
         "@crates//:serde_yaml",
         "@crates//:slotmap"
     ],
-    crate_features = [
-        "stress_gc",
-    ]
+)
+
+rust_library(
+    name = "virtual_machine_stress",
+    crate_name = "virtual_machine",
+    srcs = ["src/virtual_machine.rs"],
+    deps = [
+        ":chunk",
+        ":compiler_stress",
+        ":coverage",
+        ":memory_manager_stress",
+        ":scanner",
+        ":native_stress",
+        ":serialized_chunk_stress",
+        "@crates//:serde_json",
+        "@crates//:serde_yaml",
+        "@crates//:slotmap"
+    ],
 )
 
 rust_library(
@@ -85,6 +101,30 @@ rust_library(
         "@crates//:sha1",
         "@crates//:sha3",
     ],
+)
+
+rust_library(
+    name = "native_stress",
+    crate_name = "native",
+    srcs = ["src/native.rs"],
+    deps = [
+        ":chunk",
+        ":memory_manager_stress",
+        "@crates//:md5",
+        "@crates//:sha2",
+        "@crates//:sha1",
+        "@crates//:sha3",
+    ],
+)
+
+rust_library(
+    name = "memory_manager_stress",
+    crate_name = "memory_manager",
+    srcs = ["src/memory_manager.rs"],
+    deps = [
+        "@crates//:slotmap",
+        ":chunk",
+    ],
     crate_features = [
         "stress_gc",
     ]
@@ -97,9 +137,6 @@ rust_library(
         "@crates//:slotmap",
         ":chunk",
     ],
-    crate_features = [
-        "stress_gc",
-    ]
 )
 
 rust_library(
@@ -111,9 +148,18 @@ rust_library(
         ":parser",
         ":memory_manager",
     ],
-    crate_features = [
-        "stress_gc"
-    ]
+)
+
+rust_library(
+    name = "compiler_stress",
+    crate_name = "compiler",
+    srcs = ["src/compiler.rs", "src/compiler_integration_test.rs"],
+    deps = [
+        ":chunk",
+        ":scanner",
+        ":parser",
+        ":memory_manager_stress",
+    ],
 )
 
 rust_library(
@@ -129,9 +175,22 @@ rust_library(
     proc_macro_deps = [
         "@crates//:fory-derive",
     ],
-    crate_features = [
-        "stress_gc"
-    ]
+)
+
+rust_library(
+    name = "serialized_chunk_stress",
+    crate_name = "serialized_chunk",
+    srcs = ["src/serialized_chunk.rs"],
+    deps = [
+        ":chunk",
+        ":memory_manager_stress",
+        "@crates//:fory",
+        "@crates//:fory-core",
+        "@crates//:slotmap",
+    ],
+    proc_macro_deps = [
+        "@crates//:fory-derive",
+    ],
 )
 
 rust_library(
@@ -166,9 +225,6 @@ rust_binary(
         ":serialized_chunk",
         ":chunk",
     ],
-    crate_features = [
-        "stress_gc"
-    ]
 )
 
 rust_binary(
@@ -182,9 +238,6 @@ rust_binary(
         ":test_runner",
         ":virtual_machine",
     ],
-    crate_features = [
-        "stress_gc"
-    ]
 )
 
 rust_test(
@@ -250,5 +303,3 @@ rustfmt_test(
         ":jsonnet_test_runner",
     ],
 )
-
-

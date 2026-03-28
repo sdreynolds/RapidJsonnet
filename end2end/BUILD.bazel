@@ -9,11 +9,11 @@ DATA_FILES = glob(["*.libsonnet", "*.txt", "*.bin"])
         name = f.replace(".jsonnet", "_test"),
         srcs = ["run_test.sh"],
         args = [
-            "$(location //:main)",
+            "$(location //:main_stress)",
             "$(location %s)" % f,
         ],
         data = [
-            "//:main",
+            "//:main_stress",
             f,
         ] + DATA_FILES,
     )

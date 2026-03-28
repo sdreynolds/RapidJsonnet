@@ -30,8 +30,8 @@ RapidJsonnet is a bytecode interpreter implementation of Jsonnet built with Rust
 ```bash
 bazel build //...          # Build all targets
 bazel test //...           # Run all tests
-bazel run //:main          # Run REPL mode
-bazel run //:main -- ~/Projects/RapidJsonnet/end2end/file.jsonnet  # Execute jsonnet file
+bazel run //:main_stress          # Run REPL mode
+bazel run //:main_stress -- ~/Projects/RapidJsonnet/end2end/file.jsonnet  # Execute jsonnet file
 ```
 
 **Individual Components:**
