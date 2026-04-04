@@ -6,3 +6,4 @@
 *.libsonnetc
 *.jsonnetc
 /.worktrees
+/.claude/settings.local.json

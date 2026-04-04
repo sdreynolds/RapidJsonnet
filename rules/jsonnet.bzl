@@ -165,8 +165,10 @@ def _jsonnet_test_impl(ctx):
     all_data = depset(ctx.files.data, transitive = transitive_data_deps)
     all_inputs = depset(transitive = [all_srcs, all_data])
 
-    # Build the command: runner -J <dir> <src>
-    args = ["-J", "."]
+    # Build the command: runner --test-name <target> -J <dir> <src>
+    args = ["--test-name", ctx.label.name, "-J", "."]
+    if ctx.attr.coverage:
+        args.append("--coverage")
     args.append(src_file.path)
 
     # Create a wrapper script that invokes the runner
@@ -209,6 +211,10 @@ jsonnet_test = rule(
         "data": attr.label_list(
             allow_files = True,
             doc = "Data files available at runtime.",
+        ),
+        "coverage": attr.string(
+            default = "lcov",
+            doc = "Coverage format to emit. Supported values: \"lcov\". When set, passes --coverage to the runner; output is written to $TEST_UNDECLARED_OUTPUTS_DIR/coverage.lcov during bazel test.",
         ),
         "_runner": attr.label(
             default = Label("//:jsonnet_test_runner"),

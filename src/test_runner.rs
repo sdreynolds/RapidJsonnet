@@ -1,4 +1,5 @@
 use chunk::{ClosureIndex, FieldVisibility, ObjectIndex, RuntimeError, Value};
+use coverage::CoverageCollector;
 use memory_manager::MemoryManager;
 use test_reporter::{TestOutcome, TestReporter, TestResult};
 use virtual_machine::VirtualMachine;
@@ -99,7 +100,7 @@ pub fn run_tests(
     top_level_value: &Value,
     reporter: &mut dyn TestReporter,
     collect_coverage: bool,
-) -> Result<bool, TestRunnerError> {
+) -> Result<(bool, Option<CoverageCollector>), TestRunnerError> {
     let (obj_idx, fields) = discover_test_fields(top_level_value, vm.memory_manager())?;
 
     // Root the top-level object to prevent GC from collecting it (and its field
@@ -108,6 +109,8 @@ pub fn run_tests(
     vm.push_external_roots(vec![*top_level_value]);
 
     let mut results = Vec::with_capacity(fields.len());
+
+    let mut accumulated_coverage: Option<CoverageCollector> = None;
 
     for field in &fields {
         reporter.on_test_start(&field.name);
@@ -152,6 +155,14 @@ pub fn run_tests(
         };
 
         reporter.on_test_complete(&result);
+        if collect_coverage {
+            if let Some(test_coverage) = vm.take_coverage() {
+                match &mut accumulated_coverage {
+                    Some(acc) => acc.merge(test_coverage),
+                    None => accumulated_coverage = Some(test_coverage),
+                }
+            }
+        }
         results.push(result);
     }
 
@@ -163,5 +174,5 @@ pub fn run_tests(
     let all_passed = results
         .iter()
         .all(|r| matches!(r.outcome, TestOutcome::Pass));
-    Ok(all_passed)
+    Ok((all_passed, accumulated_coverage))
 }

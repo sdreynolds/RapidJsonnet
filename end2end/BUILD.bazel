@@ -30,7 +30,7 @@ jsonnet_test(
     src = "test_framework_test.jsonnet",
     deps = [
         ":integration_lib"
-    ]
+    ],
 )
 
 sh_test(
@@ -43,5 +43,19 @@ sh_test(
     data = [
         "//:jsonnet_test_runner",
         "test_runner_failing_test.jsonnet",
+    ],
+)
+
+sh_test(
+    name = "lcov_coverage_integration_test",
+    srcs = ["run_lcov_coverage_test.sh"],
+    args = [
+        "$(location //:jsonnet_test_runner)",
+        "$(location test_framework_test.jsonnet)",
+    ],
+    data = [
+        "//:jsonnet_test_runner",
+        "test_framework_test.jsonnet",
+        "import_integration_test.libsonnet",
     ],
 )

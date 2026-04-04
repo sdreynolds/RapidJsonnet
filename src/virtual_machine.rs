@@ -1382,8 +1382,16 @@ impl VirtualMachine {
 
             let mut sub_vm = VirtualMachine::new_from_owned(owned_chunk, actual_memory_manager);
             sub_vm.jpaths = self.jpaths.clone();
+            if self.coverage_collector.is_some() {
+                sub_vm.enable_coverage();
+            }
             let result = sub_vm.interpret();
 
+            if let Some(sub_coverage) = sub_vm.take_coverage() {
+                if let Some(parent_coverage) = &mut self.coverage_collector {
+                    parent_coverage.merge(sub_coverage);
+                }
+            }
             self.memory_manager = sub_vm.memory_manager;
             self.memory_manager.pop_external_roots();
 

@@ -1,4 +1,5 @@
 use compiler::Compiler;
+use lcov::generate_lcov;
 use memory_manager::MemoryManager;
 use scanner::Scanner;
 use std::env;
@@ -12,6 +13,8 @@ use virtual_machine::VirtualMachine;
 fn main() {
     let mut jpaths: Vec<String> = Vec::new();
     let mut collect_coverage = false;
+    let mut lcov_output: Option<String> = None;
+    let mut test_name: Option<String> = None;
     let mut args_iter = env::args().skip(1).peekable();
 
     while let Some(arg) = args_iter.peek().cloned() {
@@ -29,6 +32,22 @@ fn main() {
         } else if arg == "--coverage" {
             collect_coverage = true;
             args_iter.next();
+        } else if arg == "--lcov-output" {
+            args_iter.next();
+            if let Some(path) = args_iter.next() {
+                lcov_output = Some(path);
+            }
+        } else if arg.starts_with("--lcov-output=") {
+            lcov_output = Some(arg["--lcov-output=".len()..].to_string());
+            args_iter.next();
+        } else if arg == "--test-name" {
+            args_iter.next();
+            if let Some(name) = args_iter.next() {
+                test_name = Some(name);
+            }
+        } else if arg.starts_with("--test-name=") {
+            test_name = Some(arg["--test-name=".len()..].to_string());
+            args_iter.next();
         } else {
             break;
         }
@@ -37,7 +56,9 @@ fn main() {
     let filename = match args_iter.next() {
         Some(f) => f,
         None => {
-            eprintln!("Usage: jsonnet_test_runner [--coverage] [-J <path>]... <test_file.jsonnet>");
+            eprintln!(
+                "Usage: jsonnet_test_runner [--coverage] [--lcov-output <path>] [--test-name <name>] [-J <path>]... <test_file.jsonnet>"
+            );
             process::exit(2);
         }
     };
@@ -77,8 +98,49 @@ fn main() {
     let mut reporter = TextReporter::new(stdout.lock());
 
     match test_runner::run_tests(&mut vm, &top_level, &mut reporter, collect_coverage) {
-        Ok(true) => process::exit(0),
-        Ok(false) => process::exit(1),
+        Ok((all_passed, mut maybe_coverage)) => {
+            // Remove the test entrypoint file itself — coverage should only reflect
+            // library code under test, not the test driver.
+            if let Some(coverage) = &mut maybe_coverage {
+                coverage.remove_source(&filename);
+            }
+            if let Some(coverage) = &maybe_coverage {
+                let needs_lcov = lcov_output.is_some()
+                    || std::env::var("TEST_UNDECLARED_OUTPUTS_DIR").is_ok()
+                    || std::env::var("COVERAGE_DIR").is_ok();
+                if needs_lcov {
+                    let tn = test_name.as_deref().unwrap_or("");
+                    let lcov_content = generate_lcov(coverage, tn);
+                    // Explicit --lcov-output path
+                    if let Some(path) = &lcov_output {
+                        if let Err(e) = fs::write(path, &lcov_content) {
+                            eprintln!("Warning: failed to write LCOV to {}: {}", path, e);
+                        }
+                    }
+                    // bazel test: write to undeclared outputs so the file appears at
+                    // bazel-testlogs/<pkg>/<target>/test.outputs/<test_name>.lcov
+                    if let Ok(undeclared_dir) = std::env::var("TEST_UNDECLARED_OUTPUTS_DIR") {
+                        let lcov_filename = if tn.is_empty() {
+                            "coverage.lcov".to_string()
+                        } else {
+                            format!("{}.lcov", tn)
+                        };
+                        let out = std::path::Path::new(&undeclared_dir).join(&lcov_filename);
+                        if let Err(e) = fs::write(&out, &lcov_content) {
+                            eprintln!("Warning: failed to write {}: {}", lcov_filename, e);
+                        }
+                    }
+                    // bazel coverage: write LCOV as coverage.dat for Bazel's merger
+                    if let Ok(coverage_dir) = std::env::var("COVERAGE_DIR") {
+                        let dat = std::path::Path::new(&coverage_dir).join("coverage.dat");
+                        if let Err(e) = fs::write(&dat, &lcov_content) {
+                            eprintln!("Warning: failed to write coverage.dat: {}", e);
+                        }
+                    }
+                }
+            }
+            process::exit(if all_passed { 0 } else { 1 });
+        }
         Err(e) => {
             eprintln!("Test runner error: {}", e);
             process::exit(2);

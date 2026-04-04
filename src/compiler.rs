@@ -1059,7 +1059,16 @@ impl<'a> Compiler<'a> {
         arity: u8,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
-        self.emit_closure_with_params(chunk, upvalues, arity, arity, Vec::new(), memory_manager)
+        let span = self.current_span();
+        self.emit_closure_with_params(
+            chunk,
+            upvalues,
+            arity,
+            arity,
+            Vec::new(),
+            span,
+            memory_manager,
+        )
     }
 
     /// Emit a Closure instruction with function metadata including parameter names and defaults
@@ -1070,10 +1079,9 @@ impl<'a> Compiler<'a> {
         arity: u8,
         required_params: u8,
         param_names: Vec<StringIndex>,
+        span: Range<usize>,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
-        let span = self.current_span();
-
         // Convert chunk to owned chunk for storage
         let owned_chunk = chunk.into_owned();
 
@@ -1122,9 +1130,9 @@ impl<'a> Compiler<'a> {
         &mut self,
         chunk: chunk::Chunk,
         upvalues: Vec<CompilerUpvalue>,
+        span: Range<usize>,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
-        let span = self.current_span();
         let owned_chunk = chunk.into_owned();
         let func_result =
             memory_manager.allocate_function(None, 0, upvalues.len() as u8, owned_chunk);
@@ -1153,6 +1161,7 @@ impl<'a> Compiler<'a> {
         min_bp: u8,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
+        let thunk_span = self.current_span(); // capture before parsing the element
         let saved_state = self.begin_function();
         self.begin_scope();
         self.declare_local("<closure>".to_string())?;
@@ -1161,7 +1170,7 @@ impl<'a> Compiler<'a> {
         self.emit_opcode(Opcode::Return, return_span);
         self.end_scope();
         let (chunk, upvalues) = self.end_function(saved_state);
-        self.emit_thunk(chunk, upvalues, memory_manager)?;
+        self.emit_thunk(chunk, upvalues, thunk_span, memory_manager)?;
         Ok(())
     }
 
@@ -1861,7 +1870,15 @@ impl<'a> Compiler<'a> {
                     let (chunk, upvalues) = self.end_function(saved_state);
 
                     // Assertions take 2 arguments (self, super) just like fields
-                    self.emit_closure(chunk, upvalues, 2, memory_manager)?;
+                    self.emit_closure_with_params(
+                        chunk,
+                        upvalues,
+                        2,
+                        2,
+                        Vec::new(),
+                        key_token_span.clone(),
+                        memory_manager,
+                    )?;
 
                     // Attach the closure to the object
                     self.emit_opcode(Opcode::Assert, key_token.span.clone());
@@ -2014,8 +2031,9 @@ impl<'a> Compiler<'a> {
             let prev_tail = self.in_tail_position;
             self.in_tail_position = !is_override; // can't tail-call if we need to Add after
             if let Some(params) = method_params {
-                // Method shorthand: compile as function value
-                self.compile_function_body(params, memory_manager)?;
+                // Method shorthand: compile as function value; use field name span so
+                // the definition line is covered when the method is forced/called.
+                self.compile_function_body(params, key_token_span.clone(), memory_manager)?;
             } else {
                 self.parse_expr(0, memory_manager)?;
             }
@@ -2057,8 +2075,17 @@ impl<'a> Compiler<'a> {
             let (field_chunk, field_upvalues) =
                 self.end_function((saved_scope_depth, saved_function_type));
 
-            // Emit Closure with arity 2 (self, super)
-            self.emit_closure(field_chunk, field_upvalues, 2, memory_manager)?;
+            // Emit Closure with arity 2 (self, super), attributed to the field name span
+            // so that the field definition line is marked as covered when the field is used.
+            self.emit_closure_with_params(
+                field_chunk,
+                field_upvalues,
+                2,
+                2,
+                Vec::new(),
+                key_token_span.clone(),
+                memory_manager,
+            )?;
 
             // Emit ObjectInsert with visibility operand
             // ObjectInsert consumes the key string from the stack
@@ -2437,7 +2464,7 @@ impl<'a> Compiler<'a> {
                         Token::Operator("=".to_string()),
                         "Expected '=' after parameters",
                     )?;
-                    self.compile_function_body(parameters, memory_manager)?;
+                    self.compile_function_body(parameters, span.clone(), memory_manager)?;
                 } else {
                     self.parser.consume(
                         Token::Operator("=".to_string()),
@@ -2757,7 +2784,15 @@ impl<'a> Compiler<'a> {
                 self.end_function((saved_scope_depth, saved_function_type));
 
             // Emit Closure with arity 2 (self, super)
-            self.emit_closure(field_chunk, field_upvalues, 2, memory_manager)?;
+            self.emit_closure_with_params(
+                field_chunk,
+                field_upvalues,
+                2,
+                2,
+                Vec::new(),
+                span.clone(),
+                memory_manager,
+            )?;
 
             // ObjectInsert consumes the key string from the stack
             self.pop_type(); // key type
@@ -3322,6 +3357,11 @@ impl<'a> Compiler<'a> {
             }
 
             self.parser.advance()?; // consume identifier
+            let ident_span = self
+                .parser
+                .previous_token()
+                .map(|t| t.span.clone())
+                .unwrap_or(0..0);
 
             let is_function = matches!(
                 self.parser.current_token().map(|t| &t.token),
@@ -3334,13 +3374,14 @@ impl<'a> Compiler<'a> {
                     Token::Operator("=".to_string()),
                     "Expected '=' after parameters",
                 )?;
-                self.compile_function_body(parameters, memory_manager)?;
+                self.compile_function_body(parameters, ident_span, memory_manager)?;
             } else {
                 self.parser.consume(
                     Token::Operator("=".to_string()),
                     "Expected '=' after variable name",
                 )?;
                 // Wrap RHS in a thunk for lazy evaluation
+                let thunk_span = self.current_span(); // capture before parsing the RHS
                 let saved_state = self.begin_function();
                 self.begin_scope();
                 self.declare_local("<closure>".to_string())?;
@@ -3349,7 +3390,7 @@ impl<'a> Compiler<'a> {
                 self.emit_opcode(Opcode::Return, return_span);
                 self.end_scope();
                 let (chunk, upvalues) = self.end_function(saved_state);
-                self.emit_thunk(chunk, upvalues, memory_manager)?;
+                self.emit_thunk(chunk, upvalues, thunk_span, memory_manager)?;
             }
 
             self.emit_store_var(slots[binding_idx], binding_names[binding_idx].1.clone());
@@ -3734,9 +3775,13 @@ impl<'a> Compiler<'a> {
     /// Compile a function body given already-parsed parameters.
     /// Sets up function scope, declares params, parses body expression,
     /// emits Return, and emits the closure instruction.
+    /// `name_span` is the span of the function name or defining keyword; it is
+    /// attributed to the emitted Closure instruction so coverage tools can mark
+    /// the definition line as covered when the function is used.
     fn compile_function_body(
         &mut self,
         parameters: Vec<FunctionParam>,
+        name_span: Range<usize>,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
         let arity = parameters.len() as u8;
@@ -3820,6 +3865,7 @@ impl<'a> Compiler<'a> {
             arity,
             required_params,
             param_name_indices,
+            name_span,
             memory_manager,
         )?;
 
@@ -3836,9 +3882,14 @@ impl<'a> Compiler<'a> {
     ) -> Result<(), CompilerError> {
         // Consume 'function' keyword
         self.parser.advance()?;
+        let keyword_span = self
+            .parser
+            .previous_token()
+            .map(|t| t.span.clone())
+            .unwrap_or(0..0);
 
         let parameters = self.parse_parameter_list()?;
-        self.compile_function_body(parameters, memory_manager)?;
+        self.compile_function_body(parameters, keyword_span, memory_manager)?;
 
         Ok(())
     }

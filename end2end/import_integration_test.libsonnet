@@ -1,4 +1,8 @@
-local theNumbers = [1,2,3];
+local theNumbers = [
+1
+,2,
+3
+];
 
 {
    rootValue: 1,

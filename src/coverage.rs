@@ -45,6 +45,12 @@ impl CoverageCollector {
         self.hit_spans.get(source_id)
     }
 
+    /// Remove a source file from the coverage data.
+    /// Used to exclude the test entrypoint file itself from coverage output.
+    pub fn remove_source(&mut self, source_id: &str) {
+        self.hit_spans.remove(source_id);
+    }
+
     /// Total number of unique spans hit across all sources.
     pub fn total_spans_hit(&self) -> usize {
         self.hit_spans.values().map(|s| s.len()).sum()

@@ -204,6 +204,14 @@ rust_library(
 )
 
 rust_library(
+    name = "lcov",
+    srcs = ["src/lcov.rs"],
+    deps = [
+        ":coverage",
+    ],
+)
+
+rust_library(
     name = "test_runner",
     srcs = ["src/test_runner.rs"],
     deps = [
@@ -232,6 +240,8 @@ rust_binary(
     srcs = ["src/jsonnet_test_runner.rs"],
     deps = [
         ":compiler",
+        ":coverage",
+        ":lcov",
         ":memory_manager",
         ":scanner",
         ":test_reporter",
@@ -281,6 +291,11 @@ rust_test(
 )
 
 rust_test(
+    name = "lcov_test",
+    crate = ":lcov",
+)
+
+rust_test(
     name = "test_reporter_test",
     crate = ":test_reporter"
 )
@@ -298,6 +313,7 @@ rustfmt_test(
         ":serialized_chunk",
         ":jsonnet_compiler",
         ":coverage",
+        ":lcov",
         ":test_reporter",
         ":test_runner",
         ":jsonnet_test_runner",
