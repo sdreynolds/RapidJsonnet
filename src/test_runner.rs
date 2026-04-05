@@ -66,7 +66,7 @@ fn discover_test_fields(
         }
 
         let name = memory_manager.load_string(*key_idx).to_string();
-        if !name.starts_with("test") {
+        if !name.starts_with("test") && !name.starts_with("skip_test") {
             continue;
         }
 
@@ -123,6 +123,16 @@ pub fn run_tests(
 
     for field in &fields {
         reporter.on_test_start(&field.name);
+
+        if field.name.starts_with("skip_test") {
+            let result = TestResult {
+                name: field.name.clone(),
+                outcome: TestOutcome::Skip,
+            };
+            reporter.on_test_complete(&result);
+            results.push(result);
+            continue;
+        }
 
         if collect_coverage {
             vm.enable_coverage();
@@ -187,7 +197,7 @@ pub fn run_tests(
 
     let all_passed = results
         .iter()
-        .all(|r| matches!(r.outcome, TestOutcome::Pass));
+        .all(|r| !matches!(r.outcome, TestOutcome::Fail { .. }));
     Ok((all_passed, accumulated_coverage))
 }
 

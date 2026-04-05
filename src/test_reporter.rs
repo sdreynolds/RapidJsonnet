@@ -6,10 +6,11 @@ pub struct TestResult {
     pub outcome: TestOutcome,
 }
 
-/// Whether a test passed or failed.
+/// Whether a test passed, failed, or was skipped.
 pub enum TestOutcome {
     Pass,
     Fail { message: String },
+    Skip,
 }
 
 /// Trait for pluggable test output formats.
@@ -44,6 +45,9 @@ impl<W: Write> TestReporter for TextReporter<W> {
                 writeln!(self.writer, "FAIL  {}", result.name).ok();
                 writeln!(self.writer, "      {}", message).ok();
             }
+            TestOutcome::Skip => {
+                writeln!(self.writer, "SKIP  {}", result.name).ok();
+            }
         }
     }
 
@@ -53,15 +57,28 @@ impl<W: Write> TestReporter for TextReporter<W> {
             .iter()
             .filter(|r| matches!(r.outcome, TestOutcome::Pass))
             .count();
-        let failed = total - passed;
+        let skipped = results
+            .iter()
+            .filter(|r| matches!(r.outcome, TestOutcome::Skip))
+            .count();
+        let failed = total - passed - skipped;
 
         writeln!(self.writer).ok();
-        writeln!(
-            self.writer,
-            "{} tests: {} passed, {} failed",
-            total, passed, failed
-        )
-        .ok();
+        if skipped > 0 {
+            writeln!(
+                self.writer,
+                "{} tests: {} passed, {} failed, {} skipped",
+                total, passed, failed, skipped
+            )
+            .ok();
+        } else {
+            writeln!(
+                self.writer,
+                "{} tests: {} passed, {} failed",
+                total, passed, failed
+            )
+            .ok();
+        }
     }
 }
 
@@ -97,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn test_text_reporter_with_failure() {
+    fn test_text_reporter_with_failure_and_skip() {
         let mut output = Vec::new();
         let mut reporter = TextReporter::new(&mut output);
 
@@ -112,6 +129,10 @@ mod tests {
                     message: "expected 3, got 4".to_string(),
                 },
             },
+            TestResult {
+                name: "testSkippy".to_string(),
+                outcome: TestOutcome::Skip,
+            },
         ];
 
         for r in &results {
@@ -123,7 +144,8 @@ mod tests {
         assert!(output_str.contains("PASS  testGood"));
         assert!(output_str.contains("FAIL  testBad"));
         assert!(output_str.contains("expected 3, got 4"));
-        assert!(output_str.contains("2 tests: 1 passed, 1 failed"));
+        assert!(output_str.contains("SKIP  testSkippy"));
+        assert!(output_str.contains("3 tests: 1 passed, 1 failed, 1 skipped"));
     }
 
     #[test]
