@@ -19,4 +19,10 @@ filegroup(
     ]),
 )
 
-exports_files(glob(["test_suite/**"]))
+filegroup(
+    name = "benchmarks",
+    srcs = glob(["benchmarks/*.jsonnet"]),
+)
+
+exports_files(glob(["test_suite/**", "benchmarks/**"]))
+

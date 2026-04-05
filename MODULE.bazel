@@ -75,3 +75,6 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 
 jsonnet_tests = use_extension("//third_party_test_suite:extension.bzl", "jsonnet_tests")
 use_repo(jsonnet_tests, "jsonnet_test_suite_source")
+
+hyperfine_ext = use_extension("//benchmarks:hyperfine_extension.bzl", "hyperfine_extension")
+use_repo(hyperfine_ext, "hyperfine_bin")
