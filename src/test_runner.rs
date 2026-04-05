@@ -1,6 +1,8 @@
+use ariadne::sources;
 use chunk::{ClosureIndex, FieldVisibility, ObjectIndex, RuntimeError, Value};
 use coverage::CoverageCollector;
 use memory_manager::MemoryManager;
+use std::fs;
 use test_reporter::{TestOutcome, TestReporter, TestResult};
 use virtual_machine::VirtualMachine;
 
@@ -100,8 +102,15 @@ pub fn run_tests(
     top_level_value: &Value,
     reporter: &mut dyn TestReporter,
     collect_coverage: bool,
+    test_filter: Option<String>,
+    primary_source_id: &str,
+    primary_content: &str,
 ) -> Result<(bool, Option<CoverageCollector>), TestRunnerError> {
-    let (obj_idx, fields) = discover_test_fields(top_level_value, vm.memory_manager())?;
+    let (obj_idx, mut fields) = discover_test_fields(top_level_value, vm.memory_manager())?;
+
+    if let Some(filter) = test_filter {
+        fields.retain(|f| f.name.contains(&filter));
+    }
 
     // Root the top-level object to prevent GC from collecting it (and its field
     // thunks) between test calls. Under stress_gc, GC runs aggressively and would
@@ -146,7 +155,12 @@ pub fn run_tests(
         // Step 3: Call the test function
         let outcome = match vm.call_test_closure(func_closure) {
             Ok(_) => TestOutcome::Pass,
-            Err(e) => TestOutcome::Fail { message: e.message },
+            Err(e) => {
+                let rich_message = build_error_report(&e, primary_source_id, primary_content);
+                TestOutcome::Fail {
+                    message: rich_message,
+                }
+            }
         };
 
         let result = TestResult {
@@ -175,4 +189,27 @@ pub fn run_tests(
         .iter()
         .all(|r| matches!(r.outcome, TestOutcome::Pass));
     Ok((all_passed, accumulated_coverage))
+}
+
+fn build_error_report(
+    error: &RuntimeError,
+    primary_source_id: &str,
+    primary_content: &str,
+) -> String {
+    let (report, source_ids) = error.into_report();
+    let srcs: Vec<(String, String)> = source_ids
+        .iter()
+        .map(|sid| {
+            let content = if sid == primary_source_id {
+                primary_content.to_string()
+            } else {
+                fs::read_to_string(sid).unwrap_or_else(|_| "<file not found>".to_string())
+            };
+            (sid.clone(), content)
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    report.write(sources(srcs), &mut out).unwrap();
+    String::from_utf8_lossy(&out).trim().to_string()
 }

@@ -14,7 +14,8 @@ fn main() {
     let mut jpaths: Vec<String> = Vec::new();
     let mut collect_coverage = false;
     let mut lcov_output: Option<String> = None;
-    let mut test_name: Option<String> = None;
+    let mut suite_name: Option<String> = None;
+    let mut test_filter: Option<String> = None;
     let mut args_iter = env::args().skip(1).peekable();
 
     while let Some(arg) = args_iter.peek().cloned() {
@@ -43,10 +44,18 @@ fn main() {
         } else if arg == "--test-name" {
             args_iter.next();
             if let Some(name) = args_iter.next() {
-                test_name = Some(name);
+                test_filter = Some(name);
             }
         } else if arg.starts_with("--test-name=") {
-            test_name = Some(arg["--test-name=".len()..].to_string());
+            test_filter = Some(arg["--test-name=".len()..].to_string());
+            args_iter.next();
+        } else if arg == "--suite-name" {
+            args_iter.next();
+            if let Some(name) = args_iter.next() {
+                suite_name = Some(name);
+            }
+        } else if arg.starts_with("--suite-name=") {
+            suite_name = Some(arg["--suite-name=".len()..].to_string());
             args_iter.next();
         } else {
             break;
@@ -57,7 +66,7 @@ fn main() {
         Some(f) => f,
         None => {
             eprintln!(
-                "Usage: jsonnet_test_runner [--coverage] [--lcov-output <path>] [--test-name <name>] [-J <path>]... <test_file.jsonnet>"
+                "Usage: jsonnet_test_runner [--coverage] [--lcov-output <path>] [--suite-name <name>] [--test-name <filter>] [-J <path>]... <test_file.jsonnet>"
             );
             process::exit(2);
         }
@@ -97,7 +106,15 @@ fn main() {
     let stdout = io::stdout();
     let mut reporter = TextReporter::new(stdout.lock());
 
-    match test_runner::run_tests(&mut vm, &top_level, &mut reporter, collect_coverage) {
+    match test_runner::run_tests(
+        &mut vm,
+        &top_level,
+        &mut reporter,
+        collect_coverage,
+        test_filter,
+        &filename,
+        &content,
+    ) {
         Ok((all_passed, mut maybe_coverage)) => {
             // Remove the test entrypoint file itself — coverage should only reflect
             // library code under test, not the test driver.
@@ -109,7 +126,7 @@ fn main() {
                     || std::env::var("TEST_UNDECLARED_OUTPUTS_DIR").is_ok()
                     || std::env::var("COVERAGE_DIR").is_ok();
                 if needs_lcov {
-                    let tn = test_name.as_deref().unwrap_or("");
+                    let tn = suite_name.as_deref().unwrap_or("");
                     let lcov_content = generate_lcov(coverage, tn);
                     // Explicit --lcov-output path
                     if let Some(path) = &lcov_output {

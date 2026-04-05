@@ -220,6 +220,7 @@ rust_library(
         ":memory_manager",
         ":test_reporter",
         ":virtual_machine",
+        "@crates//:ariadne",
     ],
 )
 

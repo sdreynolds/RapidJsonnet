@@ -34,6 +34,12 @@ jsonnet_test(
     ],
 )
 
+jsonnet_test(
+    name = "test_filter_framework_integration_test",
+    src = "test_filter_framework_test.jsonnet",
+    coverage = "lcov",
+)
+
 sh_test(
     name = "test_runner_failing_integration_test",
     srcs = ["run_failing_test.sh"],

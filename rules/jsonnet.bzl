@@ -165,8 +165,8 @@ def _jsonnet_test_impl(ctx):
     all_data = depset(ctx.files.data, transitive = transitive_data_deps)
     all_inputs = depset(transitive = [all_srcs, all_data])
 
-    # Build the command: runner --test-name <target> -J <dir> <src>
-    args = ["--test-name", ctx.label.name, "-J", "."]
+    # Build the command: runner --suite-name <target> -J <dir> <src>
+    args = ["--suite-name", ctx.label.name, "-J", "."]
     if ctx.attr.coverage:
         args.append("--coverage")
     args.append(src_file.path)
