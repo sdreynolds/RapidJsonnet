@@ -1465,6 +1465,7 @@ impl<'a> Compiler<'a> {
                 }
             }
             Token::LeftParen => {
+                let call_start = token.span.start; // byte position of '(' for span attribution
                 self.parser.advance()?; // consume '('
 
                 // Check if we are calling a native function
@@ -1560,9 +1561,12 @@ impl<'a> Compiler<'a> {
                 // Call/StdCall consumes callee + all args (+ name strings for named args)
                 self.anon_stack_depth -= 1 + positional_count as usize + (named_count as usize * 2);
 
-                // Expect closing paren
-                self.parser
+                // Expect closing paren; use the returned TokenInfo to get its span end
+                // so the Call instruction covers every line of a multi-line call expression.
+                let close_paren = self
+                    .parser
                     .consume(Token::RightParen, "Expected ')' after arguments")?;
+                let call_span = call_start..close_paren.span.end;
 
                 // Check for postfix `tailstrict` keyword.
                 // Accepted anywhere syntactically, but only emits TailCall in tail position.
@@ -1590,14 +1594,14 @@ impl<'a> Compiler<'a> {
                     if named_count > 0 {
                         // Named args for native functions: emit Call opcode instead
                         // of StdCall so the VM can resolve named args at runtime.
-                        let span = token.span;
+                        let span = call_span;
                         self.compiling_chunk
                             .write_opcode(Opcode::Call, span.clone());
                         self.compiling_chunk.write(positional_count, span.clone());
                         self.compiling_chunk.write(named_count, span);
                     } else {
                         // Emit StdCall opcode with native function ID and arg count
-                        let span = token.span;
+                        let span = call_span;
                         self.compiling_chunk.write_opcode_u16(
                             Opcode::StdCall,
                             id as u16,
@@ -1611,7 +1615,7 @@ impl<'a> Compiler<'a> {
                     let is_tail_call =
                         self.tail_call_pending || (has_tailstrict && self.in_tail_position);
                     self.tail_call_pending = false;
-                    let span = token.span;
+                    let span = call_span;
                     let opcode = if is_tail_call {
                         Opcode::TailCall
                     } else {
@@ -1962,7 +1966,8 @@ impl<'a> Compiler<'a> {
             // Check for method shorthand: f(params): expr => f: function(params) expr
             let method_params = if let Some(current) = self.parser.current_token() {
                 if current.token == Token::LeftParen {
-                    Some(self.parse_parameter_list()?)
+                    let (params, close_paren_span) = self.parse_parameter_list()?;
+                    Some((params, close_paren_span))
                 } else {
                     None
                 }
@@ -2030,10 +2035,11 @@ impl<'a> Compiler<'a> {
 
             let prev_tail = self.in_tail_position;
             self.in_tail_position = !is_override; // can't tail-call if we need to Add after
-            if let Some(params) = method_params {
-                // Method shorthand: compile as function value; use field name span so
-                // the definition line is covered when the method is forced/called.
-                self.compile_function_body(params, key_token_span.clone(), memory_manager)?;
+            if let Some((params, close_paren_span)) = method_params {
+                // Method shorthand: span covers from field name through closing ')' of
+                // parameter list so multi-line definitions are fully attributed.
+                let fn_span = key_token_span.start..close_paren_span.end;
+                self.compile_function_body(params, fn_span, memory_manager)?;
             } else {
                 self.parse_expr(0, memory_manager)?;
             }
@@ -2459,12 +2465,13 @@ impl<'a> Compiler<'a> {
                 let span = local_binding.span.clone();
 
                 if is_function {
-                    let parameters = self.parse_parameter_list()?;
+                    let (parameters, close_paren_span) = self.parse_parameter_list()?;
                     self.parser.consume(
                         Token::Operator("=".to_string()),
                         "Expected '=' after parameters",
                     )?;
-                    self.compile_function_body(parameters, span.clone(), memory_manager)?;
+                    let fn_span = span.start..close_paren_span.end;
+                    self.compile_function_body(parameters, fn_span, memory_manager)?;
                 } else {
                     self.parser.consume(
                         Token::Operator("=".to_string()),
@@ -3369,12 +3376,13 @@ impl<'a> Compiler<'a> {
             );
 
             if is_function {
-                let parameters = self.parse_parameter_list()?;
+                let (parameters, close_paren_span) = self.parse_parameter_list()?;
                 self.parser.consume(
                     Token::Operator("=".to_string()),
                     "Expected '=' after parameters",
                 )?;
-                self.compile_function_body(parameters, ident_span, memory_manager)?;
+                let fn_span = ident_span.start..close_paren_span.end;
+                self.compile_function_body(parameters, fn_span, memory_manager)?;
             } else {
                 self.parser.consume(
                     Token::Operator("=".to_string()),
@@ -3651,7 +3659,9 @@ impl<'a> Compiler<'a> {
     /// Parse a parenthesized parameter list: (param1, param2=default, ...)
     /// Consumes the opening '(' and closing ')'.
     /// For parameters with defaults, saves a parser checkpoint for re-compilation later.
-    fn parse_parameter_list(&mut self) -> Result<Vec<FunctionParam>, CompilerError> {
+    fn parse_parameter_list(
+        &mut self,
+    ) -> Result<(Vec<FunctionParam>, Range<usize>), CompilerError> {
         self.parser
             .consume(Token::LeftParen, "Expected '(' for parameter list")?;
 
@@ -3729,10 +3739,11 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        self.parser
+        let close_paren = self
+            .parser
             .consume(Token::RightParen, "Expected ')' after parameters")?;
 
-        Ok(parameters)
+        Ok((parameters, close_paren.span))
     }
 
     /// Skip over a default expression in a parameter list.
@@ -3888,8 +3899,9 @@ impl<'a> Compiler<'a> {
             .map(|t| t.span.clone())
             .unwrap_or(0..0);
 
-        let parameters = self.parse_parameter_list()?;
-        self.compile_function_body(parameters, keyword_span, memory_manager)?;
+        let (parameters, close_paren_span) = self.parse_parameter_list()?;
+        let fn_span = keyword_span.start..close_paren_span.end;
+        self.compile_function_body(parameters, fn_span, memory_manager)?;
 
         Ok(())
     }

@@ -28,8 +28,9 @@ jsonnet_library(
 jsonnet_test(
     name = "test_framework_integration_test",
     src = "test_framework_test.jsonnet",
+    coverage = "lcov",
     deps = [
-        ":integration_lib"
+        ":integration_lib",
     ],
 )
 

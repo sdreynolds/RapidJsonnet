@@ -213,8 +213,8 @@ jsonnet_test = rule(
             doc = "Data files available at runtime.",
         ),
         "coverage": attr.string(
-            default = "lcov",
-            doc = "Coverage format to emit. Supported values: \"lcov\". When set, passes --coverage to the runner; output is written to $TEST_UNDECLARED_OUTPUTS_DIR/coverage.lcov during bazel test.",
+            default = "",
+            doc = "Coverage format to emit. Set to \"lcov\" to enable; output is written to $TEST_UNDECLARED_OUTPUTS_DIR/<target>.lcov during bazel test.",
         ),
         "_runner": attr.label(
             default = Label("//:jsonnet_test_runner"),
