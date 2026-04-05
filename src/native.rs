@@ -3365,19 +3365,11 @@ fn std_object_keys_values(
         let mut properties = std::collections::HashMap::new();
         properties.insert(
             key_field_name,
-            ObjectField {
-                value: Value::String(name_str_idx),
-                super_obj: None,
-                visibility: FieldVisibility::Visible,
-            },
+            ObjectField::new(Value::String(name_str_idx), None, FieldVisibility::Visible),
         );
         properties.insert(
             value_field_name,
-            ObjectField {
-                value: val,
-                super_obj: None,
-                visibility: FieldVisibility::Visible,
-            },
+            ObjectField::new(val, None, FieldVisibility::Visible),
         );
         let obj_alloc = memory_manager.allocate_object_with_properties(properties);
         result_elements.push(Value::Object(obj_alloc.index));
@@ -4045,19 +4037,11 @@ fn std_object_keys_values_all(
         let mut properties = std::collections::HashMap::new();
         properties.insert(
             key_field_name,
-            ObjectField {
-                value: Value::String(name_str_idx),
-                super_obj: None,
-                visibility: FieldVisibility::Visible,
-            },
+            ObjectField::new(Value::String(name_str_idx), None, FieldVisibility::Visible),
         );
         properties.insert(
             value_field_name,
-            ObjectField {
-                value: val,
-                super_obj: None,
-                visibility: FieldVisibility::Visible,
-            },
+            ObjectField::new(val, None, FieldVisibility::Visible),
         );
         let obj_alloc = memory_manager.allocate_object_with_properties(properties);
         result_elements.push(Value::Object(obj_alloc.index));
@@ -4754,11 +4738,7 @@ fn std_object_from_pairs(
         let key_idx = memory_manager.allocate_string(&key).index;
         properties.insert(
             key_idx,
-            ObjectField {
-                value: val,
-                super_obj: None,
-                visibility: FieldVisibility::Visible,
-            },
+            ObjectField::new(val, None, FieldVisibility::Visible),
         );
     }
     let obj_alloc = memory_manager.allocate_object_with_properties(properties);

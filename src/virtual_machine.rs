@@ -31,6 +31,8 @@ pub struct CallFrame {
     pub super_obj: Option<ObjectIndex>,
     /// The field name this thunk is being evaluated for (for dynamic +: overrides)
     pub field_name: Option<StringIndex>,
+    /// Memoization target: when this frame returns, write the result back to object.field.memo_value
+    pub memo_target: Option<(ObjectIndex, StringIndex)>,
 }
 
 impl CallFrame {
@@ -49,6 +51,7 @@ impl CallFrame {
             self_obj,
             super_obj,
             field_name: None,
+            memo_target: None,
         }
     }
 }
@@ -71,6 +74,8 @@ pub struct VirtualMachine {
     pub ext_vars: std::collections::HashMap<String, Value>,
     /// Pending field name for the next thunk call (consumed by call_closure)
     pending_field_name: Option<StringIndex>,
+    /// Pending memoization target for the next field thunk call (consumed by call_closure)
+    pending_memo_target: Option<(ObjectIndex, StringIndex)>,
     /// Cached std object (created on first LoadStd, reused after)
     std_object: Option<Value>,
     /// Library search paths for import resolution (like -J / --jpath)
@@ -113,6 +118,7 @@ impl VirtualMachine {
             instruction_start_ip: 0,
             ext_vars: std::collections::HashMap::new(),
             pending_field_name: None,
+            pending_memo_target: None,
             std_object: None,
             jpaths: Vec::new(),
             coverage_collector: None,
@@ -996,6 +1002,10 @@ impl VirtualMachine {
         // Clone everything up front to avoid borrow conflicts with self.merge_objects
         let left_object = self.memory_manager.load_object(left_key);
         let mut merged_properties = left_object.properties.clone();
+        // Clear memo caches: the merged object has a new self, so cached values are stale
+        for field in merged_properties.values_mut() {
+            field.memo_value = None;
+        }
         let left_assertions = left_object.assertions.clone();
 
         let right_object = self.memory_manager.load_object(right_key);
@@ -1006,17 +1016,11 @@ impl VirtualMachine {
             .collect();
         let right_assertions = right_object.assertions.clone();
 
-        // Compute visibilities from left object (already cloned into merged_properties)
-        let left_visibilities: std::collections::HashMap<_, _> = merged_properties
-            .iter()
-            .map(|(k, f)| (*k, f.visibility))
-            .collect();
-
         for (key, right_field) in right_props {
             let visibility = if right_field.visibility == FieldVisibility::Visible {
-                left_visibilities
+                merged_properties
                     .get(&key)
-                    .copied()
+                    .map(|f| f.visibility)
                     .unwrap_or(FieldVisibility::Visible)
             } else {
                 right_field.visibility
@@ -1032,11 +1036,7 @@ impl VirtualMachine {
 
             merged_properties.insert(
                 key,
-                ObjectField {
-                    value: right_field.value.clone(),
-                    super_obj,
-                    visibility,
-                },
+                ObjectField::new(right_field.value.clone(), super_obj, visibility),
             );
         }
 
@@ -1115,6 +1115,7 @@ impl VirtualMachine {
 
         // Consume pending field name if set (for dynamic +: override thunks)
         new_frame.field_name = self.pending_field_name.take();
+        new_frame.memo_target = self.pending_memo_target.take();
 
         // Push frame
         if self.frame_count < self.frames.len() {
@@ -1731,6 +1732,9 @@ impl VirtualMachine {
                             let right_key = *right_key;
                             let merged_key = self.merge_objects(left_key, right_key)?;
                             self.push(Value::Object(merged_key))?;
+                            if self.memory_manager.should_collect() {
+                                self.run_garbage_collection();
+                            }
                         }
                         // Array concatenation
                         (Value::Array(left_key), Value::Array(right_key)) => {
@@ -2160,11 +2164,7 @@ impl VirtualMachine {
                             Value::String(key_str) => {
                                 properties.insert(
                                     key_str,
-                                    ObjectField {
-                                        value,
-                                        super_obj: None,
-                                        visibility: FieldVisibility::Visible,
-                                    },
+                                    ObjectField::new(value, None, FieldVisibility::Visible),
                                 );
                             }
                             Value::Null => {
@@ -2248,14 +2248,8 @@ impl VirtualMachine {
 
                             match key {
                                 Value::String(key_str) => {
-                                    properties.insert(
-                                        key_str,
-                                        ObjectField {
-                                            value,
-                                            super_obj: None,
-                                            visibility,
-                                        },
-                                    );
+                                    properties
+                                        .insert(key_str, ObjectField::new(value, None, visibility));
                                 }
                                 Value::Null => {
                                     // Null keys are omitted
@@ -2343,30 +2337,38 @@ impl VirtualMachine {
                                 .cloned();
 
                             if let Some(field) = field {
-                                match field.value {
-                                    Value::Closure(closure_idx) => {
-                                        // It's a thunk! We need to call it with (self, super)
-                                        self.advance_pc(); // Advance past ObjectIndex before calling
-                                        self.push(Value::Closure(closure_idx))?;
-                                        self.push(Value::Object(object_key))?; // self
-                                        let super_val = field
-                                            .super_obj
-                                            .map(Value::Object)
-                                            .unwrap_or(Value::Null);
-                                        self.push(super_val)?; // super
-                                        // Set field name for LoadFieldName opcode
-                                        self.pending_field_name = Some(field_key);
-                                        self.call_closure(
-                                            closure_idx,
-                                            2,
-                                            Some(object_key),
-                                            field.super_obj,
-                                        )?;
-                                        continue;
-                                    }
-                                    _ => {
-                                        // It's a raw value
-                                        self.push(field.value.clone())?;
+                                // Check memo cache first
+                                if let Some(memo) = field.memo_value {
+                                    self.push(memo)?;
+                                } else {
+                                    match field.value {
+                                        Value::Closure(closure_idx) => {
+                                            // It's a thunk! We need to call it with (self, super)
+                                            self.advance_pc(); // Advance past ObjectIndex before calling
+                                            self.push(Value::Closure(closure_idx))?;
+                                            self.push(Value::Object(object_key))?; // self
+                                            let super_val = field
+                                                .super_obj
+                                                .map(Value::Object)
+                                                .unwrap_or(Value::Null);
+                                            self.push(super_val)?; // super
+                                            // Set field name for LoadFieldName opcode
+                                            self.pending_field_name = Some(field_key);
+                                            // Set memo target so Return can cache the result
+                                            self.pending_memo_target =
+                                                Some((object_key, field_key));
+                                            self.call_closure(
+                                                closure_idx,
+                                                2,
+                                                Some(object_key),
+                                                field.super_obj,
+                                            )?;
+                                            continue;
+                                        }
+                                        _ => {
+                                            // It's a raw value
+                                            self.push(field.value.clone())?;
+                                        }
                                     }
                                 }
                             } else {
@@ -2702,11 +2704,7 @@ impl VirtualMachine {
 
                             merged_properties.insert(
                                 *key,
-                                ObjectField {
-                                    value: right_field.value,
-                                    super_obj: Some(left_key), // Field's super is the left object
-                                    visibility,
-                                },
+                                ObjectField::new(right_field.value, Some(left_key), visibility),
                             );
                         }
 
@@ -2882,11 +2880,11 @@ impl VirtualMachine {
                             for (k, v) in evaluated {
                                 properties.insert(
                                     k,
-                                    memory_manager::ObjectField {
-                                        value: v,
-                                        super_obj: None,
-                                        visibility: FieldVisibility::Visible,
-                                    },
+                                    memory_manager::ObjectField::new(
+                                        v,
+                                        None,
+                                        FieldVisibility::Visible,
+                                    ),
                                 );
                             }
                             let new_obj_alloc = self
@@ -3266,14 +3264,8 @@ impl VirtualMachine {
                             // Rebuild the object with evaluated values
                             let mut properties = std::collections::HashMap::new();
                             for (k, v, vis) in evaluated {
-                                properties.insert(
-                                    k,
-                                    memory_manager::ObjectField {
-                                        value: v,
-                                        super_obj: None,
-                                        visibility: vis,
-                                    },
-                                );
+                                properties
+                                    .insert(k, memory_manager::ObjectField::new(v, None, vis));
                             }
                             let new_obj_alloc = self
                                 .memory_manager
@@ -3754,14 +3746,7 @@ impl VirtualMachine {
                             let result =
                                 self.call_value_with_two_args(func_val, key_val, evaled_val);
                             self.memory_manager.pop_external_roots();
-                            new_properties.insert(
-                                k_idx,
-                                ObjectField {
-                                    value: result?,
-                                    super_obj: None,
-                                    visibility: vis,
-                                },
-                            );
+                            new_properties.insert(k_idx, ObjectField::new(result?, None, vis));
                         }
                         let alloc = self
                             .memory_manager
@@ -4569,11 +4554,11 @@ impl VirtualMachine {
                             let k_alloc = self.memory_manager.allocate_string(key_str);
                             properties.insert(
                                 k_alloc.index,
-                                memory_manager::ObjectField {
-                                    value: Value::Array(arr_alloc.index),
-                                    super_obj: None,
-                                    visibility: FieldVisibility::Visible,
-                                },
+                                memory_manager::ObjectField::new(
+                                    Value::Array(arr_alloc.index),
+                                    None,
+                                    FieldVisibility::Visible,
+                                ),
                             );
                         }
                         let obj_alloc = self
@@ -4701,11 +4686,11 @@ impl VirtualMachine {
                             let k_alloc = self.memory_manager.allocate_string(key_str);
                             properties.insert(
                                 k_alloc.index,
-                                memory_manager::ObjectField {
-                                    value: Value::Number(count as f64),
-                                    super_obj: None,
-                                    visibility: FieldVisibility::Visible,
-                                },
+                                memory_manager::ObjectField::new(
+                                    Value::Number(count as f64),
+                                    None,
+                                    FieldVisibility::Visible,
+                                ),
                             );
                         }
                         let obj_alloc = self
@@ -4986,11 +4971,7 @@ impl VirtualMachine {
                             let new_k_alloc = self.memory_manager.allocate_string(&new_key_str);
                             new_properties.insert(
                                 new_k_alloc.index,
-                                memory_manager::ObjectField {
-                                    value: evaled_val,
-                                    super_obj: None,
-                                    visibility: vis,
-                                },
+                                memory_manager::ObjectField::new(evaled_val, None, vis),
                             );
                         }
                         let alloc = self
@@ -5063,11 +5044,7 @@ impl VirtualMachine {
                                 Value::Boolean(true) => {
                                     kept_properties.insert(
                                         k_idx,
-                                        memory_manager::ObjectField {
-                                            value: evaled_val,
-                                            super_obj: None,
-                                            visibility: vis,
-                                        },
+                                        memory_manager::ObjectField::new(evaled_val, None, vis),
                                     );
                                 }
                                 Value::Boolean(false) => {}
@@ -5135,11 +5112,7 @@ impl VirtualMachine {
                             let k_alloc = self.memory_manager.allocate_string(&k_str);
                             properties.insert(
                                 k_alloc.index,
-                                memory_manager::ObjectField {
-                                    value: v,
-                                    super_obj: None,
-                                    visibility: FieldVisibility::Visible,
-                                },
+                                memory_manager::ObjectField::new(v, None, FieldVisibility::Visible),
                             );
                         }
                         let obj_alloc = self
@@ -6487,11 +6460,11 @@ impl VirtualMachine {
                                         let k_alloc = self.memory_manager.allocate_string(key_str);
                                         properties.insert(
                                             k_alloc.index,
-                                            memory_manager::ObjectField {
-                                                value: Value::Array(arr_alloc.index),
-                                                super_obj: None,
-                                                visibility: FieldVisibility::Visible,
-                                            },
+                                            memory_manager::ObjectField::new(
+                                                Value::Array(arr_alloc.index),
+                                                None,
+                                                FieldVisibility::Visible,
+                                            ),
                                         );
                                     }
                                     let obj_alloc = self
@@ -6618,11 +6591,11 @@ impl VirtualMachine {
                                         let k_alloc = self.memory_manager.allocate_string(key_str);
                                         properties.insert(
                                             k_alloc.index,
-                                            memory_manager::ObjectField {
-                                                value: Value::Number(count as f64),
-                                                super_obj: None,
-                                                visibility: FieldVisibility::Visible,
-                                            },
+                                            memory_manager::ObjectField::new(
+                                                Value::Number(count as f64),
+                                                None,
+                                                FieldVisibility::Visible,
+                                            ),
                                         );
                                     }
                                     let obj_alloc = self
@@ -6927,11 +6900,7 @@ impl VirtualMachine {
                                             self.memory_manager.allocate_string(&new_key_str);
                                         new_properties.insert(
                                             new_k_alloc.index,
-                                            memory_manager::ObjectField {
-                                                value: evaled_val,
-                                                super_obj: None,
-                                                visibility: vis,
-                                            },
+                                            memory_manager::ObjectField::new(evaled_val, None, vis),
                                         );
                                     }
                                     let alloc = self
@@ -7017,11 +6986,9 @@ impl VirtualMachine {
                                             Value::Boolean(true) => {
                                                 kept_properties.insert(
                                                     k_idx,
-                                                    memory_manager::ObjectField {
-                                                        value: evaled_val,
-                                                        super_obj: None,
-                                                        visibility: vis,
-                                                    },
+                                                    memory_manager::ObjectField::new(
+                                                        evaled_val, None, vis,
+                                                    ),
                                                 );
                                             }
                                             Value::Boolean(false) => {}
@@ -7092,11 +7059,11 @@ impl VirtualMachine {
                                         let k_alloc = self.memory_manager.allocate_string(&k_str);
                                         properties.insert(
                                             k_alloc.index,
-                                            memory_manager::ObjectField {
-                                                value: v,
-                                                super_obj: None,
-                                                visibility: FieldVisibility::Visible,
-                                            },
+                                            memory_manager::ObjectField::new(
+                                                v,
+                                                None,
+                                                FieldVisibility::Visible,
+                                            ),
                                         );
                                     }
                                     let obj_alloc = self
@@ -7424,6 +7391,19 @@ impl VirtualMachine {
                         return Ok(return_value);
                     }
 
+                    // Write memo cache if this frame was called from ObjectIndex
+                    // Only cache non-Closure values (closures are methods, not thunk results)
+                    if !matches!(return_value, Value::Closure(_)) {
+                        let memo_target = self.current_frame().memo_target;
+                        if let Some((obj_key, fld_key)) = memo_target {
+                            if let Some(obj) = self.memory_manager.get_object_mut(obj_key) {
+                                if let Some(field) = obj.properties.get_mut(&fld_key) {
+                                    field.memo_value = Some(return_value);
+                                }
+                            }
+                        }
+                    }
+
                     // Return from function
                     let is_script_complete = self.return_from_function(return_value);
 
@@ -7670,11 +7650,11 @@ impl VirtualMachine {
             let key = self.memory_manager.allocate_string(name).index;
             properties.insert(
                 key,
-                memory_manager::ObjectField {
-                    value: Value::NativeFunction(id),
-                    super_obj: None,
-                    visibility: FieldVisibility::Hidden,
-                },
+                memory_manager::ObjectField::new(
+                    Value::NativeFunction(id),
+                    None,
+                    FieldVisibility::Hidden,
+                ),
             );
         }
         let alloc = self
@@ -8077,11 +8057,11 @@ impl VirtualMachine {
                     let val = self.json_to_jsonnet_value(v)?;
                     props.insert(
                         key_idx,
-                        memory_manager::ObjectField {
-                            value: val,
-                            super_obj: None,
-                            visibility: chunk::FieldVisibility::Visible,
-                        },
+                        memory_manager::ObjectField::new(
+                            val,
+                            None,
+                            chunk::FieldVisibility::Visible,
+                        ),
                     );
                 }
                 let alloc = self.memory_manager.allocate_object_with_properties(props);
@@ -8410,11 +8390,7 @@ impl VirtualMachine {
             let val = self.parse_json_inner(bytes, pos, span, source_id)?;
             props.insert(
                 key_idx,
-                memory_manager::ObjectField {
-                    value: val,
-                    super_obj: None,
-                    visibility: chunk::FieldVisibility::Visible,
-                },
+                memory_manager::ObjectField::new(val, None, chunk::FieldVisibility::Visible),
             );
             self.skip_json_ws(bytes, pos);
             if *pos >= bytes.len() {
@@ -8986,11 +8962,7 @@ impl VirtualMachine {
 
                 result.insert(
                     key,
-                    memory_manager::ObjectField {
-                        value: merged,
-                        super_obj: field.super_obj,
-                        visibility: field.visibility,
-                    },
+                    memory_manager::ObjectField::new(merged, field.super_obj, field.visibility),
                 );
             }
         }
@@ -9071,11 +9043,7 @@ impl VirtualMachine {
                     if !self.is_prunable(pruned_v)? {
                         new_props.insert(
                             k,
-                            memory_manager::ObjectField {
-                                value: pruned_v,
-                                super_obj,
-                                visibility: vis,
-                            },
+                            memory_manager::ObjectField::new(pruned_v, super_obj, vis),
                         );
                     }
                 }
@@ -10169,11 +10137,7 @@ impl VirtualMachine {
                         self.serde_yaml_to_jsonnet_value(v, span.clone(), source_id.clone())?;
                     props.insert(
                         key_idx,
-                        ObjectField {
-                            value: val,
-                            super_obj: None,
-                            visibility: FieldVisibility::Visible,
-                        },
+                        ObjectField::new(val, None, FieldVisibility::Visible),
                     );
                 }
                 let alloc = self.memory_manager.allocate_object_with_properties(props);

@@ -18,10 +18,24 @@ pub struct AllocationResult<T> {
 pub struct ObjectField {
     /// The actual value or Thunk (Closure)
     pub value: Value,
+    /// Cached result of evaluating `value` when accessed directly (self == this object).
+    /// Only set by ObjectIndex, never by SuperIndex. None means not yet computed.
+    pub memo_value: Option<Value>,
     /// The 'super' object context for this specific field, used during late-binding inheritance
     pub super_obj: Option<ObjectIndex>,
     /// Field visibility status (: , :: , or :::)
     pub visibility: FieldVisibility,
+}
+
+impl ObjectField {
+    pub fn new(value: Value, super_obj: Option<ObjectIndex>, visibility: FieldVisibility) -> Self {
+        Self {
+            value,
+            memo_value: None,
+            super_obj,
+            visibility,
+        }
+    }
 }
 
 /// A Jsonnet object containing property key-value pairs
@@ -42,6 +56,7 @@ impl ManagedObject {
         // HashMap capacity accounts for actual allocated memory, not just length
         let map_capacity_bytes = self.properties.capacity()
             * (std::mem::size_of::<StringIndex>() + std::mem::size_of::<ObjectField>());
+        // Note: ObjectField now includes memo_value (Option<Value>) but size_of already accounts for it
         let assertions_capacity_bytes =
             self.assertions.capacity() * std::mem::size_of::<ClosureIndex>();
         base_size + map_capacity_bytes + assertions_capacity_bytes
@@ -701,6 +716,9 @@ impl MemoryManager {
                             for (field_key, field) in &managed_object.properties {
                                 values.push_back(Value::String(*field_key));
                                 values.push_back(field.value);
+                                if let Some(memo) = field.memo_value {
+                                    values.push_back(memo);
+                                }
                                 if let Some(super_obj) = field.super_obj {
                                     values.push_back(Value::Object(super_obj));
                                 }
@@ -1155,11 +1173,7 @@ mod tests {
 
         properties.insert(
             name,
-            ObjectField {
-                value: field_value,
-                super_obj: None,
-                visibility: FieldVisibility::Visible,
-            },
+            ObjectField::new(field_value, None, FieldVisibility::Visible),
         );
         let object_index = manager.allocate_object_with_properties(properties).index;
 
@@ -1177,11 +1191,7 @@ mod tests {
 
         properties.insert(
             name,
-            ObjectField {
-                value: field_value,
-                super_obj: None,
-                visibility: FieldVisibility::Visible,
-            },
+            ObjectField::new(field_value, None, FieldVisibility::Visible),
         );
         let object_index = manager.allocate_object_with_properties(properties).index;
 
