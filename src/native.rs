@@ -927,15 +927,13 @@ fn std_object_fields(
 ) -> Result<Value, RuntimeError> {
     match val {
         Value::Object(o_idx) => {
-            // Collect visible key indices first (ends the immutable borrow of load_object)
-            let obj = memory_manager.load_object(o_idx);
-            let visible_keys: Vec<StringIndex> = obj
-                .properties
-                .iter()
-                .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-                .map(|(key, _)| *key)
+            // Walk the full base_object chain; shallower nodes win on collision
+            let fields = memory_manager.collect_object_fields_chain(o_idx);
+            let visible_keys: Vec<StringIndex> = fields
+                .into_iter()
+                .filter(|(_, _, vis)| *vis != FieldVisibility::Hidden)
+                .map(|(key, _, _)| key)
                 .collect();
-            // Now load the string names
             let mut names: Vec<String> = visible_keys
                 .iter()
                 .map(|key| memory_manager.load_string(*key).to_string())
@@ -969,22 +967,12 @@ fn std_object_has(
 ) -> Result<Value, RuntimeError> {
     match (obj_val, field_val) {
         (Value::Object(o_idx), Value::String(s_idx)) => {
-            // Intern the target field name string index — if the key exists at all
-            // in the string pool we can compare by StringIndex directly, otherwise
-            // it definitely doesn't match any field key.
             let field_name = memory_manager.load_string(s_idx).to_string();
-            let obj = memory_manager.load_object(o_idx);
-            // Collect visible key indices to avoid holding immutable borrow while
-            // calling load_string again.
-            let visible_keys: Vec<StringIndex> = obj
-                .properties
-                .iter()
-                .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-                .map(|(key, _)| *key)
-                .collect();
-            let found = visible_keys
-                .iter()
-                .any(|key| memory_manager.load_string(*key) == field_name);
+            // Walk chain; only visible fields count for objectHas
+            let fields = memory_manager.collect_object_fields_chain(o_idx);
+            let found = fields.iter().any(|(key, _, vis)| {
+                *vis != FieldVisibility::Hidden && memory_manager.load_string(*key) == field_name
+            });
             Ok(Value::Boolean(found))
         }
         (Value::Object(_), _) => Err(RuntimeError::new(
@@ -1009,13 +997,12 @@ fn std_object_values(
 ) -> Result<Value, RuntimeError> {
     match val {
         Value::Object(o_idx) => {
-            // Collect visible (key_index, value) pairs first (ends immutable borrow)
-            let obj = memory_manager.load_object(o_idx);
-            let visible_pairs: Vec<(StringIndex, Value)> = obj
-                .properties
-                .iter()
-                .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-                .map(|(key, field)| (*key, field.value))
+            // Walk chain; collect visible (key, value) pairs
+            let fields = memory_manager.collect_object_fields_chain(o_idx);
+            let visible_pairs: Vec<(StringIndex, Value)> = fields
+                .into_iter()
+                .filter(|(_, _, vis)| *vis != FieldVisibility::Hidden)
+                .map(|(key, val, _)| (key, val))
                 .collect();
             // Load the key names for sorting
             let mut named_pairs: Vec<(String, Value)> = visible_pairs
@@ -1212,24 +1199,19 @@ pub fn values_equal(a: Value, b: Value, mm: &MemoryManager) -> bool {
                 .all(|(a, b)| values_equal(*a, *b, mm))
         }
         (Value::Object(x), Value::Object(y)) => {
-            // Collect visible (key_string, value) pairs from each object, sorted by key name
-            let get_visible = |obj_idx| -> Vec<(String, Value)> {
-                let obj = mm.load_object(obj_idx);
-                let visible: Vec<(StringIndex, Value)> = obj
-                    .properties
-                    .iter()
-                    .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-                    .map(|(k, field)| (*k, field.value))
-                    .collect();
-                let mut named: Vec<(String, Value)> = visible
+            // Collect visible (key_string, value) pairs walking the full chain, sorted by key name
+            let get_visible = |obj_idx, mm: &MemoryManager| -> Vec<(String, Value)> {
+                let fields = mm.collect_object_fields_chain(obj_idx);
+                let mut named: Vec<(String, Value)> = fields
                     .into_iter()
-                    .map(|(k, v)| (mm.load_string(k).to_string(), v))
+                    .filter(|(_, _, vis)| *vis != FieldVisibility::Hidden)
+                    .map(|(k, v, _)| (mm.load_string(k).to_string(), v))
                     .collect();
                 named.sort_by(|a, b| a.0.cmp(&b.0));
                 named
             };
-            let ox = get_visible(x);
-            let oy = get_visible(y);
+            let ox = get_visible(x, mm);
+            let oy = get_visible(y, mm);
             if ox.len() != oy.len() {
                 return false;
             }
@@ -1931,11 +1913,10 @@ impl FormatVals {
                 FormatVals::Array(elems)
             }
             Value::Object(o_idx) => {
-                let obj = mm.load_object(o_idx);
-                let pairs: Vec<(String, Value)> = obj
-                    .properties
-                    .iter()
-                    .map(|(k, f)| (mm.load_string(*k).to_string(), f.value))
+                let fields = mm.collect_object_fields_chain(o_idx);
+                let pairs: Vec<(String, Value)> = fields
+                    .into_iter()
+                    .map(|(k, v, _)| (mm.load_string(k).to_string(), v))
                     .collect();
                 FormatVals::Object(pairs)
             }
@@ -2035,20 +2016,19 @@ fn value_to_format_string(val: Value, mm: &MemoryManager) -> String {
             }
         }
         Value::Object(o_idx) => {
-            let obj = mm.load_object(o_idx);
-            let visible: Vec<_> = obj
-                .properties
-                .iter()
-                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
+            let fields = mm.collect_object_fields_chain(o_idx);
+            let visible: Vec<_> = fields
+                .into_iter()
+                .filter(|(_, _, vis)| *vis != FieldVisibility::Hidden)
                 .collect();
             if visible.is_empty() {
                 "{ }".to_string()
             } else {
                 let items: Vec<String> = visible
                     .iter()
-                    .map(|(k, f)| {
-                        let key = mm.load_string(**k);
-                        let val = value_to_string_repr(f.value, mm);
+                    .map(|(k, v, _)| {
+                        let key = mm.load_string(*k);
+                        let val = value_to_string_repr(*v, mm);
                         format!("{}: {}", key, val)
                     })
                     .collect();
@@ -2901,12 +2881,12 @@ fn std_get(
         }
     };
 
-    let obj = memory_manager.load_object(o_idx);
-    let found: Option<(Value, chunk::FieldVisibility)> = obj
-        .properties
-        .iter()
-        .find(|(k, _)| memory_manager.load_string(**k) == field_name.as_str())
-        .map(|(_, f)| (f.value, f.visibility));
+    // Walk the full chain to find the field
+    let fields = memory_manager.collect_object_fields_chain(o_idx);
+    let found: Option<(Value, chunk::FieldVisibility)> = fields
+        .into_iter()
+        .find(|(k, _, _)| memory_manager.load_string(*k) == field_name.as_str())
+        .map(|(_, v, vis)| (v, vis));
 
     match found {
         Some((val, visibility)) => {
@@ -2933,11 +2913,11 @@ fn std_object_has_all(
     match (obj_val, field_val) {
         (Value::Object(o_idx), Value::String(s_idx)) => {
             let field_name = memory_manager.load_string(s_idx).to_string();
-            let obj = memory_manager.load_object(o_idx);
-            let all_keys: Vec<StringIndex> = obj.properties.keys().copied().collect();
-            let found = all_keys
+            // Walk chain; all fields (including hidden) count for objectHasAll
+            let fields = memory_manager.collect_object_fields_chain(o_idx);
+            let found = fields
                 .iter()
-                .any(|key| memory_manager.load_string(*key) == field_name);
+                .any(|(key, _, _)| memory_manager.load_string(*key) == field_name);
             Ok(Value::Boolean(found))
         }
         (Value::Object(_), _) => Err(RuntimeError::new(
@@ -2964,8 +2944,9 @@ fn std_object_fields_all(
 ) -> Result<Value, RuntimeError> {
     match val {
         Value::Object(o_idx) => {
-            let obj = memory_manager.load_object(o_idx);
-            let all_keys: Vec<StringIndex> = obj.properties.keys().copied().collect();
+            // Walk the full base_object chain; shallower nodes win on collision
+            let fields = memory_manager.collect_object_fields_chain(o_idx);
+            let all_keys: Vec<StringIndex> = fields.into_iter().map(|(key, _, _)| key).collect();
             let mut names: Vec<String> = all_keys
                 .iter()
                 .map(|key| memory_manager.load_string(*key).to_string())
@@ -3341,13 +3322,12 @@ fn std_object_keys_values(
             ));
         }
     };
-    // Collect visible (key_name, value) pairs
-    let obj = memory_manager.load_object(o_idx);
-    let visible_pairs: Vec<(StringIndex, Value)> = obj
-        .properties
-        .iter()
-        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-        .map(|(key, field)| (*key, field.value))
+    // Collect visible (key_name, value) pairs walking the full chain
+    let fields = memory_manager.collect_object_fields_chain(o_idx);
+    let visible_pairs: Vec<(StringIndex, Value)> = fields
+        .into_iter()
+        .filter(|(_, _, vis)| *vis != FieldVisibility::Hidden)
+        .map(|(key, val, _)| (key, val))
         .collect();
     let mut named_pairs: Vec<(String, Value)> = visible_pairs
         .iter()
@@ -3365,11 +3345,11 @@ fn std_object_keys_values(
         let mut properties = std::collections::HashMap::new();
         properties.insert(
             key_field_name,
-            ObjectField::new(Value::String(name_str_idx), None, FieldVisibility::Visible),
+            ObjectField::new(Value::String(name_str_idx), FieldVisibility::Visible),
         );
         properties.insert(
             value_field_name,
-            ObjectField::new(val, None, FieldVisibility::Visible),
+            ObjectField::new(val, FieldVisibility::Visible),
         );
         let obj_alloc = memory_manager.allocate_object_with_properties(properties);
         result_elements.push(Value::Object(obj_alloc.index));
@@ -3862,17 +3842,11 @@ fn std_object_values_all(
 ) -> Result<Value, RuntimeError> {
     match val {
         Value::Object(o_idx) => {
-            // Collect all (key_index, value) pairs (no visibility filter)
-            let obj = memory_manager.load_object(o_idx);
-            let all_pairs: Vec<(StringIndex, Value)> = obj
-                .properties
-                .iter()
-                .map(|(key, field)| (*key, field.value))
-                .collect();
-            // Load key names for sorting
-            let mut named_pairs: Vec<(String, Value)> = all_pairs
-                .iter()
-                .map(|(key, val)| (memory_manager.load_string(*key).to_string(), *val))
+            // Walk chain; collect all (key, value) pairs including hidden
+            let fields = memory_manager.collect_object_fields_chain(o_idx);
+            let mut named_pairs: Vec<(String, Value)> = fields
+                .into_iter()
+                .map(|(key, val, _)| (memory_manager.load_string(key).to_string(), val))
                 .collect();
             named_pairs.sort_by(|a, b| a.0.cmp(&b.0));
             let elements: Vec<Value> = named_pairs.into_iter().map(|(_, v)| v).collect();
@@ -4014,16 +3988,11 @@ fn std_object_keys_values_all(
             ));
         }
     };
-    // Collect all (key_name, value) pairs — no visibility filter
-    let obj = memory_manager.load_object(o_idx);
-    let all_pairs: Vec<(StringIndex, Value)> = obj
-        .properties
-        .iter()
-        .map(|(key, field)| (*key, field.value))
-        .collect();
-    let mut named_pairs: Vec<(String, Value)> = all_pairs
-        .iter()
-        .map(|(key, val)| (memory_manager.load_string(*key).to_string(), *val))
+    // Collect all (key_name, value) pairs walking the full chain — no visibility filter
+    let fields = memory_manager.collect_object_fields_chain(o_idx);
+    let mut named_pairs: Vec<(String, Value)> = fields
+        .into_iter()
+        .map(|(key, val, _)| (memory_manager.load_string(key).to_string(), val))
         .collect();
     named_pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -4037,11 +4006,11 @@ fn std_object_keys_values_all(
         let mut properties = std::collections::HashMap::new();
         properties.insert(
             key_field_name,
-            ObjectField::new(Value::String(name_str_idx), None, FieldVisibility::Visible),
+            ObjectField::new(Value::String(name_str_idx), FieldVisibility::Visible),
         );
         properties.insert(
             value_field_name,
-            ObjectField::new(val, None, FieldVisibility::Visible),
+            ObjectField::new(val, FieldVisibility::Visible),
         );
         let obj_alloc = memory_manager.allocate_object_with_properties(properties);
         result_elements.push(Value::Object(obj_alloc.index));
@@ -4177,19 +4146,13 @@ fn std_object_remove_key(
             ));
         }
     };
-    // Collect all (StringIndex, ObjectField) pairs from the source object
-    let all_pairs: Vec<(StringIndex, ObjectField)> = memory_manager
-        .load_object(o_idx)
-        .properties
-        .iter()
-        .map(|(k, v)| (*k, v.clone()))
-        .collect();
-    // Filter out the entry whose key name matches target_key
+    // Walk the full chain and flatten, then filter out the target key
+    let all_fields = memory_manager.collect_object_fields_chain(o_idx);
     let mut new_properties = std::collections::HashMap::new();
-    for (key_idx, field) in all_pairs {
+    for (key_idx, val, vis) in all_fields {
         let key_name = memory_manager.load_string(key_idx).to_string();
         if key_name != target_key {
-            new_properties.insert(key_idx, field);
+            new_properties.insert(key_idx, ObjectField::new(val, vis));
         }
     }
     let obj_alloc = memory_manager.allocate_object_with_properties(new_properties);
@@ -4738,7 +4701,7 @@ fn std_object_from_pairs(
         let key_idx = memory_manager.allocate_string(&key).index;
         properties.insert(
             key_idx,
-            ObjectField::new(val, None, FieldVisibility::Visible),
+            ObjectField::new(val, FieldVisibility::Visible),
         );
     }
     let obj_alloc = memory_manager.allocate_object_with_properties(properties);
@@ -4793,19 +4756,15 @@ fn std_pick(
             }
         }
     }
-    // Collect visible fields from the object
-    let all_pairs: Vec<(StringIndex, ObjectField)> = memory_manager
-        .load_object(obj_idx)
-        .properties
-        .iter()
-        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-        .map(|(k, v)| (*k, v.clone()))
-        .collect();
+    // Collect visible fields walking the full chain
+    let all_fields = memory_manager.collect_object_fields_chain(obj_idx);
     let mut new_properties = std::collections::HashMap::new();
-    for (key_idx, field) in all_pairs {
-        let key_name = memory_manager.load_string(key_idx).to_string();
-        if desired.contains(&key_name) {
-            new_properties.insert(key_idx, field);
+    for (key_idx, val, vis) in all_fields {
+        if vis != FieldVisibility::Hidden {
+            let key_name = memory_manager.load_string(key_idx).to_string();
+            if desired.contains(&key_name) {
+                new_properties.insert(key_idx, ObjectField::new(val, vis));
+            }
         }
     }
     let obj_alloc = memory_manager.allocate_object_with_properties(new_properties);
@@ -4860,19 +4819,15 @@ fn std_omit(
             }
         }
     }
-    // Collect visible fields from the object that are not in the excluded set
-    let all_pairs: Vec<(StringIndex, ObjectField)> = memory_manager
-        .load_object(obj_idx)
-        .properties
-        .iter()
-        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-        .map(|(k, v)| (*k, v.clone()))
-        .collect();
+    // Collect visible fields walking the full chain, excluding specified keys
+    let all_fields = memory_manager.collect_object_fields_chain(obj_idx);
     let mut new_properties = std::collections::HashMap::new();
-    for (key_idx, field) in all_pairs {
-        let key_name = memory_manager.load_string(key_idx).to_string();
-        if !excluded.contains(&key_name) {
-            new_properties.insert(key_idx, field);
+    for (key_idx, val, vis) in all_fields {
+        if vis != FieldVisibility::Hidden {
+            let key_name = memory_manager.load_string(key_idx).to_string();
+            if !excluded.contains(&key_name) {
+                new_properties.insert(key_idx, ObjectField::new(val, vis));
+            }
         }
     }
     let obj_alloc = memory_manager.allocate_object_with_properties(new_properties);

@@ -18,23 +18,13 @@ pub struct AllocationResult<T> {
 pub struct ObjectField {
     /// The actual value or Thunk (Closure)
     pub value: Value,
-    /// Cached result of evaluating `value` when accessed directly (self == this object).
-    /// Only set by ObjectIndex, never by SuperIndex. None means not yet computed.
-    pub memo_value: Option<Value>,
-    /// The 'super' object context for this specific field, used during late-binding inheritance
-    pub super_obj: Option<ObjectIndex>,
     /// Field visibility status (: , :: , or :::)
     pub visibility: FieldVisibility,
 }
 
 impl ObjectField {
-    pub fn new(value: Value, super_obj: Option<ObjectIndex>, visibility: FieldVisibility) -> Self {
-        Self {
-            value,
-            memo_value: None,
-            super_obj,
-            visibility,
-        }
+    pub fn new(value: Value, visibility: FieldVisibility) -> Self {
+        Self { value, visibility }
     }
 }
 
@@ -43,8 +33,12 @@ impl ObjectField {
 pub struct ManagedObject {
     /// Object properties mapping interned string keys to fields
     pub properties: HashMap<StringIndex, ObjectField>,
+    /// Cache of evaluated properties, scoped to this exact self object
+    pub memo_cache: HashMap<StringIndex, Value>,
     /// List of object-level assertions to be evaluated during manifestation
     pub assertions: Vec<ClosureIndex>,
+    /// Prototype object for inheritance
+    pub base_object: Option<ObjectIndex>,
     // GC marking
     pub(crate) marked: Cell<bool>,
 }
@@ -56,10 +50,11 @@ impl ManagedObject {
         // HashMap capacity accounts for actual allocated memory, not just length
         let map_capacity_bytes = self.properties.capacity()
             * (std::mem::size_of::<StringIndex>() + std::mem::size_of::<ObjectField>());
-        // Note: ObjectField now includes memo_value (Option<Value>) but size_of already accounts for it
+        let memo_capacity_bytes = self.memo_cache.capacity()
+            * (std::mem::size_of::<StringIndex>() + std::mem::size_of::<Value>());
         let assertions_capacity_bytes =
             self.assertions.capacity() * std::mem::size_of::<ClosureIndex>();
-        base_size + map_capacity_bytes + assertions_capacity_bytes
+        base_size + map_capacity_bytes + memo_capacity_bytes + assertions_capacity_bytes
     }
 
     /// Create a new empty Jsonnet object
@@ -67,7 +62,9 @@ impl ManagedObject {
         let properties = HashMap::new();
         Self {
             properties,
+            memo_cache: HashMap::new(),
             assertions: Vec::new(),
+            base_object: None,
             marked: Cell::new(false),
         }
     }
@@ -76,7 +73,9 @@ impl ManagedObject {
     pub fn with_properties(properties: HashMap<StringIndex, ObjectField>) -> Self {
         Self {
             properties,
+            memo_cache: HashMap::new(),
             assertions: Vec::new(),
+            base_object: None,
             marked: Cell::new(false),
         }
     }
@@ -88,7 +87,9 @@ impl ManagedObject {
     ) -> Self {
         Self {
             properties,
+            memo_cache: HashMap::new(),
             assertions,
+            base_object: None,
             marked: Cell::new(false),
         }
     }
@@ -505,6 +506,22 @@ impl MemoryManager {
         }
     }
 
+    pub fn allocate_object_full_with_base(
+        &mut self,
+        base_object: Option<ObjectIndex>,
+        properties: HashMap<StringIndex, ObjectField>,
+        assertions: Vec<ClosureIndex>,
+    ) -> AllocationResult<ObjectIndex> {
+        let mut obj = ManagedObject::with_properties_and_assertions(properties, assertions);
+        obj.base_object = base_object;
+        self.allocated_bytes += obj.size();
+        let index = self.objects.insert(obj);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
     pub fn allocate_array(&mut self, elements: Vec<Value>) -> AllocationResult<ArrayIndex> {
         let arr = ManagedArray::new(elements);
         self.allocated_bytes += arr.size();
@@ -716,12 +733,15 @@ impl MemoryManager {
                             for (field_key, field) in &managed_object.properties {
                                 values.push_back(Value::String(*field_key));
                                 values.push_back(field.value);
-                                if let Some(memo) = field.memo_value {
-                                    values.push_back(memo);
-                                }
-                                if let Some(super_obj) = field.super_obj {
-                                    values.push_back(Value::Object(super_obj));
-                                }
+                            }
+
+                            for (memo_key, memo_val) in &managed_object.memo_cache {
+                                values.push_back(Value::String(*memo_key));
+                                values.push_back(*memo_val);
+                            }
+
+                            if let Some(base) = managed_object.base_object {
+                                values.push_back(Value::Object(base));
                             }
 
                             for assertion in &managed_object.assertions {
@@ -884,7 +904,7 @@ impl MemoryManager {
                 managed_string.marked.set(false);
             } else {
                 strings_to_delete.push(string_idx);
-                self.allocated_bytes -= managed_string.size();
+                self.allocated_bytes = self.allocated_bytes.saturating_sub(managed_string.size());
             }
         }
 
@@ -894,7 +914,7 @@ impl MemoryManager {
                 obj.marked.set(false);
             } else {
                 objects_to_delete.push(obj_idx);
-                self.allocated_bytes -= obj.size();
+                self.allocated_bytes = self.allocated_bytes.saturating_sub(obj.size());
             }
         }
 
@@ -904,7 +924,7 @@ impl MemoryManager {
                 arr.marked.set(false);
             } else {
                 arrays_to_delete.push(arr_idx);
-                self.allocated_bytes -= arr.size();
+                self.allocated_bytes = self.allocated_bytes.saturating_sub(arr.size());
             }
         }
 
@@ -914,7 +934,7 @@ impl MemoryManager {
                 func.marked.set(false);
             } else {
                 functions_to_delete.push(func_idx);
-                self.allocated_bytes -= func.size();
+                self.allocated_bytes = self.allocated_bytes.saturating_sub(func.size());
             }
         }
 
@@ -924,7 +944,7 @@ impl MemoryManager {
                 closure.marked.set(false);
             } else {
                 closures_to_delete.push(closure_idx);
-                self.allocated_bytes -= closure.size();
+                self.allocated_bytes = self.allocated_bytes.saturating_sub(closure.size());
             }
         }
 
@@ -934,7 +954,7 @@ impl MemoryManager {
                 upvalue.marked.set(false);
             } else {
                 upvalues_to_delete.push(upvalue_idx);
-                self.allocated_bytes -= upvalue.size();
+                self.allocated_bytes = self.allocated_bytes.saturating_sub(upvalue.size());
             }
         }
 
@@ -944,7 +964,7 @@ impl MemoryManager {
                 import.marked.set(false);
             } else {
                 imports_to_delete.push(import_idx);
-                self.allocated_bytes -= import.size();
+                self.allocated_bytes = self.allocated_bytes.saturating_sub(import.size());
             }
         }
 
@@ -954,7 +974,7 @@ impl MemoryManager {
                 binary.marked.set(false);
             } else {
                 binaries_to_delete.push(binary_idx);
-                self.allocated_bytes -= binary.size();
+                self.allocated_bytes = self.allocated_bytes.saturating_sub(binary.size());
             }
         }
 
@@ -1039,6 +1059,28 @@ impl MemoryManager {
 
     pub fn get_object_mut(&mut self, key: ObjectIndex) -> Option<&mut ManagedObject> {
         self.objects.get_mut(key)
+    }
+
+    /// Walk the base_object chain and collect all fields.
+    /// Shallower (closer to root) nodes take precedence on key collision.
+    /// Returns `(StringIndex, Value, FieldVisibility)` for every unique field.
+    pub fn collect_object_fields_chain(
+        &self,
+        root: ObjectIndex,
+    ) -> Vec<(StringIndex, Value, FieldVisibility)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        let mut curr = Some(root);
+        while let Some(idx) = curr {
+            let obj = self.load_object(idx);
+            for (key, field) in &obj.properties {
+                if seen.insert(*key) {
+                    result.push((*key, field.value, field.visibility));
+                }
+            }
+            curr = obj.base_object;
+        }
+        result
     }
 
     pub fn load_string(&self, key: StringIndex) -> &str {
@@ -1173,7 +1215,7 @@ mod tests {
 
         properties.insert(
             name,
-            ObjectField::new(field_value, None, FieldVisibility::Visible),
+            ObjectField::new(field_value, FieldVisibility::Visible),
         );
         let object_index = manager.allocate_object_with_properties(properties).index;
 
@@ -1191,7 +1233,7 @@ mod tests {
 
         properties.insert(
             name,
-            ObjectField::new(field_value, None, FieldVisibility::Visible),
+            ObjectField::new(field_value, FieldVisibility::Visible),
         );
         let object_index = manager.allocate_object_with_properties(properties).index;
 

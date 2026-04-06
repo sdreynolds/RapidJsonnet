@@ -1,5 +1,10 @@
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
+filegroup(
+    name = "extra_benchmarks",
+    srcs = glob(["extra/*.jsonnet"]),
+)
+
 sh_test(
     name = "benchmark_test",
     size = "large",
@@ -8,10 +13,12 @@ sh_test(
         "$(location @hyperfine_bin//:hyperfine)",
         "$(location //:main)",
         "$(locations @jsonnet_test_suite_source//:benchmarks)",
+        "$(locations //benchmarks:extra_benchmarks)",
     ],
     data = [
         "//:main",
         "@jsonnet_test_suite_source//:benchmarks",
+        "//benchmarks:extra_benchmarks",
         "@hyperfine_bin//:hyperfine",
     ],
 )

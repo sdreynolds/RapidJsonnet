@@ -42,7 +42,7 @@ impl std::fmt::Display for TestRunnerError {
 struct DiscoveredField {
     name: String,
     thunk_closure: ClosureIndex,
-    super_obj: Option<ObjectIndex>,
+    super_obj: Option<ObjectIndex>, // base_object of the node that defined this field
 }
 
 /// Discover test* fields from a top-level object.
@@ -56,34 +56,44 @@ fn discover_test_fields(
         _ => return Err(TestRunnerError::NotAnObject),
     };
 
-    let obj = memory_manager.load_object(obj_idx);
     let mut fields = Vec::new();
 
-    for (key_idx, field) in &obj.properties {
-        // Skip hidden fields
-        if matches!(field.visibility, FieldVisibility::Hidden) {
-            continue;
-        }
-
-        let name = memory_manager.load_string(*key_idx).to_string();
-        if !name.starts_with("test") && !name.starts_with("skip_test") {
-            continue;
-        }
-
-        // All object field values should be thunks (Closures with arity=2)
-        match field.value {
-            Value::Closure(ci) => {
-                fields.push(DiscoveredField {
-                    name,
-                    thunk_closure: ci,
-                    super_obj: field.super_obj,
-                });
+    // Walk the base_object chain to collect all test fields
+    let mut curr = Some(obj_idx);
+    let mut seen_names = std::collections::HashSet::new();
+    while let Some(idx) = curr {
+        let obj = memory_manager.load_object(idx);
+        let base = obj.base_object;
+        for (key_idx, field) in &obj.properties {
+            // Skip hidden fields
+            if matches!(field.visibility, FieldVisibility::Hidden) {
+                continue;
             }
-            _ => {
-                // Raw values are not expected for function fields
-                return Err(TestRunnerError::NotAFunction { name });
+
+            let name = memory_manager.load_string(*key_idx).to_string();
+            if !name.starts_with("test") && !name.starts_with("skip_test") {
+                continue;
+            }
+            if !seen_names.insert(name.clone()) {
+                continue; // shallower node already added this field
+            }
+
+            // All object field values should be thunks (Closures with arity=2)
+            match field.value {
+                Value::Closure(ci) => {
+                    fields.push(DiscoveredField {
+                        name,
+                        thunk_closure: ci,
+                        super_obj: base,
+                    });
+                }
+                _ => {
+                    // Raw values are not expected for function fields
+                    return Err(TestRunnerError::NotAFunction { name });
+                }
             }
         }
+        curr = base;
     }
 
     fields.sort_by(|a, b| a.name.cmp(&b.name));

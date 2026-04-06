@@ -14,7 +14,7 @@ use native::{self, call_native};
 extern crate serde_yaml;
 
 /// Maximum number of nested function calls
-const MAX_FRAMES: usize = 256;
+const MAX_FRAMES: usize = 1024;
 
 /// Represents a function call frame on the call stack
 #[derive(Debug, Clone, Copy)]
@@ -383,15 +383,27 @@ impl VirtualMachine {
     /// (self, super) and should return a truthy value or error.
     /// After checking, assertions are cleared so they only run once.
     fn check_object_assertions(&mut self, obj_idx: chunk::ObjectIndex) -> Result<(), RuntimeError> {
-        let assertions = self.memory_manager.load_object(obj_idx).assertions.clone();
-        if assertions.is_empty() {
+        // Walk the base_object chain to collect all assertions
+        let mut all_assertions = Vec::new();
+        let mut curr = Some(obj_idx);
+        while let Some(idx) = curr {
+            let obj = self.memory_manager.load_object(idx);
+            all_assertions.extend(obj.assertions.clone());
+            curr = obj.base_object;
+        }
+        if all_assertions.is_empty() {
             return Ok(());
         }
-        // Clear assertions so they only run once
-        if let Some(obj) = self.memory_manager.get_object_mut(obj_idx) {
-            obj.assertions.clear();
+        // Clear assertions in all chain nodes so they only run once
+        let mut curr = Some(obj_idx);
+        while let Some(idx) = curr {
+            let base = self.memory_manager.load_object(idx).base_object;
+            if let Some(obj) = self.memory_manager.get_object_mut(idx) {
+                obj.assertions.clear();
+            }
+            curr = base;
         }
-        for closure_idx in assertions {
+        for closure_idx in all_assertions {
             self.execute_thunk_sync(closure_idx, Some(obj_idx), None)?;
         }
         Ok(())
@@ -994,62 +1006,100 @@ impl VirtualMachine {
 
     /// Merge two objects (left + right) and return the resulting ObjectIndex.
     /// Used to build full super chains during multi-level inheritance.
+    pub fn get_object_field_resolution(
+        &self,
+        target_obj: ObjectIndex,
+        key: StringIndex,
+    ) -> Option<(ObjectField, ObjectIndex)> {
+        let mut curr = Some(target_obj);
+        while let Some(obj_idx) = curr {
+            let obj = self.memory_manager.load_object(obj_idx);
+            if let Some(field) = obj.get_field(&key) {
+                return Some((field.clone(), obj_idx));
+            }
+            curr = obj.base_object;
+        }
+        None
+    }
+
+    /// Enumerate all fields of an object by walking the base_object chain.
+    /// Returns (key, value, super_obj_for_field, visibility) with shallower nodes winning on collision.
+    fn enumerate_object_fields(
+        &self,
+        root: ObjectIndex,
+    ) -> Vec<(StringIndex, Value, Option<ObjectIndex>, FieldVisibility)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        let mut curr = Some(root);
+        while let Some(idx) = curr {
+            let obj = self.memory_manager.load_object(idx);
+            let base = obj.base_object;
+            for (key, field) in &obj.properties {
+                if seen.insert(*key) {
+                    result.push((*key, field.value, base, field.visibility));
+                }
+            }
+            curr = base;
+        }
+        result
+    }
+
+    /// Merge two objects (left + right) and return the resulting ObjectIndex.
+    /// Used to build full super chains during multi-level inheritance.
     fn merge_objects(
         &mut self,
         left_key: ObjectIndex,
         right_key: ObjectIndex,
     ) -> Result<ObjectIndex, RuntimeError> {
-        // Clone everything up front to avoid borrow conflicts with self.merge_objects
-        let left_object = self.memory_manager.load_object(left_key);
-        let mut merged_properties = left_object.properties.clone();
-        // Clear memo caches: the merged object has a new self, so cached values are stale
-        for field in merged_properties.values_mut() {
-            field.memo_value = None;
+        let mut chain = Vec::new();
+        let mut curr = Some(right_key);
+        while let Some(c) = curr {
+            chain.push(c);
+            curr = self.memory_manager.load_object(c).base_object;
         }
-        let left_assertions = left_object.assertions.clone();
 
-        let right_object = self.memory_manager.load_object(right_key);
-        let right_props: Vec<_> = right_object
-            .properties
-            .iter()
-            .map(|(k, f)| (*k, f.clone()))
-            .collect();
-        let right_assertions = right_object.assertions.clone();
-
-        for (key, right_field) in right_props {
-            let visibility = if right_field.visibility == FieldVisibility::Visible {
-                merged_properties
-                    .get(&key)
-                    .map(|f| f.visibility)
-                    .unwrap_or(FieldVisibility::Visible)
-            } else {
-                right_field.visibility
+        let mut current_base = left_key;
+        for &node_key in chain.iter().rev() {
+            // Phase 1: extract raw field data (drops the borrow before phase 2)
+            let (raw_fields, assertions): (Vec<(StringIndex, Value, FieldVisibility)>, Vec<_>) = {
+                let obj = self.memory_manager.load_object(node_key);
+                (
+                    obj.properties
+                        .iter()
+                        .map(|(k, f)| (*k, f.value, f.visibility))
+                        .collect(),
+                    obj.assertions.clone(),
+                )
             };
 
-            let super_obj = match right_field.super_obj {
-                Some(existing_super) => {
-                    let merged_super = self.merge_objects(left_key, existing_super)?;
-                    Some(merged_super)
-                }
-                None => Some(left_key),
-            };
+            // Phase 2: apply visibility inheritance per spec rule h_L + h_R:
+            //   h_L + h_R = h_L  if h_R = ':'  (right uses ':' → inherit left's visibility)
+            //   h_L + h_R = h_R  otherwise       (right explicitly sets hidden/force-visible)
+            let mut properties = std::collections::HashMap::new();
+            for (key, value, vis) in raw_fields {
+                let final_vis = if vis == FieldVisibility::Visible {
+                    // Right uses ':', so inherit from left chain if the field exists there
+                    self.get_object_field_resolution(left_key, key)
+                        .map(|(f, _)| f.visibility)
+                        .unwrap_or(FieldVisibility::Visible)
+                } else {
+                    // Right explicitly sets :: or :::, use it directly
+                    vis
+                };
+                properties.insert(key, ObjectField::new(value, final_vis));
+            }
 
-            merged_properties.insert(
-                key,
-                ObjectField::new(right_field.value.clone(), super_obj, visibility),
+            // Phase 3: allocate merged node
+            let new_obj_allocation = self.memory_manager.allocate_object_full_with_base(
+                Some(current_base),
+                properties,
+                assertions,
             );
+            current_base = new_obj_allocation.index;
+            // The caller (Opcode::Add) will push the final result and can GC then.
         }
 
-        let mut merged_assertions = left_assertions;
-        merged_assertions.extend(right_assertions);
-
-        // Don't trigger GC here — intermediate merge results aren't rooted on the stack.
-        // The caller (Opcode::Add) will push the final result and can GC then.
-        let allocation = self
-            .memory_manager
-            .allocate_object_full(merged_properties, merged_assertions);
-
-        Ok(allocation.index)
+        Ok(current_base)
     }
 
     /// Call a closure with the given number of arguments and optional object context.
@@ -1546,8 +1596,8 @@ impl VirtualMachine {
 
                     match (key_val, object_val) {
                         (Value::String(key), Value::Object(obj_idx)) => {
-                            let obj = self.memory_manager.load_object(obj_idx);
-                            let has_field = obj.get_field(&key).is_some();
+                            let has_field =
+                                self.get_object_field_resolution(obj_idx, key).is_some();
                             self.push(Value::Boolean(has_field))?;
                         }
                         (key, obj) => {
@@ -1571,8 +1621,8 @@ impl VirtualMachine {
                     let has_field = if let (Value::String(field_key), Some(super_key)) =
                         (field_name, super_obj_key)
                     {
-                        let obj = self.memory_manager.load_object(super_key);
-                        obj.get_field(&field_key).is_some()
+                        self.get_object_field_resolution(super_key, field_key)
+                            .is_some()
                     } else {
                         false
                     };
@@ -1604,28 +1654,28 @@ impl VirtualMachine {
                     };
 
                     if let Value::String(field_key) = field_name {
-                        let field = self
-                            .memory_manager
-                            .load_object(super_obj_key)
-                            .get_field(&field_key)
-                            .cloned();
+                        let resolution = self.get_object_field_resolution(super_obj_key, field_key);
 
-                        if let Some(field) = field {
+                        if let Some((field, defining_node)) = resolution {
                             match field.value {
                                 Value::Closure(closure_idx) => {
                                     self.advance_pc();
                                     self.push(Value::Closure(closure_idx))?;
                                     self.push(Value::Object(self_obj_key))?; // ORIGINAL self
+
+                                    let new_super =
+                                        self.memory_manager.load_object(defining_node).base_object;
                                     let super_val =
-                                        field.super_obj.map(Value::Object).unwrap_or(Value::Null);
+                                        new_super.map(Value::Object).unwrap_or(Value::Null);
                                     self.push(super_val)?;
+
                                     // Set field name for LoadFieldName opcode
                                     self.pending_field_name = Some(field_key);
                                     self.call_closure(
                                         closure_idx,
                                         2,
                                         Some(self_obj_key),
-                                        field.super_obj,
+                                        new_super,
                                     )?;
                                     continue;
                                 }
@@ -2164,7 +2214,7 @@ impl VirtualMachine {
                             Value::String(key_str) => {
                                 properties.insert(
                                     key_str,
-                                    ObjectField::new(value, None, FieldVisibility::Visible),
+                                    ObjectField::new(value, FieldVisibility::Visible),
                                 );
                             }
                             Value::Null => {
@@ -2248,8 +2298,7 @@ impl VirtualMachine {
 
                             match key {
                                 Value::String(key_str) => {
-                                    properties
-                                        .insert(key_str, ObjectField::new(value, None, visibility));
+                                    properties.insert(key_str, ObjectField::new(value, visibility));
                                 }
                                 Value::Null => {
                                     // Null keys are omitted
@@ -2330,28 +2379,30 @@ impl VirtualMachine {
                     if let Value::Object(object_key) = object_value {
                         // Ensure field name is a string
                         if let Value::String(field_key) = field_name {
-                            let field = self
-                                .memory_manager
-                                .load_object(object_key)
-                                .get_field(&field_key)
-                                .cloned();
+                            // Check memo cache first
+                            let obj = self.memory_manager.load_object(object_key);
+                            if let Some(memo) = obj.memo_cache.get(&field_key) {
+                                self.push(memo.clone())?;
+                            } else {
+                                let resolution =
+                                    self.get_object_field_resolution(object_key, field_key);
 
-                            if let Some(field) = field {
-                                // Check memo cache first
-                                if let Some(memo) = field.memo_value {
-                                    self.push(memo)?;
-                                } else {
+                                if let Some((field, defining_node)) = resolution {
                                     match field.value {
                                         Value::Closure(closure_idx) => {
                                             // It's a thunk! We need to call it with (self, super)
                                             self.advance_pc(); // Advance past ObjectIndex before calling
                                             self.push(Value::Closure(closure_idx))?;
                                             self.push(Value::Object(object_key))?; // self
-                                            let super_val = field
-                                                .super_obj
-                                                .map(Value::Object)
-                                                .unwrap_or(Value::Null);
+
+                                            let new_super = self
+                                                .memory_manager
+                                                .load_object(defining_node)
+                                                .base_object;
+                                            let super_val =
+                                                new_super.map(Value::Object).unwrap_or(Value::Null);
                                             self.push(super_val)?; // super
+
                                             // Set field name for LoadFieldName opcode
                                             self.pending_field_name = Some(field_key);
                                             // Set memo target so Return can cache the result
@@ -2361,7 +2412,7 @@ impl VirtualMachine {
                                                 closure_idx,
                                                 2,
                                                 Some(object_key),
-                                                field.super_obj,
+                                                new_super,
                                             )?;
                                             continue;
                                         }
@@ -2370,10 +2421,10 @@ impl VirtualMachine {
                                             self.push(field.value.clone())?;
                                         }
                                     }
+                                } else {
+                                    // Property doesn't exist, push null
+                                    self.push(Value::Null)?;
                                 }
-                            } else {
-                                // Property doesn't exist, push null
-                                self.push(Value::Null)?;
                             }
                         } else {
                             return Err(RuntimeError::new(
@@ -2509,28 +2560,22 @@ impl VirtualMachine {
                             self.check_object_assertions(object_key)?;
                             // Object indexing with string
                             if let Value::String(field_key) = index_value {
-                                let field = self
-                                    .memory_manager
-                                    .load_object(object_key)
-                                    .get_field(&field_key)
-                                    .cloned();
+                                let resolution = self.get_object_field_resolution(object_key, field_key);
 
-                                if let Some(field) = field {
+                                if let Some((field, defining_node)) = resolution {
                                     match field.value {
                                         Value::Closure(closure_idx) => {
                                             self.advance_pc();
                                             self.push(Value::Closure(closure_idx))?;
                                             self.push(Value::Object(object_key))?; // self
-                                            let super_val = field
-                                                .super_obj
-                                                .map(Value::Object)
-                                                .unwrap_or(Value::Null);
+                                            let new_super = self.memory_manager.load_object(defining_node).base_object;
+                                            let super_val = new_super.map(Value::Object).unwrap_or(Value::Null);
                                             self.push(super_val)?;
                                             self.call_closure(
                                                 closure_idx,
                                                 2,
                                                 Some(object_key),
-                                                field.super_obj,
+                                                new_super,
                                             )?;
                                             continue;
                                         }
@@ -2682,39 +2727,34 @@ impl VirtualMachine {
                     if let (Value::Object(left_key), Value::Object(right_key)) =
                         (left_value, right_value)
                     {
-                        let (left_object, right_object) = (
-                            self.memory_manager.load_object(left_key),
-                            self.memory_manager.load_object(right_key),
-                        );
-                        // Create merged properties starting with left object
-                        let mut merged_properties = left_object.properties.clone();
-
-                        // Override/add properties from right object
-                        for (key, right_field) in &right_object.properties {
-                            // Visibility inheritance: if right visibility is ':', inherit from left if it exists
-                            let visibility = if right_field.visibility == FieldVisibility::Visible {
-                                if let Some(left_field) = left_object.get_field(key) {
-                                    left_field.visibility
-                                } else {
-                                    FieldVisibility::Visible
-                                }
+                        // Lazy merge: right properties with base_object pointing to left
+                        let (right_props_raw, right_assertions): (Vec<_>, Vec<_>) = {
+                            let right_object = self.memory_manager.load_object(right_key);
+                            (
+                                right_object
+                                    .properties
+                                    .iter()
+                                    .map(|(k, f)| (*k, f.value, f.visibility))
+                                    .collect(),
+                                right_object.assertions.clone(),
+                            )
+                        };
+                        let mut merged_properties = std::collections::HashMap::new();
+                        for (key, value, vis_raw) in right_props_raw {
+                            // Visibility inheritance: if right is ':', inherit from left chain if present
+                            let visibility = if vis_raw == FieldVisibility::Visible {
+                                self.get_object_field_resolution(left_key, key)
+                                    .map(|(f, _)| f.visibility)
+                                    .unwrap_or(FieldVisibility::Visible)
                             } else {
-                                right_field.visibility
+                                vis_raw
                             };
-
-                            merged_properties.insert(
-                                *key,
-                                ObjectField::new(right_field.value, Some(left_key), visibility),
-                            );
+                            merged_properties.insert(key, ObjectField::new(value, visibility));
                         }
-
-                        // Concatenate assertions: left then right
-                        let mut merged_assertions = left_object.assertions.clone();
-                        merged_assertions.extend(right_object.assertions.clone());
 
                         let merged_allocation = self
                             .memory_manager
-                            .allocate_object_full(merged_properties, merged_assertions);
+                            .allocate_object_full_with_base(Some(left_key), merged_properties, right_assertions);
                         self.push(Value::Object(merged_allocation.index))?;
                         if merged_allocation.should_garbage_collect {
                             #[cfg(feature = "gc_debug")]
@@ -2811,33 +2851,27 @@ impl VirtualMachine {
                             }
                         };
 
-                        let obj = self.memory_manager.load_object(o_idx);
-                        let found: Option<(Value, FieldVisibility, Option<ObjectIndex>)> = obj
-                            .properties
-                            .iter()
-                            .find(|(k, _)| {
-                                self.memory_manager.load_string(**k) == field_name.as_str()
-                            })
-                            .map(|(_, f)| (f.value, f.visibility, f.super_obj));
+                        // Walk the chain to find the field (inc_hidden controls visibility filter)
+                        let found = self.enumerate_object_fields(o_idx)
+                            .into_iter()
+                            .find(|(k, _, _, vis)| {
+                                self.memory_manager.load_string(*k) == field_name.as_str()
+                                    && (inc_hidden || *vis != FieldVisibility::Hidden)
+                            });
 
                         let result = match found {
-                            Some((val, visibility, super_obj)) => {
-                                if inc_hidden || visibility != FieldVisibility::Hidden {
-                                    // Force-evaluate thunk if needed
-                                    match val {
-                                        Value::Closure(closure_idx) => {
-                                            let result = self.execute_thunk_sync(
-                                                closure_idx,
-                                                Some(o_idx),
-                                                super_obj,
-                                            )?;
-                                            self.push(result)?;
-                                            continue;
-                                        }
-                                        _ => val,
+                            Some((_, val, super_obj, _)) => {
+                                match val {
+                                    Value::Closure(closure_idx) => {
+                                        let result = self.execute_thunk_sync(
+                                            closure_idx,
+                                            Some(o_idx),
+                                            super_obj,
+                                        )?;
+                                        self.push(result)?;
+                                        continue;
                                     }
-                                } else {
-                                    default_val
+                                    _ => val,
                                 }
                             }
                             None => default_val,
@@ -2853,18 +2887,12 @@ impl VirtualMachine {
                         if let Value::Object(o_idx) = vals_val {
                             let span = self.get_current_span();
                             let source_id = self.current_chunk().source_id.to_string();
-                            // Collect all (key_string_idx, raw_value, super_obj) pairs
-                            let pairs: Vec<(StringIndex, Value, Option<ObjectIndex>)> = self
-                                .memory_manager
-                                .load_object(o_idx)
-                                .properties
-                                .iter()
-                                .map(|(k, f)| (*k, f.value, f.super_obj))
-                                .collect();
+                            // Collect all (key, raw_value, super_obj) pairs from chain
+                            let pairs = self.enumerate_object_fields(o_idx);
                             // Evaluate each field
                             let mut evaluated: Vec<(StringIndex, Value)> =
                                 Vec::with_capacity(pairs.len());
-                            for (k, v, super_obj) in pairs {
+                            for (k, v, super_obj, _vis) in pairs {
                                 let ev = match v {
                                     Value::Closure(closure_idx) => self.execute_thunk_sync(
                                         closure_idx,
@@ -2880,11 +2908,7 @@ impl VirtualMachine {
                             for (k, v) in evaluated {
                                 properties.insert(
                                     k,
-                                    memory_manager::ObjectField::new(
-                                        v,
-                                        None,
-                                        FieldVisibility::Visible,
-                                    ),
+                                    memory_manager::ObjectField::new(v, FieldVisibility::Visible),
                                 );
                             }
                             let new_obj_alloc = self
@@ -3234,19 +3258,8 @@ impl VirtualMachine {
                         if let Value::Object(o_idx) = args[0] {
                             let span = self.get_current_span();
                             let source_id = self.current_chunk().source_id.to_string();
-                            // Collect all (key, raw_value, super_obj, visibility) tuples
-                            let field_data: Vec<(
-                                chunk::StringIndex,
-                                Value,
-                                Option<ObjectIndex>,
-                                FieldVisibility,
-                            )> = self
-                                .memory_manager
-                                .load_object(o_idx)
-                                .properties
-                                .iter()
-                                .map(|(k, f)| (*k, f.value, f.super_obj, f.visibility))
-                                .collect();
+                            // Collect all (key, raw_value, super_obj, visibility) tuples from chain
+                            let field_data = self.enumerate_object_fields(o_idx);
                             // Evaluate each field's thunk
                             let mut evaluated: Vec<(chunk::StringIndex, Value, FieldVisibility)> =
                                 Vec::with_capacity(field_data.len());
@@ -3265,7 +3278,7 @@ impl VirtualMachine {
                             let mut properties = std::collections::HashMap::new();
                             for (k, v, vis) in evaluated {
                                 properties
-                                    .insert(k, memory_manager::ObjectField::new(v, None, vis));
+                                    .insert(k, memory_manager::ObjectField::new(v, vis));
                             }
                             let new_obj_alloc = self
                                 .memory_manager
@@ -3746,7 +3759,7 @@ impl VirtualMachine {
                             let result =
                                 self.call_value_with_two_args(func_val, key_val, evaled_val);
                             self.memory_manager.pop_external_roots();
-                            new_properties.insert(k_idx, ObjectField::new(result?, None, vis));
+                            new_properties.insert(k_idx, ObjectField::new(result?, vis));
                         }
                         let alloc = self
                             .memory_manager
@@ -4556,7 +4569,6 @@ impl VirtualMachine {
                                 k_alloc.index,
                                 memory_manager::ObjectField::new(
                                     Value::Array(arr_alloc.index),
-                                    None,
                                     FieldVisibility::Visible,
                                 ),
                             );
@@ -4688,7 +4700,6 @@ impl VirtualMachine {
                                 k_alloc.index,
                                 memory_manager::ObjectField::new(
                                     Value::Number(count as f64),
-                                    None,
                                     FieldVisibility::Visible,
                                 ),
                             );
@@ -4971,7 +4982,7 @@ impl VirtualMachine {
                             let new_k_alloc = self.memory_manager.allocate_string(&new_key_str);
                             new_properties.insert(
                                 new_k_alloc.index,
-                                memory_manager::ObjectField::new(evaled_val, None, vis),
+                                memory_manager::ObjectField::new(evaled_val, vis),
                             );
                         }
                         let alloc = self
@@ -5044,7 +5055,7 @@ impl VirtualMachine {
                                 Value::Boolean(true) => {
                                     kept_properties.insert(
                                         k_idx,
-                                        memory_manager::ObjectField::new(evaled_val, None, vis),
+                                        memory_manager::ObjectField::new(evaled_val, vis),
                                     );
                                 }
                                 Value::Boolean(false) => {}
@@ -5112,7 +5123,7 @@ impl VirtualMachine {
                             let k_alloc = self.memory_manager.allocate_string(&k_str);
                             properties.insert(
                                 k_alloc.index,
-                                memory_manager::ObjectField::new(v, None, FieldVisibility::Visible),
+                                memory_manager::ObjectField::new(v, FieldVisibility::Visible),
                             );
                         }
                         let obj_alloc = self
@@ -6462,7 +6473,6 @@ impl VirtualMachine {
                                             k_alloc.index,
                                             memory_manager::ObjectField::new(
                                                 Value::Array(arr_alloc.index),
-                                                None,
                                                 FieldVisibility::Visible,
                                             ),
                                         );
@@ -6593,7 +6603,6 @@ impl VirtualMachine {
                                             k_alloc.index,
                                             memory_manager::ObjectField::new(
                                                 Value::Number(count as f64),
-                                                None,
                                                 FieldVisibility::Visible,
                                             ),
                                         );
@@ -6900,7 +6909,7 @@ impl VirtualMachine {
                                             self.memory_manager.allocate_string(&new_key_str);
                                         new_properties.insert(
                                             new_k_alloc.index,
-                                            memory_manager::ObjectField::new(evaled_val, None, vis),
+                                            memory_manager::ObjectField::new(evaled_val, vis),
                                         );
                                     }
                                     let alloc = self
@@ -6986,9 +6995,7 @@ impl VirtualMachine {
                                             Value::Boolean(true) => {
                                                 kept_properties.insert(
                                                     k_idx,
-                                                    memory_manager::ObjectField::new(
-                                                        evaled_val, None, vis,
-                                                    ),
+                                                    memory_manager::ObjectField::new(evaled_val, vis),
                                                 );
                                             }
                                             Value::Boolean(false) => {}
@@ -7059,11 +7066,7 @@ impl VirtualMachine {
                                         let k_alloc = self.memory_manager.allocate_string(&k_str);
                                         properties.insert(
                                             k_alloc.index,
-                                            memory_manager::ObjectField::new(
-                                                v,
-                                                None,
-                                                FieldVisibility::Visible,
-                                            ),
+                                            memory_manager::ObjectField::new(v, FieldVisibility::Visible),
                                         );
                                     }
                                     let obj_alloc = self
@@ -7397,9 +7400,7 @@ impl VirtualMachine {
                         let memo_target = self.current_frame().memo_target;
                         if let Some((obj_key, fld_key)) = memo_target {
                             if let Some(obj) = self.memory_manager.get_object_mut(obj_key) {
-                                if let Some(field) = obj.properties.get_mut(&fld_key) {
-                                    field.memo_value = Some(return_value);
-                                }
+                                obj.memo_cache.insert(fld_key, return_value);
                             }
                         }
                     }
@@ -7650,11 +7651,7 @@ impl VirtualMachine {
             let key = self.memory_manager.allocate_string(name).index;
             properties.insert(
                 key,
-                memory_manager::ObjectField::new(
-                    Value::NativeFunction(id),
-                    None,
-                    FieldVisibility::Hidden,
-                ),
+                memory_manager::ObjectField::new(Value::NativeFunction(id), FieldVisibility::Hidden),
             );
         }
         let alloc = self
@@ -7811,35 +7808,32 @@ impl VirtualMachine {
         &mut self,
         obj_idx: ObjectIndex,
     ) -> Result<std::collections::HashMap<StringIndex, Value>, RuntimeError> {
-        let obj = self.memory_manager.load_object(obj_idx);
         let mut visible_fields = std::collections::HashMap::new();
 
-        let properties: Vec<(StringIndex, ObjectField)> = obj
-            .properties
-            .iter()
-            .map(|(&k, f)| (k, f.clone()))
-            .collect();
+        let properties: Vec<(StringIndex, Value, Option<ObjectIndex>, FieldVisibility)> =
+            self.enumerate_object_fields(obj_idx)
+                .into_iter()
+                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                .collect();
 
-        for (name, field) in properties {
-            if field.visibility != FieldVisibility::Hidden {
-                let current_vals: Vec<Value> = visible_fields.values().cloned().collect();
-                self.memory_manager.external_roots.push(current_vals);
+        for (name, value, super_obj, _vis) in properties {
+            let current_vals: Vec<Value> = visible_fields.values().cloned().collect();
+            self.memory_manager.external_roots.push(current_vals);
 
-                let val_res = match field.value {
-                    Value::Closure(closure_idx) => self.execute_thunk_sync_with_field(
-                        closure_idx,
-                        Some(obj_idx),
-                        field.super_obj,
-                        Some(name),
-                    ),
-                    other => Ok(other),
-                };
+            let val_res = match value {
+                Value::Closure(closure_idx) => self.execute_thunk_sync_with_field(
+                    closure_idx,
+                    Some(obj_idx),
+                    super_obj,
+                    Some(name),
+                ),
+                other => Ok(other),
+            };
 
-                self.memory_manager.external_roots.pop();
+            self.memory_manager.external_roots.pop();
 
-                let val = val_res?;
-                visible_fields.insert(name, val);
-            }
+            let val = val_res?;
+            visible_fields.insert(name, val);
         }
         Ok(visible_fields)
     }
@@ -7883,22 +7877,21 @@ impl VirtualMachine {
                     }
 
                     visited.insert(object_key);
-                    let obj = self.memory_manager.load_object(object_key);
-                    let properties: Vec<(StringIndex, ObjectField)> = obj
-                        .properties
-                        .iter()
-                        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-                        .map(|(k, field)| (*k, field.clone()))
-                        .collect();
+                    let properties: Vec<(StringIndex, Value, Option<ObjectIndex>)> =
+                        self.enumerate_object_fields(object_key)
+                            .into_iter()
+                            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                            .map(|(k, v, so, _)| (k, v, so))
+                            .collect();
 
                     let mut json_object = serde_json::Map::new();
 
-                    for (key, field) in properties {
-                        let field_value = match field.value {
+                    for (key, value, super_obj) in properties {
+                        let field_value = match value {
                             Value::Closure(closure_idx) => self.execute_thunk_sync_with_field(
                                 closure_idx,
                                 Some(object_key),
-                                field.super_obj,
+                                super_obj,
                                 Some(key),
                             )?,
                             v => v,
@@ -8057,11 +8050,7 @@ impl VirtualMachine {
                     let val = self.json_to_jsonnet_value(v)?;
                     props.insert(
                         key_idx,
-                        memory_manager::ObjectField::new(
-                            val,
-                            None,
-                            chunk::FieldVisibility::Visible,
-                        ),
+                        memory_manager::ObjectField::new(val, chunk::FieldVisibility::Visible),
                     );
                 }
                 let alloc = self.memory_manager.allocate_object_with_properties(props);
@@ -8390,7 +8379,7 @@ impl VirtualMachine {
             let val = self.parse_json_inner(bytes, pos, span, source_id)?;
             props.insert(
                 key_idx,
-                memory_manager::ObjectField::new(val, None, chunk::FieldVisibility::Visible),
+                memory_manager::ObjectField::new(val, chunk::FieldVisibility::Visible),
             );
             self.skip_json_ws(bytes, pos);
             if *pos >= bytes.len() {
@@ -8465,21 +8454,12 @@ impl VirtualMachine {
             }
             Value::Object(o_idx) => {
                 self.check_object_assertions(*o_idx)?;
-                let field_data: Vec<(String, Value, Option<ObjectIndex>)> = {
-                    let obj = self.memory_manager.load_object(*o_idx);
-                    let mut fields: Vec<(StringIndex, Value, Option<ObjectIndex>)> = obj
-                        .properties
-                        .iter()
-                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                        .map(|(k, f)| (*k, f.value, f.super_obj))
-                        .collect();
-                    fields.sort_by(|(ka, _, _), (kb, _, _)| ka.cmp(kb));
-                    fields
+                let mut sorted_fields: Vec<(String, Value, Option<ObjectIndex>)> =
+                    self.enumerate_object_fields(*o_idx)
                         .into_iter()
-                        .map(|(k, v, so)| (self.memory_manager.load_string(k).to_string(), v, so))
-                        .collect()
-                };
-                let mut sorted_fields = field_data;
+                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                        .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
+                        .collect();
                 sorted_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                 if sorted_fields.is_empty() {
@@ -8705,32 +8685,13 @@ impl VirtualMachine {
                 Value::Object(o_idx) => {
                     // Check deferred assertions during manifestation
                     self.check_object_assertions(o_idx)?;
-                    // Collect visible fields
-                    let field_data: Vec<(StringIndex, Value, Option<ObjectIndex>)> = {
-                        let obj = self.memory_manager.load_object(o_idx);
-                        let mut fields: Vec<(StringIndex, Value, Option<ObjectIndex>)> = obj
-                            .properties
-                            .iter()
-                            .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                            .map(|(k, f)| (*k, f.value, f.super_obj))
+                    // Collect visible fields from the full chain
+                    let mut sorted_fields: Vec<(String, Value, Option<ObjectIndex>)> =
+                        self.enumerate_object_fields(o_idx)
+                            .into_iter()
+                            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                            .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
                             .collect();
-                        // Sort by field name
-                        fields.sort_by(|(ka, _, _), (kb, _, _)| {
-                            let sa = obj.properties.get(ka).map(|_| {
-                                // We need to sort by key string; collect key strings separately
-                                *ka
-                            });
-                            let _ = sa;
-                            ka.cmp(kb)
-                        });
-                        fields
-                    };
-
-                    // Sort fields by string name
-                    let mut sorted_fields: Vec<(String, Value, Option<ObjectIndex>)> = field_data
-                        .into_iter()
-                        .map(|(k, v, so)| (self.memory_manager.load_string(k).to_string(), v, so))
-                        .collect();
                     sorted_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                     if sorted_fields.is_empty() {
@@ -8906,10 +8867,10 @@ impl VirtualMachine {
         let mut result: std::collections::HashMap<StringIndex, memory_manager::ObjectField> =
             match target {
                 Value::Object(t_idx) => {
-                    let obj = self.memory_manager.load_object(t_idx);
-                    obj.properties
-                        .iter()
-                        .map(|(k, f)| (*k, f.clone()))
+                    // Walk the chain to get all fields from target
+                    self.enumerate_object_fields(t_idx)
+                        .into_iter()
+                        .map(|(k, v, _super_obj, vis)| (k, memory_manager::ObjectField::new(v, vis)))
                         .collect()
                 }
                 _ => std::collections::HashMap::new(),
@@ -8962,7 +8923,7 @@ impl VirtualMachine {
 
                 result.insert(
                     key,
-                    memory_manager::ObjectField::new(merged, field.super_obj, field.visibility),
+                    memory_manager::ObjectField::new(merged, field.visibility),
                 );
             }
         }
@@ -9000,19 +8961,11 @@ impl VirtualMachine {
                 // Root the object and all field values to protect from GC
                 self.memory_manager
                     .push_external_roots(vec![Value::Object(o_idx)], Vec::new());
-                let field_data: Vec<(
-                    StringIndex,
-                    Value,
-                    Option<ObjectIndex>,
-                    chunk::FieldVisibility,
-                )> = {
-                    let obj = self.memory_manager.load_object(o_idx);
-                    obj.properties
-                        .iter()
-                        .filter(|(_, f)| f.visibility != chunk::FieldVisibility::Hidden)
-                        .map(|(k, f)| (*k, f.value, f.super_obj, f.visibility))
-                        .collect()
-                };
+                let field_data: Vec<(StringIndex, Value, Option<ObjectIndex>, chunk::FieldVisibility)> =
+                    self.enumerate_object_fields(o_idx)
+                        .into_iter()
+                        .filter(|(_, _, _, vis)| *vis != chunk::FieldVisibility::Hidden)
+                        .collect();
                 let field_vals: Vec<Value> = field_data.iter().map(|(_, v, _, _)| *v).collect();
                 self.memory_manager
                     .push_external_roots(field_vals, Vec::new());
@@ -9028,7 +8981,7 @@ impl VirtualMachine {
                             temp_vals.push(f.value);
                         }
                         self.memory_manager.external_roots.push(temp_vals);
-                        eval_v = self.execute_thunk_sync(closure_idx, Some(o_idx), None)?;
+                        eval_v = self.execute_thunk_sync(closure_idx, Some(o_idx), super_obj)?;
                         self.memory_manager.external_roots.pop();
                     }
 
@@ -9043,7 +8996,7 @@ impl VirtualMachine {
                     if !self.is_prunable(pruned_v)? {
                         new_props.insert(
                             k,
-                            memory_manager::ObjectField::new(pruned_v, super_obj, vis),
+                            memory_manager::ObjectField::new(pruned_v, vis),
                         );
                     }
                 }
@@ -9183,18 +9136,12 @@ impl VirtualMachine {
             .push_external_roots(vec![Value::Object(obj_idx)], Vec::new());
 
         // Process "main" section (no header)
-        let main_val = {
-            let obj = self.memory_manager.load_object(obj_idx);
-            obj.properties.iter().find_map(|(k, f)| {
-                if self.memory_manager.load_string(*k) == "main"
-                    && f.visibility != FieldVisibility::Hidden
-                {
-                    Some((f.value, f.super_obj))
-                } else {
-                    None
-                }
+        let main_val = self.enumerate_object_fields(obj_idx)
+            .into_iter()
+            .find(|(k, _, _, vis)| {
+                self.memory_manager.load_string(*k) == "main" && *vis != FieldVisibility::Hidden
             })
-        };
+            .map(|(_, v, so, _)| (v, so));
         if let Some((main_raw, main_super)) = main_val {
             let main_forced = match main_raw {
                 Value::Closure(c) => self.execute_thunk_sync(c, Some(obj_idx), main_super)?,
@@ -9218,23 +9165,13 @@ impl VirtualMachine {
             // Root main_obj_idx
             self.memory_manager
                 .push_external_roots(vec![Value::Object(main_obj_idx)], Vec::new());
-            let main_fields: Vec<(String, Value, Option<ObjectIndex>)> = {
-                let mobj = self.memory_manager.load_object(main_obj_idx);
-                let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = mobj
-                    .properties
-                    .iter()
-                    .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                    .map(|(k, f)| {
-                        (
-                            self.memory_manager.load_string(*k).to_string(),
-                            f.value,
-                            f.super_obj,
-                        )
-                    })
+            let mut main_fields: Vec<(String, Value, Option<ObjectIndex>)> =
+                self.enumerate_object_fields(main_obj_idx)
+                    .into_iter()
+                    .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                    .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
                     .collect();
-                fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-                fields
-            };
+            main_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
             for (key, val, super_obj) in main_fields {
                 let forced_val = match val {
                     Value::Closure(c) => {
@@ -9249,18 +9186,12 @@ impl VirtualMachine {
         }
 
         // Process named sections
-        let sections_val = {
-            let obj = self.memory_manager.load_object(obj_idx);
-            obj.properties.iter().find_map(|(k, f)| {
-                if self.memory_manager.load_string(*k) == "sections"
-                    && f.visibility != FieldVisibility::Hidden
-                {
-                    Some((f.value, f.super_obj))
-                } else {
-                    None
-                }
+        let sections_val = self.enumerate_object_fields(obj_idx)
+            .into_iter()
+            .find(|(k, _, _, vis)| {
+                self.memory_manager.load_string(*k) == "sections" && *vis != FieldVisibility::Hidden
             })
-        };
+            .map(|(_, v, so, _)| (v, so));
         if let Some((sections_raw, sections_super)) = sections_val {
             let sections_forced = match sections_raw {
                 Value::Closure(c) => self.execute_thunk_sync(c, Some(obj_idx), sections_super)?,
@@ -9284,23 +9215,13 @@ impl VirtualMachine {
             // Root sections_obj_idx
             self.memory_manager
                 .push_external_roots(vec![Value::Object(sections_obj_idx)], Vec::new());
-            let section_names: Vec<(String, Value, Option<ObjectIndex>)> = {
-                let sobj = self.memory_manager.load_object(sections_obj_idx);
-                let mut names: Vec<(String, Value, Option<ObjectIndex>)> = sobj
-                    .properties
-                    .iter()
-                    .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                    .map(|(k, f)| {
-                        (
-                            self.memory_manager.load_string(*k).to_string(),
-                            f.value,
-                            f.super_obj,
-                        )
-                    })
+            let mut section_names: Vec<(String, Value, Option<ObjectIndex>)> =
+                self.enumerate_object_fields(sections_obj_idx)
+                    .into_iter()
+                    .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                    .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
                     .collect();
-                names.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-                names
-            };
+            section_names.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
             for (section_name, section_raw, section_super) in section_names {
                 result.push_str(&format!("[{}]\n", section_name));
                 let section_forced = match section_raw {
@@ -9329,23 +9250,13 @@ impl VirtualMachine {
                 // Root section_obj_idx for the duration of field processing
                 self.memory_manager
                     .push_external_roots(vec![Value::Object(section_obj_idx)], Vec::new());
-                let section_fields: Vec<(String, Value, Option<ObjectIndex>)> = {
-                    let sobj = self.memory_manager.load_object(section_obj_idx);
-                    let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = sobj
-                        .properties
-                        .iter()
-                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                        .map(|(k, f)| {
-                            (
-                                self.memory_manager.load_string(*k).to_string(),
-                                f.value,
-                                f.super_obj,
-                            )
-                        })
+                let mut section_fields: Vec<(String, Value, Option<ObjectIndex>)> =
+                    self.enumerate_object_fields(section_obj_idx)
+                        .into_iter()
+                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                        .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
                         .collect();
-                    fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-                    fields
-                };
+                section_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
                 for (key, val, super_obj) in section_fields {
                     let forced_val = match val {
                         Value::Closure(c) => {
@@ -9522,23 +9433,13 @@ impl VirtualMachine {
                 Ok(format!("[{}]", items.join(", ")))
             }
             Value::Object(o_idx) => {
-                let field_data: Vec<(String, Value, Option<ObjectIndex>)> = {
-                    let obj = self.memory_manager.load_object(o_idx);
-                    let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = obj
-                        .properties
-                        .iter()
-                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                        .map(|(k, f)| {
-                            (
-                                self.memory_manager.load_string(*k).to_string(),
-                                f.value,
-                                f.super_obj,
-                            )
-                        })
+                let mut field_data: Vec<(String, Value, Option<ObjectIndex>)> =
+                    self.enumerate_object_fields(o_idx)
+                        .into_iter()
+                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                        .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
                         .collect();
-                    fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-                    fields
-                };
+                field_data.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                 if field_data.is_empty() {
                     return Ok("{}".to_string());
@@ -9620,23 +9521,13 @@ impl VirtualMachine {
             }
         };
 
-        let fields: Vec<(String, Value, Option<ObjectIndex>)> = {
-            let obj = self.memory_manager.load_object(obj_idx);
-            let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = obj
-                .properties
-                .iter()
-                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                .map(|(k, f)| {
-                    (
-                        self.memory_manager.load_string(*k).to_string(),
-                        f.value,
-                        f.super_obj,
-                    )
-                })
+        let mut fields: Vec<(String, Value, Option<ObjectIndex>)> =
+            self.enumerate_object_fields(obj_idx)
+                .into_iter()
+                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
                 .collect();
-            fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-            fields
-        };
+        fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
         let mut result = String::new();
         for (key, val, super_obj) in fields {
@@ -9830,23 +9721,13 @@ impl VirtualMachine {
                 // Root the object to protect from GC during field processing
                 self.memory_manager
                     .push_external_roots(vec![Value::Object(o_idx)], Vec::new());
-                let field_data: Vec<(String, Value, Option<ObjectIndex>)> = {
-                    let obj = self.memory_manager.load_object(o_idx);
-                    let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = obj
-                        .properties
-                        .iter()
-                        .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                        .map(|(k, f)| {
-                            (
-                                self.memory_manager.load_string(*k).to_string(),
-                                f.value,
-                                f.super_obj,
-                            )
-                        })
+                let mut field_data: Vec<(String, Value, Option<ObjectIndex>)> =
+                    self.enumerate_object_fields(o_idx)
+                        .into_iter()
+                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                        .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
                         .collect();
-                    fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-                    fields
-                };
+                field_data.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                 if field_data.is_empty() {
                     self.memory_manager.pop_external_roots();
@@ -10137,7 +10018,7 @@ impl VirtualMachine {
                         self.serde_yaml_to_jsonnet_value(v, span.clone(), source_id.clone())?;
                     props.insert(
                         key_idx,
-                        ObjectField::new(val, None, FieldVisibility::Visible),
+                        ObjectField::new(val, FieldVisibility::Visible),
                     );
                 }
                 let alloc = self.memory_manager.allocate_object_with_properties(props);
@@ -10360,23 +10241,13 @@ impl VirtualMachine {
         self.memory_manager
             .external_roots
             .push(vec![Value::Object(obj_idx)]);
-        let fields: Vec<(String, Value, Option<ObjectIndex>)> = {
-            let obj = self.memory_manager.load_object(obj_idx);
-            let mut f: Vec<(String, Value, Option<ObjectIndex>)> = obj
-                .properties
-                .iter()
-                .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-                .map(|(k, field)| {
-                    (
-                        self.memory_manager.load_string(*k).to_string(),
-                        field.value,
-                        field.super_obj,
-                    )
-                })
+        let mut fields: Vec<(String, Value, Option<ObjectIndex>)> =
+            self.enumerate_object_fields(obj_idx)
+                .into_iter()
+                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
                 .collect();
-            f.sort_by(|a, b| a.0.cmp(&b.0));
-            f
-        };
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
         // Root all field values to protect from GC during recursive processing
         let field_values: Vec<Value> = fields.iter().map(|(_, v, _)| *v).collect();
         self.memory_manager.external_roots.push(field_values);
@@ -10667,23 +10538,13 @@ impl VirtualMachine {
                 // Render as inline TOML table: { key = val, key2 = val2 }
                 self.memory_manager
                     .push_external_roots(vec![Value::Object(obj_idx)], Vec::new());
-                let fields: Vec<(String, Value, Option<ObjectIndex>)> = {
-                    let obj = self.memory_manager.load_object(obj_idx);
-                    let mut f: Vec<(String, Value, Option<ObjectIndex>)> = obj
-                        .properties
-                        .iter()
-                        .filter(|(_, field)| field.visibility != FieldVisibility::Hidden)
-                        .map(|(k, field)| {
-                            (
-                                self.memory_manager.load_string(*k).to_string(),
-                                field.value,
-                                field.super_obj,
-                            )
-                        })
+                let mut fields: Vec<(String, Value, Option<ObjectIndex>)> =
+                    self.enumerate_object_fields(obj_idx)
+                        .into_iter()
+                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                        .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
                         .collect();
-                    f.sort_by(|a, b| a.0.cmp(&b.0));
-                    f
-                };
+                fields.sort_by(|a, b| a.0.cmp(&b.0));
                 let mut pairs = Vec::new();
                 for (key, val, super_obj) in fields {
                     let forced_val = match val {
@@ -11628,11 +11489,11 @@ mod tests {
         let result = vm.interpret().unwrap();
 
         if let Value::Object(obj_idx) = result {
-            let obj = vm.memory_manager().load_object(obj_idx);
             let (thunk_ci, super_obj) = {
+                let obj = vm.memory_manager().load_object(obj_idx);
                 let field = obj.properties.values().next().unwrap();
                 match field.value {
-                    Value::Closure(ci) => (ci, field.super_obj),
+                    Value::Closure(ci) => (ci, obj.base_object),
                     _ => panic!("Expected thunk closure"),
                 }
             };
@@ -11659,14 +11520,14 @@ mod tests {
         let result = vm.interpret().unwrap();
 
         if let Value::Object(obj_idx) = result {
-            let obj = vm.memory_manager().load_object(obj_idx);
             let (thunk_ci, super_obj) = {
+                let obj = vm.memory_manager().load_object(obj_idx);
                 let mut found = None;
                 for (key, field) in &obj.properties {
                     let name = vm.memory_manager().load_string(*key);
                     if name == "testPass" {
                         if let Value::Closure(ci) = field.value {
-                            found = Some((ci, field.super_obj));
+                            found = Some((ci, obj.base_object));
                         }
                     }
                 }
@@ -11696,14 +11557,14 @@ mod tests {
         let result = vm.interpret().unwrap();
 
         if let Value::Object(obj_idx) = result {
-            let obj = vm.memory_manager().load_object(obj_idx);
             let (thunk_ci, super_obj) = {
+                let obj = vm.memory_manager().load_object(obj_idx);
                 let mut found = None;
                 for (key, field) in &obj.properties {
                     let name = vm.memory_manager().load_string(*key);
                     if name == "testFail" {
                         if let Value::Closure(ci) = field.value {
-                            found = Some((ci, field.super_obj));
+                            found = Some((ci, obj.base_object));
                         }
                     }
                 }
