@@ -644,12 +644,30 @@ impl VirtualMachine {
                     ));
                 }
             };
+            // Build lazy thunks. Each element thunk calls func(i) only when
+            // forced, so the array can be returned before any element is
+            // evaluated. This lets func reference the array itself (e.g.,
+            // slowId[i-1]) without hitting the null sentinel set during
+            // thunk forcing.
             let mut elements = Vec::with_capacity(sz);
+            let mut should_gc = false;
             for i in 0..sz {
-                let result = self.call_value_with_one_arg(func_val, Value::Number(i as f64))?;
-                elements.push(result);
+                let mut element_chunk = chunk::Chunk::new("<makearray_element>");
+                let fc_idx = element_chunk.add_constant(func_val);
+                let ii_idx = element_chunk.add_constant(Value::Number(i as f64));
+                element_chunk.write_opcode_u16(Opcode::LoadConst, fc_idx as u16, 0..0);
+                element_chunk.write_opcode_u16(Opcode::LoadConst, ii_idx as u16, 0..0);
+                element_chunk.write_opcode_u8_u8(Opcode::Call, 1, 0, 0..0);
+                element_chunk.write_opcode(Opcode::Return, 0..0);
+                let owned = element_chunk.into_owned();
+                let func_alloc = self.memory_manager.allocate_function(None, 0, 0, owned);
+                let thunk_alloc = self
+                    .memory_manager
+                    .allocate_thunk(func_alloc.index, Vec::new());
+                should_gc |=
+                    func_alloc.should_garbage_collect || thunk_alloc.should_garbage_collect;
+                elements.push(Value::Closure(thunk_alloc.index));
             }
-            // Root elements during allocation
             self.memory_manager
                 .push_external_roots(elements.clone(), Vec::new());
             let alloc = self.memory_manager.allocate_array(elements);
@@ -2943,67 +2961,39 @@ impl VirtualMachine {
                             }
                         };
 
-                        // Create ephemeral chunk to loop and create the array
-                        let mut make_array_chunk = chunk::Chunk::new("<makearray>");
-                        let func_idx = make_array_chunk.add_constant(func_val);
-
-                        make_array_chunk.write_opcode_u16(Opcode::CreateArray, 0, 0..0);
-
+                        // Build lazy thunks. Each element thunk calls func(i)
+                        // only when forced, so the array can be returned before
+                        // any element is evaluated. This lets func reference the
+                        // array itself (e.g., slowId[i-1]) without hitting the
+                        // null sentinel set during thunk forcing.
+                        let mut elements: Vec<Value> = Vec::with_capacity(sz);
+                        let mut should_gc = false;
                         for i in 0..sz {
-                            let i_idx = make_array_chunk.add_constant(Value::Number(i as f64));
-                            make_array_chunk.write_opcode_u16(
-                                Opcode::LoadConst,
-                                func_idx as u16,
-                                0..0,
-                            );
-                            make_array_chunk.write_opcode_u16(
-                                Opcode::LoadConst,
-                                i_idx as u16,
-                                0..0,
-                            );
-                            make_array_chunk.write_opcode_u8_u8(Opcode::Call, 1, 0, 0..0);
-                            make_array_chunk.write_opcode(Opcode::ArrayAppend, 0..0);
+                            let mut element_chunk = chunk::Chunk::new("<makearray_element>");
+                            let fc_idx = element_chunk.add_constant(func_val);
+                            let ii_idx = element_chunk.add_constant(Value::Number(i as f64));
+                            element_chunk.write_opcode_u16(Opcode::LoadConst, fc_idx as u16, 0..0);
+                            element_chunk.write_opcode_u16(Opcode::LoadConst, ii_idx as u16, 0..0);
+                            element_chunk.write_opcode_u8_u8(Opcode::Call, 1, 0, 0..0);
+                            element_chunk.write_opcode(Opcode::Return, 0..0);
+                            let owned = element_chunk.into_owned();
+                            let func_alloc =
+                                self.memory_manager.allocate_function(None, 0, 0, owned);
+                            let thunk_alloc = self
+                                .memory_manager
+                                .allocate_thunk(func_alloc.index, Vec::new());
+                            should_gc |= func_alloc.should_garbage_collect
+                                || thunk_alloc.should_garbage_collect;
+                            elements.push(Value::Closure(thunk_alloc.index));
                         }
-
-                        make_array_chunk.write_opcode(Opcode::Return, 0..0);
-
-                        let owned_chunk = make_array_chunk.into_owned();
-                        let function_allocation =
-                            self.memory_manager
-                                .allocate_function(None, 0, 0, owned_chunk);
-                        let function_index = function_allocation.index;
-
-                        // Temporarily root the function while we allocate the closure
                         self.memory_manager
-                            .external_roots
-                            .push(vec![Value::Function(function_index)]);
-
-                        // Create a closure from the function to invoke it
-                        let closure_allocation = self
-                            .memory_manager
-                            .allocate_closure(function_index, Vec::new());
-                        let closure_index = closure_allocation.index;
-
-                        // Remove the temporary root
-                        self.memory_manager.external_roots.pop();
-
-                        // Call it by pushing a frame!
-                        let new_frame =
-                            CallFrame::new(closure_index, 0, self.stack.len(), None, None);
-
-                        if self.frame_count < self.frames.len() {
-                            self.frames[self.frame_count] = new_frame;
-                        } else {
-                            self.frames.push(new_frame);
-                        }
-                        self.frame_count += 1;
-
-                        if function_allocation.should_garbage_collect
-                            || closure_allocation.should_garbage_collect
-                        {
+                            .push_external_roots(elements.clone(), Vec::new());
+                        let array_alloc = self.memory_manager.allocate_array(elements);
+                        self.memory_manager.pop_external_roots();
+                        self.push(Value::Array(array_alloc.index))?;
+                        if array_alloc.should_garbage_collect || should_gc {
                             self.run_garbage_collection();
                         }
-
                         continue;
                     }
 
