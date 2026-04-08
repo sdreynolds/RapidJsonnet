@@ -724,9 +724,13 @@ fn std_length(
             Ok(Value::Number(a.elements.len() as f64))
         }
         Value::Object(o_idx) => {
-            let o = memory_manager.load_object(o_idx);
-            // In Jsonnet, std.length(obj) is the number of visible fields
-            Ok(Value::Number(o.len() as f64))
+            // Walk the full base_object chain; visible fields win on collision
+            let fields = memory_manager.collect_object_fields_chain(o_idx);
+            let count = fields
+                .iter()
+                .filter(|(_, _, vis)| *vis != FieldVisibility::Hidden)
+                .count();
+            Ok(Value::Number(count as f64))
         }
         _ => Err(RuntimeError::new(
             span,
