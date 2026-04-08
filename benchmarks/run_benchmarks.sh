@@ -19,11 +19,12 @@ fi
 # We can run hyperfine for each or once for all.
 # If we do `hyperfine -n label "cmd {}" -L file a,b,c` it works for all files.
 
-# Comma separate benchmark files
-printf -v joined '%s,' "${BENCHMARKS[@]}"
-BENCH_LIST="${joined%,}"
-
 echo "Running benchmarks using hyperfine..."
-$HYPERFINE_BIN --ignore-failure --export-markdown "${TEST_UNDECLARED_OUTPUTS_DIR:-.}/results.md" -n "RapidJsonnet" "$MAIN_BIN -q {file}" -L file "$BENCH_LIST"
+for item in "${BENCHMARKS[@]}"; do
+    filename=$(basename "$item")
 
-echo "=== BENCHMARK RESULTS SAVED TO ${TEST_UNDECLARED_OUTPUTS_DIR:-.}/results.md ==="
+    $HYPERFINE_BIN -w 3 --export-markdown "${TEST_UNDECLARED_OUTPUTS_DIR:-.}/$filename-results.md" -n "RapidJsonnet: $filename" "$MAIN_BIN -q $item"
+done
+
+
+echo "=== BENCHMARK RESULTS SAVED TO ${TEST_UNDECLARED_OUTPUTS_DIR:-.}/ ==="
