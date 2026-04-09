@@ -358,15 +358,24 @@ impl VirtualMachine {
     /// Execute a thunk (field closure) synchronously and return its result.
     /// Force all closure field values in an object to their evaluated results.
     fn force_object_fields(&mut self, obj_idx: ObjectIndex) -> Result<(), RuntimeError> {
-        let obj = self.memory_manager.load_object(obj_idx);
-        let keys: Vec<_> = obj.properties.keys().cloned().collect();
-        for key in keys {
-            let field_val = self.memory_manager.load_object(obj_idx).properties[&key].value;
-            if let Value::Closure(ci) = field_val {
-                let result = self.execute_thunk_sync(ci, Some(obj_idx), None)?;
-                let obj = self.memory_manager.get_object_mut(obj_idx).unwrap();
-                obj.properties.get_mut(&key).unwrap().value = result;
+        // Walk the full base_object chain so inherited fields are also forced.
+        let mut curr = Some(obj_idx);
+        while let Some(node_idx) = curr {
+            let (keys, base) = {
+                let obj = self.memory_manager.load_object(node_idx);
+                let keys: Vec<_> = obj.properties.keys().cloned().collect();
+                (keys, obj.base_object)
+            };
+            for key in keys {
+                let field_val = self.memory_manager.load_object(node_idx).properties[&key].value;
+                if let Value::Closure(ci) = field_val {
+                    // self = root merged object (obj_idx), stored back into the node
+                    let result = self.execute_thunk_sync(ci, Some(obj_idx), None)?;
+                    let obj = self.memory_manager.get_object_mut(node_idx).unwrap();
+                    obj.properties.get_mut(&key).unwrap().value = result;
+                }
             }
+            curr = base;
         }
         Ok(())
     }
@@ -3702,15 +3711,13 @@ impl VirtualMachine {
                                 ));
                             }
                         };
-                        // Collect visible fields: (key StringIndex, raw value, visibility)
-                        let field_data: Vec<(StringIndex, Value, FieldVisibility)> = {
-                            let obj = self.memory_manager.load_object(o_idx);
-                            obj.properties
-                                .iter()
-                                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                                .map(|(k, f)| (*k, f.value, f.visibility))
-                                .collect()
-                        };
+                        // Collect visible fields across the full base_object chain.
+                        let field_data: Vec<(StringIndex, Value, FieldVisibility)> =
+                            self.enumerate_object_fields(o_idx)
+                                .into_iter()
+                                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                                .map(|(k, v, _, vis)| (k, v, vis))
+                                .collect();
                         let mut new_properties: std::collections::HashMap<
                             StringIndex,
                             ObjectField,
@@ -3735,9 +3742,11 @@ impl VirtualMachine {
                             roots.push(func_val);
                             roots.push(evaled_val);
                             roots.push(key_val);
-                            for f in new_properties.values() {
+                            for (k, f) in new_properties.iter() {
+                                roots.push(Value::String(*k));
                                 roots.push(f.value);
                             }
+                            roots.push(Value::Object(o_idx));
                             let mut open_upvalue_roots = Vec::new();
                             let mut upvalue = self.open_upvalues;
                             while let Some(uv_idx) = upvalue {
@@ -4864,14 +4873,12 @@ impl VirtualMachine {
                                 ));
                             }
                         };
-                        let field_data: Vec<(chunk::StringIndex, Value)> = {
-                            let obj = self.memory_manager.load_object(o_idx);
-                            obj.properties
-                                .iter()
-                                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                                .map(|(k, f)| (*k, f.value))
-                                .collect()
-                        };
+                        let field_data: Vec<(chunk::StringIndex, Value)> =
+                            self.enumerate_object_fields(o_idx)
+                                .into_iter()
+                                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                                .map(|(k, v, _, _)| (k, v))
+                                .collect();
                         let mut pairs: Vec<Value> = Vec::with_capacity(field_data.len());
                         for (k_idx, raw_val) in &field_data {
                             let k_idx = *k_idx;
@@ -4911,14 +4918,12 @@ impl VirtualMachine {
                                 ));
                             }
                         };
-                        let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = {
-                            let obj = self.memory_manager.load_object(o_idx);
-                            obj.properties
-                                .iter()
-                                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                                .map(|(k, f)| (*k, f.value, f.visibility))
-                                .collect()
-                        };
+                        let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> =
+                            self.enumerate_object_fields(o_idx)
+                                .into_iter()
+                                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                                .map(|(k, v, _, vis)| (k, v, vis))
+                                .collect();
                         let mut new_properties: std::collections::HashMap<
                             chunk::StringIndex,
                             memory_manager::ObjectField,
@@ -4940,9 +4945,11 @@ impl VirtualMachine {
                             roots.push(func_val);
                             roots.push(evaled_val);
                             roots.push(key_val);
-                            for f in new_properties.values() {
+                            for (k, f) in new_properties.iter() {
+                                roots.push(Value::String(*k));
                                 roots.push(f.value);
                             }
+                            roots.push(Value::Object(o_idx));
                             let mut open_upvalue_roots = Vec::new();
                             let mut upvalue = self.open_upvalues;
                             while let Some(uv_idx) = upvalue {
@@ -4999,14 +5006,12 @@ impl VirtualMachine {
                                 ));
                             }
                         };
-                        let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = {
-                            let obj = self.memory_manager.load_object(o_idx);
-                            obj.properties
-                                .iter()
-                                .filter(|(_, f)| f.visibility != FieldVisibility::Hidden)
-                                .map(|(k, f)| (*k, f.value, f.visibility))
-                                .collect()
-                        };
+                        let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> =
+                            self.enumerate_object_fields(o_idx)
+                                .into_iter()
+                                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                                .map(|(k, v, _, vis)| (k, v, vis))
+                                .collect();
                         let mut kept_properties: std::collections::HashMap<
                             chunk::StringIndex,
                             memory_manager::ObjectField,
@@ -5028,9 +5033,11 @@ impl VirtualMachine {
                             roots.push(func_val);
                             roots.push(evaled_val);
                             roots.push(key_val);
-                            for f in kept_properties.values() {
+                            for (k, f) in kept_properties.iter() {
+                                roots.push(Value::String(*k));
                                 roots.push(f.value);
                             }
+                            roots.push(Value::Object(o_idx));
                             let mut open_upvalue_roots = Vec::new();
                             let mut upvalue = self.open_upvalues;
                             while let Some(uv_idx) = upvalue {
@@ -6770,16 +6777,14 @@ impl VirtualMachine {
                                             ));
                                         }
                                     };
-                                    let field_data: Vec<(chunk::StringIndex, Value)> = {
-                                        let obj = self.memory_manager.load_object(o_idx);
-                                        obj.properties
-                                            .iter()
-                                            .filter(|(_, f)| {
-                                                f.visibility != FieldVisibility::Hidden
+                                    let field_data: Vec<(chunk::StringIndex, Value)> =
+                                        self.enumerate_object_fields(o_idx)
+                                            .into_iter()
+                                            .filter(|(_, _, _, vis)| {
+                                                *vis != FieldVisibility::Hidden
                                             })
-                                            .map(|(k, f)| (*k, f.value))
-                                            .collect()
-                                    };
+                                            .map(|(k, v, _, _)| (k, v))
+                                            .collect();
                                     let mut pairs: Vec<Value> =
                                         Vec::with_capacity(field_data.len());
                                     for (k_idx, raw_val) in &field_data {
@@ -6829,16 +6834,14 @@ impl VirtualMachine {
                                         chunk::StringIndex,
                                         Value,
                                         FieldVisibility,
-                                    )> = {
-                                        let obj = self.memory_manager.load_object(o_idx);
-                                        obj.properties
-                                            .iter()
-                                            .filter(|(_, f)| {
-                                                f.visibility != FieldVisibility::Hidden
-                                            })
-                                            .map(|(k, f)| (*k, f.value, f.visibility))
-                                            .collect()
-                                    };
+                                    )> = self
+                                        .enumerate_object_fields(o_idx)
+                                        .into_iter()
+                                        .filter(|(_, _, _, vis)| {
+                                            *vis != FieldVisibility::Hidden
+                                        })
+                                        .map(|(k, v, _, vis)| (k, v, vis))
+                                        .collect();
                                     let mut new_properties: std::collections::HashMap<
                                         chunk::StringIndex,
                                         memory_manager::ObjectField,
@@ -6865,9 +6868,11 @@ impl VirtualMachine {
                                         roots.push(func_val);
                                         roots.push(evaled_val);
                                         roots.push(key_val);
-                                        for f in new_properties.values() {
+                                        for (k, f) in new_properties.iter() {
+                                            roots.push(Value::String(*k));
                                             roots.push(f.value);
                                         }
+                                        roots.push(Value::Object(o_idx));
                                         let mut open_upvalue_roots = Vec::new();
                                         let mut upvalue = self.open_upvalues;
                                         while let Some(uv_idx) = upvalue {
@@ -6930,16 +6935,14 @@ impl VirtualMachine {
                                         chunk::StringIndex,
                                         Value,
                                         FieldVisibility,
-                                    )> = {
-                                        let obj = self.memory_manager.load_object(o_idx);
-                                        obj.properties
-                                            .iter()
-                                            .filter(|(_, f)| {
-                                                f.visibility != FieldVisibility::Hidden
-                                            })
-                                            .map(|(k, f)| (*k, f.value, f.visibility))
-                                            .collect()
-                                    };
+                                    )> = self
+                                        .enumerate_object_fields(o_idx)
+                                        .into_iter()
+                                        .filter(|(_, _, _, vis)| {
+                                            *vis != FieldVisibility::Hidden
+                                        })
+                                        .map(|(k, v, _, vis)| (k, v, vis))
+                                        .collect();
                                     let mut kept_properties: std::collections::HashMap<
                                         chunk::StringIndex,
                                         memory_manager::ObjectField,
@@ -6966,9 +6969,11 @@ impl VirtualMachine {
                                         roots.push(func_val);
                                         roots.push(evaled_val);
                                         roots.push(key_val);
-                                        for f in kept_properties.values() {
+                                        for (k, f) in kept_properties.iter() {
+                                            roots.push(Value::String(*k));
                                             roots.push(f.value);
                                         }
+                                        roots.push(Value::Object(o_idx));
                                         let mut open_upvalue_roots = Vec::new();
                                         let mut upvalue = self.open_upvalues;
                                         while let Some(uv_idx) = upvalue {
@@ -7968,7 +7973,10 @@ impl VirtualMachine {
             Value::Boolean(b) => Ok(b),
             Value::Number(n) => Ok(n > 0.0),
             Value::String(s) => Ok(self.memory_manager.load_string(s) != ""),
-            Value::Object(x) => Ok(self.memory_manager.load_object(x).len() > 0),
+            Value::Object(x) => Ok(self
+                .enumerate_object_fields(x)
+                .iter()
+                .any(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)),
             Value::Array(x) => Ok(self.memory_manager.load_array(x).len() > 0),
             Value::Binary(x) => Ok(self.memory_manager.load_binary(x).data.len() > 0),
             Value::Function(_) => Ok(true), // Functions are truthy
@@ -8774,14 +8782,12 @@ impl VirtualMachine {
 
         let res = match value {
             Value::Object(o_idx) => {
-                let fields: Vec<(chunk::StringIndex, Value)> = {
-                    let obj = self.memory_manager.load_object(o_idx);
-                    obj.properties
-                        .iter()
-                        .filter(|(_, f)| f.visibility != chunk::FieldVisibility::Hidden)
-                        .map(|(k, f)| (*k, f.value))
-                        .collect()
-                };
+                let fields: Vec<(chunk::StringIndex, Value)> = self
+                    .enumerate_object_fields(o_idx)
+                    .into_iter()
+                    .filter(|(_, _, _, vis)| *vis != chunk::FieldVisibility::Hidden)
+                    .map(|(k, v, _, _)| (k, v))
+                    .collect();
 
                 let mut loop_res = Ok(());
                 for (k_idx, raw_val) in &fields {
