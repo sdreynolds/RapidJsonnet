@@ -68,3 +68,7 @@ build:clippy --output_groups=+clippy_checks
 ###############################################################################
 
 try-import %workspace%/user.bazelrc
+
+# For git worktrees to share the cache
+build --disk_cache=~/.cache/bazel-disk-cache
+test --disk_cache=~/.cache/bazel-disk-cache
