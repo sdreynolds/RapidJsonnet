@@ -2587,7 +2587,8 @@ impl VirtualMachine {
                             self.check_object_assertions(object_key)?;
                             // Object indexing with string
                             if let Value::String(field_key) = index_value {
-                                let resolution = self.get_object_field_resolution(object_key, field_key);
+                                let resolution =
+                                    self.get_object_field_resolution(object_key, field_key);
 
                                 if let Some((field, defining_node)) = resolution {
                                     match field.value {
@@ -2595,8 +2596,12 @@ impl VirtualMachine {
                                             self.advance_pc();
                                             self.push(Value::Closure(closure_idx))?;
                                             self.push(Value::Object(object_key))?; // self
-                                            let new_super = self.memory_manager.load_object(defining_node).base_object;
-                                            let super_val = new_super.map(Value::Object).unwrap_or(Value::Null);
+                                            let new_super = self
+                                                .memory_manager
+                                                .load_object(defining_node)
+                                                .base_object;
+                                            let super_val =
+                                                new_super.map(Value::Object).unwrap_or(Value::Null);
                                             self.push(super_val)?;
                                             self.call_closure(
                                                 closure_idx,
@@ -2779,9 +2784,11 @@ impl VirtualMachine {
                             merged_properties.insert(key, ObjectField::new(value, visibility));
                         }
 
-                        let merged_allocation = self
-                            .memory_manager
-                            .allocate_object_full_with_base(Some(left_key), merged_properties, right_assertions);
+                        let merged_allocation = self.memory_manager.allocate_object_full_with_base(
+                            Some(left_key),
+                            merged_properties,
+                            right_assertions,
+                        );
                         self.push(Value::Object(merged_allocation.index))?;
                         if merged_allocation.should_garbage_collect {
                             #[cfg(feature = "gc_debug")]
@@ -2879,28 +2886,26 @@ impl VirtualMachine {
                         };
 
                         // Walk the chain to find the field (inc_hidden controls visibility filter)
-                        let found = self.enumerate_object_fields(o_idx)
-                            .into_iter()
-                            .find(|(k, _, _, vis)| {
+                        let found = self.enumerate_object_fields(o_idx).into_iter().find(
+                            |(k, _, _, vis)| {
                                 self.memory_manager.load_string(*k) == field_name.as_str()
                                     && (inc_hidden || *vis != FieldVisibility::Hidden)
-                            });
+                            },
+                        );
 
                         let result = match found {
-                            Some((_, val, super_obj, _)) => {
-                                match val {
-                                    Value::Closure(closure_idx) => {
-                                        let result = self.execute_thunk_sync(
-                                            closure_idx,
-                                            Some(o_idx),
-                                            super_obj,
-                                        )?;
-                                        self.push(result)?;
-                                        continue;
-                                    }
-                                    _ => val,
+                            Some((_, val, super_obj, _)) => match val {
+                                Value::Closure(closure_idx) => {
+                                    let result = self.execute_thunk_sync(
+                                        closure_idx,
+                                        Some(o_idx),
+                                        super_obj,
+                                    )?;
+                                    self.push(result)?;
+                                    continue;
                                 }
-                            }
+                                _ => val,
+                            },
                             None => default_val,
                         };
                         self.push(result)?;
@@ -3276,8 +3281,7 @@ impl VirtualMachine {
                             // Rebuild the object with evaluated values
                             let mut properties = std::collections::HashMap::new();
                             for (k, v, vis) in evaluated {
-                                properties
-                                    .insert(k, memory_manager::ObjectField::new(v, vis));
+                                properties.insert(k, memory_manager::ObjectField::new(v, vis));
                             }
                             let new_obj_alloc = self
                                 .memory_manager
@@ -3712,12 +3716,12 @@ impl VirtualMachine {
                             }
                         };
                         // Collect visible fields across the full base_object chain.
-                        let field_data: Vec<(StringIndex, Value, FieldVisibility)> =
-                            self.enumerate_object_fields(o_idx)
-                                .into_iter()
-                                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                                .map(|(k, v, _, vis)| (k, v, vis))
-                                .collect();
+                        let field_data: Vec<(StringIndex, Value, FieldVisibility)> = self
+                            .enumerate_object_fields(o_idx)
+                            .into_iter()
+                            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                            .map(|(k, v, _, vis)| (k, v, vis))
+                            .collect();
                         let mut new_properties: std::collections::HashMap<
                             StringIndex,
                             ObjectField,
@@ -4225,6 +4229,7 @@ impl VirtualMachine {
                         chunk::NativeFuncId::MergePatch
                             | chunk::NativeFuncId::Prune
                             | chunk::NativeFuncId::Uniq
+                            | chunk::NativeFuncId::Sort
                             | chunk::NativeFuncId::Set
                             | chunk::NativeFuncId::SetUnion
                     ) {
@@ -4247,18 +4252,17 @@ impl VirtualMachine {
                                 self.push(result)?;
                                 continue;
                             }
+                            chunk::NativeFuncId::Sort => {
+                                let result = self.sort_value(args[0], args.get(1).copied())?;
+                                self.push(result)?;
+                                continue;
+                            }
                             chunk::NativeFuncId::Set => {
                                 let arr_val = args[0];
                                 if let Value::Array(a) = arr_val {
                                     self.force_all_array_elements(a)?;
                                 }
-                                let sorted = crate::native::call_native(
-                                    chunk::NativeFuncId::Sort,
-                                    &[arr_val],
-                                    &mut self.memory_manager,
-                                    span.clone(),
-                                    source_id.clone(),
-                                )?;
+                                let sorted = self.sort_value(arr_val, None)?;
                                 let result = self.uniq_value(sorted, args.get(1).copied())?;
                                 self.push(result)?;
                                 continue;
@@ -4300,13 +4304,7 @@ impl VirtualMachine {
                                     &self.memory_manager.load_array(b_idx).elements.clone(),
                                 );
                                 let alloc = self.memory_manager.allocate_array(combined);
-                                let sorted = crate::native::call_native(
-                                    chunk::NativeFuncId::Sort,
-                                    &[Value::Array(alloc.index)],
-                                    &mut self.memory_manager,
-                                    span.clone(),
-                                    source_id.clone(),
-                                )?;
+                                let sorted = self.sort_value(Value::Array(alloc.index), None)?;
                                 let result = self.uniq_value(sorted, args.get(2).copied())?;
                                 self.push(result)?;
                                 continue;
@@ -4873,12 +4871,12 @@ impl VirtualMachine {
                                 ));
                             }
                         };
-                        let field_data: Vec<(chunk::StringIndex, Value)> =
-                            self.enumerate_object_fields(o_idx)
-                                .into_iter()
-                                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                                .map(|(k, v, _, _)| (k, v))
-                                .collect();
+                        let field_data: Vec<(chunk::StringIndex, Value)> = self
+                            .enumerate_object_fields(o_idx)
+                            .into_iter()
+                            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                            .map(|(k, v, _, _)| (k, v))
+                            .collect();
                         let mut pairs: Vec<Value> = Vec::with_capacity(field_data.len());
                         for (k_idx, raw_val) in &field_data {
                             let k_idx = *k_idx;
@@ -4918,12 +4916,12 @@ impl VirtualMachine {
                                 ));
                             }
                         };
-                        let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> =
-                            self.enumerate_object_fields(o_idx)
-                                .into_iter()
-                                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                                .map(|(k, v, _, vis)| (k, v, vis))
-                                .collect();
+                        let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = self
+                            .enumerate_object_fields(o_idx)
+                            .into_iter()
+                            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                            .map(|(k, v, _, vis)| (k, v, vis))
+                            .collect();
                         let mut new_properties: std::collections::HashMap<
                             chunk::StringIndex,
                             memory_manager::ObjectField,
@@ -5006,12 +5004,12 @@ impl VirtualMachine {
                                 ));
                             }
                         };
-                        let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> =
-                            self.enumerate_object_fields(o_idx)
-                                .into_iter()
-                                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                                .map(|(k, v, _, vis)| (k, v, vis))
-                                .collect();
+                        let field_data: Vec<(chunk::StringIndex, Value, FieldVisibility)> = self
+                            .enumerate_object_fields(o_idx)
+                            .into_iter()
+                            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                            .map(|(k, v, _, vis)| (k, v, vis))
+                            .collect();
                         let mut kept_properties: std::collections::HashMap<
                             chunk::StringIndex,
                             memory_manager::ObjectField,
@@ -5477,6 +5475,17 @@ impl VirtualMachine {
                                 self.pop()?;
                             }
 
+                            // Handle functions that require VM-level dispatch
+                            if id == chunk::NativeFuncId::Sort {
+                                let result = self.sort_value(args[0], args.get(1).copied())?;
+                                self.push(result)?;
+                                continue;
+                            }
+                            if id == chunk::NativeFuncId::Uniq {
+                                let result = self.uniq_value(args[0], args.get(1).copied())?;
+                                self.push(result)?;
+                                continue;
+                            }
                             // Delegate to the same handling as positional native calls
                             // (handles special cases like MakeArray, Map, etc.)
                             let span = self.get_current_span();
@@ -5509,6 +5518,7 @@ impl VirtualMachine {
                                     chunk::NativeFuncId::MergePatch
                                         | chunk::NativeFuncId::Prune
                                         | chunk::NativeFuncId::Uniq
+                                        | chunk::NativeFuncId::Sort
                                         | chunk::NativeFuncId::Set
                                         | chunk::NativeFuncId::SetUnion
                                 ) {
@@ -5533,18 +5543,18 @@ impl VirtualMachine {
                                             self.push(result)?;
                                             continue;
                                         }
+                                        chunk::NativeFuncId::Sort => {
+                                            let result =
+                                                self.sort_value(args[0], args.get(1).copied())?;
+                                            self.push(result)?;
+                                            continue;
+                                        }
                                         chunk::NativeFuncId::Set => {
                                             let arr_val = args[0];
                                             if let Value::Array(a) = arr_val {
                                                 self.force_all_array_elements(a)?;
                                             }
-                                            let sorted = crate::native::call_native(
-                                                chunk::NativeFuncId::Sort,
-                                                &[arr_val],
-                                                &mut self.memory_manager,
-                                                span.clone(),
-                                                source_id.clone(),
-                                            )?;
+                                            let sorted = self.sort_value(arr_val, None)?;
                                             let result =
                                                 self.uniq_value(sorted, args.get(1).copied())?;
                                             self.push(result)?;
@@ -5587,13 +5597,8 @@ impl VirtualMachine {
                                             );
                                             let alloc =
                                                 self.memory_manager.allocate_array(combined);
-                                            let sorted = crate::native::call_native(
-                                                chunk::NativeFuncId::Sort,
-                                                &[Value::Array(alloc.index)],
-                                                &mut self.memory_manager,
-                                                span.clone(),
-                                                source_id.clone(),
-                                            )?;
+                                            let sorted =
+                                                self.sort_value(Value::Array(alloc.index), None)?;
                                             let result =
                                                 self.uniq_value(sorted, args.get(2).copied())?;
                                             self.push(result)?;
@@ -6777,14 +6782,12 @@ impl VirtualMachine {
                                             ));
                                         }
                                     };
-                                    let field_data: Vec<(chunk::StringIndex, Value)> =
-                                        self.enumerate_object_fields(o_idx)
-                                            .into_iter()
-                                            .filter(|(_, _, _, vis)| {
-                                                *vis != FieldVisibility::Hidden
-                                            })
-                                            .map(|(k, v, _, _)| (k, v))
-                                            .collect();
+                                    let field_data: Vec<(chunk::StringIndex, Value)> = self
+                                        .enumerate_object_fields(o_idx)
+                                        .into_iter()
+                                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                                        .map(|(k, v, _, _)| (k, v))
+                                        .collect();
                                     let mut pairs: Vec<Value> =
                                         Vec::with_capacity(field_data.len());
                                     for (k_idx, raw_val) in &field_data {
@@ -6837,9 +6840,7 @@ impl VirtualMachine {
                                     )> = self
                                         .enumerate_object_fields(o_idx)
                                         .into_iter()
-                                        .filter(|(_, _, _, vis)| {
-                                            *vis != FieldVisibility::Hidden
-                                        })
+                                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
                                         .map(|(k, v, _, vis)| (k, v, vis))
                                         .collect();
                                     let mut new_properties: std::collections::HashMap<
@@ -6938,9 +6939,7 @@ impl VirtualMachine {
                                     )> = self
                                         .enumerate_object_fields(o_idx)
                                         .into_iter()
-                                        .filter(|(_, _, _, vis)| {
-                                            *vis != FieldVisibility::Hidden
-                                        })
+                                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
                                         .map(|(k, v, _, vis)| (k, v, vis))
                                         .collect();
                                     let mut kept_properties: std::collections::HashMap<
@@ -6990,7 +6989,9 @@ impl VirtualMachine {
                                             Value::Boolean(true) => {
                                                 kept_properties.insert(
                                                     k_idx,
-                                                    memory_manager::ObjectField::new(evaled_val, vis),
+                                                    memory_manager::ObjectField::new(
+                                                        evaled_val, vis,
+                                                    ),
                                                 );
                                             }
                                             Value::Boolean(false) => {}
@@ -7061,7 +7062,10 @@ impl VirtualMachine {
                                         let k_alloc = self.memory_manager.allocate_string(&k_str);
                                         properties.insert(
                                             k_alloc.index,
-                                            memory_manager::ObjectField::new(v, FieldVisibility::Visible),
+                                            memory_manager::ObjectField::new(
+                                                v,
+                                                FieldVisibility::Visible,
+                                            ),
                                         );
                                     }
                                     let obj_alloc = self
@@ -7275,6 +7279,7 @@ impl VirtualMachine {
                                 chunk::NativeFuncId::MergePatch
                                     | chunk::NativeFuncId::Prune
                                     | chunk::NativeFuncId::Uniq
+                                    | chunk::NativeFuncId::Sort
                                     | chunk::NativeFuncId::Set
                                     | chunk::NativeFuncId::SetUnion
                             ) {
@@ -7298,18 +7303,18 @@ impl VirtualMachine {
                                         self.push(result)?;
                                         continue;
                                     }
+                                    chunk::NativeFuncId::Sort => {
+                                        let result =
+                                            self.sort_value(args[0], args.get(1).copied())?;
+                                        self.push(result)?;
+                                        continue;
+                                    }
                                     chunk::NativeFuncId::Set => {
                                         let arr_val = args[0];
                                         if let Value::Array(a) = arr_val {
                                             self.force_all_array_elements(a)?;
                                         }
-                                        let sorted = crate::native::call_native(
-                                            chunk::NativeFuncId::Sort,
-                                            &[arr_val],
-                                            &mut self.memory_manager,
-                                            span.clone(),
-                                            source_id.clone(),
-                                        )?;
+                                        let sorted = self.sort_value(arr_val, None)?;
                                         let result =
                                             self.uniq_value(sorted, args.get(1).copied())?;
                                         self.push(result)?;
@@ -7349,13 +7354,8 @@ impl VirtualMachine {
                                             &self.memory_manager.load_array(b_idx).elements.clone(),
                                         );
                                         let alloc = self.memory_manager.allocate_array(combined);
-                                        let sorted = crate::native::call_native(
-                                            chunk::NativeFuncId::Sort,
-                                            &[Value::Array(alloc.index)],
-                                            &mut self.memory_manager,
-                                            span.clone(),
-                                            source_id.clone(),
-                                        )?;
+                                        let sorted =
+                                            self.sort_value(Value::Array(alloc.index), None)?;
                                         let result =
                                             self.uniq_value(sorted, args.get(2).copied())?;
                                         self.push(result)?;
@@ -7646,7 +7646,10 @@ impl VirtualMachine {
             let key = self.memory_manager.allocate_string(name).index;
             properties.insert(
                 key,
-                memory_manager::ObjectField::new(Value::NativeFunction(id), FieldVisibility::Hidden),
+                memory_manager::ObjectField::new(
+                    Value::NativeFunction(id),
+                    FieldVisibility::Hidden,
+                ),
             );
         }
         let alloc = self
@@ -7805,11 +7808,11 @@ impl VirtualMachine {
     ) -> Result<std::collections::HashMap<StringIndex, Value>, RuntimeError> {
         let mut visible_fields = std::collections::HashMap::new();
 
-        let properties: Vec<(StringIndex, Value, Option<ObjectIndex>, FieldVisibility)> =
-            self.enumerate_object_fields(obj_idx)
-                .into_iter()
-                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                .collect();
+        let properties: Vec<(StringIndex, Value, Option<ObjectIndex>, FieldVisibility)> = self
+            .enumerate_object_fields(obj_idx)
+            .into_iter()
+            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+            .collect();
 
         for (name, value, super_obj, _vis) in properties {
             let current_vals: Vec<Value> = visible_fields.values().cloned().collect();
@@ -7872,12 +7875,12 @@ impl VirtualMachine {
                     }
 
                     visited.insert(object_key);
-                    let properties: Vec<(StringIndex, Value, Option<ObjectIndex>)> =
-                        self.enumerate_object_fields(object_key)
-                            .into_iter()
-                            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                            .map(|(k, v, so, _)| (k, v, so))
-                            .collect();
+                    let properties: Vec<(StringIndex, Value, Option<ObjectIndex>)> = self
+                        .enumerate_object_fields(object_key)
+                        .into_iter()
+                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                        .map(|(k, v, so, _)| (k, v, so))
+                        .collect();
 
                     let mut json_object = serde_json::Map::new();
 
@@ -8452,12 +8455,12 @@ impl VirtualMachine {
             }
             Value::Object(o_idx) => {
                 self.check_object_assertions(*o_idx)?;
-                let mut sorted_fields: Vec<(String, Value, Option<ObjectIndex>)> =
-                    self.enumerate_object_fields(*o_idx)
-                        .into_iter()
-                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                        .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
-                        .collect();
+                let mut sorted_fields: Vec<(String, Value, Option<ObjectIndex>)> = self
+                    .enumerate_object_fields(*o_idx)
+                    .into_iter()
+                    .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                    .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
+                    .collect();
                 sorted_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                 if sorted_fields.is_empty() {
@@ -8684,12 +8687,14 @@ impl VirtualMachine {
                     // Check deferred assertions during manifestation
                     self.check_object_assertions(o_idx)?;
                     // Collect visible fields from the full chain
-                    let mut sorted_fields: Vec<(String, Value, Option<ObjectIndex>)> =
-                        self.enumerate_object_fields(o_idx)
-                            .into_iter()
-                            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                            .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
-                            .collect();
+                    let mut sorted_fields: Vec<(String, Value, Option<ObjectIndex>)> = self
+                        .enumerate_object_fields(o_idx)
+                        .into_iter()
+                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                        .map(|(k, v, so, _)| {
+                            (self.memory_manager.load_string(k).to_string(), v, so)
+                        })
+                        .collect();
                     sorted_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                     if sorted_fields.is_empty() {
@@ -8866,7 +8871,9 @@ impl VirtualMachine {
                     // Walk the chain to get all fields from target
                     self.enumerate_object_fields(t_idx)
                         .into_iter()
-                        .map(|(k, v, _super_obj, vis)| (k, memory_manager::ObjectField::new(v, vis)))
+                        .map(|(k, v, _super_obj, vis)| {
+                            (k, memory_manager::ObjectField::new(v, vis))
+                        })
                         .collect()
                 }
                 _ => std::collections::HashMap::new(),
@@ -8957,11 +8964,16 @@ impl VirtualMachine {
                 // Root the object and all field values to protect from GC
                 self.memory_manager
                     .push_external_roots(vec![Value::Object(o_idx)], Vec::new());
-                let field_data: Vec<(StringIndex, Value, Option<ObjectIndex>, chunk::FieldVisibility)> =
-                    self.enumerate_object_fields(o_idx)
-                        .into_iter()
-                        .filter(|(_, _, _, vis)| *vis != chunk::FieldVisibility::Hidden)
-                        .collect();
+                let field_data: Vec<(
+                    StringIndex,
+                    Value,
+                    Option<ObjectIndex>,
+                    chunk::FieldVisibility,
+                )> = self
+                    .enumerate_object_fields(o_idx)
+                    .into_iter()
+                    .filter(|(_, _, _, vis)| *vis != chunk::FieldVisibility::Hidden)
+                    .collect();
                 let field_vals: Vec<Value> = field_data.iter().map(|(_, v, _, _)| *v).collect();
                 self.memory_manager
                     .push_external_roots(field_vals, Vec::new());
@@ -8990,10 +9002,7 @@ impl VirtualMachine {
                     self.memory_manager.external_roots.pop();
 
                     if !self.is_prunable(pruned_v)? {
-                        new_props.insert(
-                            k,
-                            memory_manager::ObjectField::new(pruned_v, vis),
-                        );
+                        new_props.insert(k, memory_manager::ObjectField::new(pruned_v, vis));
                     }
                 }
                 self.memory_manager.pop_external_roots(); // field values
@@ -9038,6 +9047,79 @@ impl VirtualMachine {
                 Ok(all_prunable)
             }
             _ => Ok(false),
+        }
+    }
+
+    fn sort_value(
+        &mut self,
+        arr_val: Value,
+        key_func_opt: Option<Value>,
+    ) -> Result<Value, RuntimeError> {
+        // For the no-keyF case, force all thunks in the array before sorting.
+        // Root arr_val and key_func_opt to protect them from GC during forcing.
+        if matches!(key_func_opt, None | Some(Value::Null)) {
+            if let Value::Array(arr_idx) = arr_val {
+                let mut roots = vec![arr_val];
+                if let Some(kf) = key_func_opt {
+                    roots.push(kf);
+                }
+                self.memory_manager.external_roots.push(roots);
+                let result = self.force_all_array_elements(arr_idx);
+                self.memory_manager.external_roots.pop();
+                result?;
+            }
+        }
+        match key_func_opt {
+            None | Some(Value::Null) => {
+                // No keyF: delegate to the type-ordering sort in native
+                let span = self.get_current_span();
+                let source_id = self.current_chunk().source_id.to_string();
+                native::std_sort(arr_val, &mut self.memory_manager, span, source_id)
+            }
+            Some(key_f) => {
+                // keyF provided: pre-compute keys (same pattern as SortBy)
+                let arr_idx = match arr_val {
+                    Value::Array(i) => i,
+                    other => {
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!("std.sort: expected array, got {}", other.type_name()),
+                            self.current_chunk().source_id.to_string(),
+                        ));
+                    }
+                };
+                let elements: Vec<Value> = self.memory_manager.load_array(arr_idx).elements.clone();
+                // Phase 1: pre-compute keys (GC-safe)
+                let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(elements.len());
+                for &elem in &elements {
+                    let mut roots = Vec::from(self.stack.clone());
+                    roots.extend_from_slice(&elements);
+                    roots.push(key_f);
+                    for (k, v) in &keyed {
+                        roots.push(*k);
+                        roots.push(*v);
+                    }
+                    let mut open_upvalue_roots = Vec::new();
+                    let mut upvalue = self.open_upvalues;
+                    while let Some(uv_idx) = upvalue {
+                        open_upvalue_roots.push(uv_idx);
+                        upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                    }
+                    self.memory_manager
+                        .push_external_roots(roots, open_upvalue_roots);
+                    let key = self.call_value_with_one_arg(key_f, elem);
+                    self.memory_manager.pop_external_roots();
+                    keyed.push((key?, elem));
+                }
+                // Phase 2: sort by pre-computed keys
+                keyed.sort_by(|(ka, _), (kb, _)| {
+                    native::compare_values(*ka, *kb, &self.memory_manager)
+                });
+                // Phase 3: extract sorted elements
+                let sorted: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
+                let alloc = self.memory_manager.allocate_array(sorted);
+                Ok(Value::Array(alloc.index))
+            }
         }
     }
 
@@ -9132,7 +9214,8 @@ impl VirtualMachine {
             .push_external_roots(vec![Value::Object(obj_idx)], Vec::new());
 
         // Process "main" section (no header)
-        let main_val = self.enumerate_object_fields(obj_idx)
+        let main_val = self
+            .enumerate_object_fields(obj_idx)
             .into_iter()
             .find(|(k, _, _, vis)| {
                 self.memory_manager.load_string(*k) == "main" && *vis != FieldVisibility::Hidden
@@ -9161,12 +9244,12 @@ impl VirtualMachine {
             // Root main_obj_idx
             self.memory_manager
                 .push_external_roots(vec![Value::Object(main_obj_idx)], Vec::new());
-            let mut main_fields: Vec<(String, Value, Option<ObjectIndex>)> =
-                self.enumerate_object_fields(main_obj_idx)
-                    .into_iter()
-                    .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                    .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
-                    .collect();
+            let mut main_fields: Vec<(String, Value, Option<ObjectIndex>)> = self
+                .enumerate_object_fields(main_obj_idx)
+                .into_iter()
+                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
+                .collect();
             main_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
             for (key, val, super_obj) in main_fields {
                 let forced_val = match val {
@@ -9182,7 +9265,8 @@ impl VirtualMachine {
         }
 
         // Process named sections
-        let sections_val = self.enumerate_object_fields(obj_idx)
+        let sections_val = self
+            .enumerate_object_fields(obj_idx)
             .into_iter()
             .find(|(k, _, _, vis)| {
                 self.memory_manager.load_string(*k) == "sections" && *vis != FieldVisibility::Hidden
@@ -9211,12 +9295,12 @@ impl VirtualMachine {
             // Root sections_obj_idx
             self.memory_manager
                 .push_external_roots(vec![Value::Object(sections_obj_idx)], Vec::new());
-            let mut section_names: Vec<(String, Value, Option<ObjectIndex>)> =
-                self.enumerate_object_fields(sections_obj_idx)
-                    .into_iter()
-                    .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                    .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
-                    .collect();
+            let mut section_names: Vec<(String, Value, Option<ObjectIndex>)> = self
+                .enumerate_object_fields(sections_obj_idx)
+                .into_iter()
+                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
+                .collect();
             section_names.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
             for (section_name, section_raw, section_super) in section_names {
                 result.push_str(&format!("[{}]\n", section_name));
@@ -9246,12 +9330,12 @@ impl VirtualMachine {
                 // Root section_obj_idx for the duration of field processing
                 self.memory_manager
                     .push_external_roots(vec![Value::Object(section_obj_idx)], Vec::new());
-                let mut section_fields: Vec<(String, Value, Option<ObjectIndex>)> =
-                    self.enumerate_object_fields(section_obj_idx)
-                        .into_iter()
-                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                        .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
-                        .collect();
+                let mut section_fields: Vec<(String, Value, Option<ObjectIndex>)> = self
+                    .enumerate_object_fields(section_obj_idx)
+                    .into_iter()
+                    .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                    .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
+                    .collect();
                 section_fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
                 for (key, val, super_obj) in section_fields {
                     let forced_val = match val {
@@ -9429,12 +9513,12 @@ impl VirtualMachine {
                 Ok(format!("[{}]", items.join(", ")))
             }
             Value::Object(o_idx) => {
-                let mut field_data: Vec<(String, Value, Option<ObjectIndex>)> =
-                    self.enumerate_object_fields(o_idx)
-                        .into_iter()
-                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                        .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
-                        .collect();
+                let mut field_data: Vec<(String, Value, Option<ObjectIndex>)> = self
+                    .enumerate_object_fields(o_idx)
+                    .into_iter()
+                    .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                    .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
+                    .collect();
                 field_data.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                 if field_data.is_empty() {
@@ -9517,12 +9601,12 @@ impl VirtualMachine {
             }
         };
 
-        let mut fields: Vec<(String, Value, Option<ObjectIndex>)> =
-            self.enumerate_object_fields(obj_idx)
-                .into_iter()
-                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
-                .collect();
+        let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = self
+            .enumerate_object_fields(obj_idx)
+            .into_iter()
+            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+            .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
+            .collect();
         fields.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
         let mut result = String::new();
@@ -9717,12 +9801,12 @@ impl VirtualMachine {
                 // Root the object to protect from GC during field processing
                 self.memory_manager
                     .push_external_roots(vec![Value::Object(o_idx)], Vec::new());
-                let mut field_data: Vec<(String, Value, Option<ObjectIndex>)> =
-                    self.enumerate_object_fields(o_idx)
-                        .into_iter()
-                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                        .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
-                        .collect();
+                let mut field_data: Vec<(String, Value, Option<ObjectIndex>)> = self
+                    .enumerate_object_fields(o_idx)
+                    .into_iter()
+                    .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                    .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
+                    .collect();
                 field_data.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
 
                 if field_data.is_empty() {
@@ -10012,10 +10096,7 @@ impl VirtualMachine {
                     let key_idx = self.memory_manager.allocate_string(&key).index;
                     let val =
                         self.serde_yaml_to_jsonnet_value(v, span.clone(), source_id.clone())?;
-                    props.insert(
-                        key_idx,
-                        ObjectField::new(val, FieldVisibility::Visible),
-                    );
+                    props.insert(key_idx, ObjectField::new(val, FieldVisibility::Visible));
                 }
                 let alloc = self.memory_manager.allocate_object_with_properties(props);
                 Ok(Value::Object(alloc.index))
@@ -10237,12 +10318,12 @@ impl VirtualMachine {
         self.memory_manager
             .external_roots
             .push(vec![Value::Object(obj_idx)]);
-        let mut fields: Vec<(String, Value, Option<ObjectIndex>)> =
-            self.enumerate_object_fields(obj_idx)
-                .into_iter()
-                .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
-                .collect();
+        let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = self
+            .enumerate_object_fields(obj_idx)
+            .into_iter()
+            .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+            .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
+            .collect();
         fields.sort_by(|a, b| a.0.cmp(&b.0));
         // Root all field values to protect from GC during recursive processing
         let field_values: Vec<Value> = fields.iter().map(|(_, v, _)| *v).collect();
@@ -10534,12 +10615,12 @@ impl VirtualMachine {
                 // Render as inline TOML table: { key = val, key2 = val2 }
                 self.memory_manager
                     .push_external_roots(vec![Value::Object(obj_idx)], Vec::new());
-                let mut fields: Vec<(String, Value, Option<ObjectIndex>)> =
-                    self.enumerate_object_fields(obj_idx)
-                        .into_iter()
-                        .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
-                        .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
-                        .collect();
+                let mut fields: Vec<(String, Value, Option<ObjectIndex>)> = self
+                    .enumerate_object_fields(obj_idx)
+                    .into_iter()
+                    .filter(|(_, _, _, vis)| *vis != FieldVisibility::Hidden)
+                    .map(|(k, v, so, _)| (self.memory_manager.load_string(k).to_string(), v, so))
+                    .collect();
                 fields.sort_by(|a, b| a.0.cmp(&b.0));
                 let mut pairs = Vec::new();
                 for (key, val, super_obj) in fields {

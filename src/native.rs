@@ -155,7 +155,11 @@ pub fn call_native(
         }
         NativeFuncId::EncodeUTF8 => std_encode_utf8(args[0], memory_manager, span, source_id),
         NativeFuncId::DecodeUTF8 => std_decode_utf8(args[0], memory_manager, span, source_id),
-        NativeFuncId::Sort => std_sort(args[0], memory_manager, span, source_id),
+        NativeFuncId::Sort => Err(RuntimeError::new(
+            span,
+            format!("std.sort must be handled by the VM"),
+            source_id,
+        )),
         NativeFuncId::SplitLimitR => {
             std_split_limit_r(args[0], args[1], args[2], memory_manager, span, source_id)
         }
@@ -3080,7 +3084,7 @@ pub fn compare_values(a: Value, b: Value, mm: &MemoryManager) -> std::cmp::Order
 }
 
 /// std.sort(arr): Returns a sorted copy of arr using total type ordering
-fn std_sort(
+pub fn std_sort(
     arr_val: Value,
     memory_manager: &mut MemoryManager,
     span: Range<usize>,
@@ -4703,10 +4707,7 @@ fn std_object_from_pairs(
     let mut properties = std::collections::HashMap::new();
     for (key, val) in pairs {
         let key_idx = memory_manager.allocate_string(&key).index;
-        properties.insert(
-            key_idx,
-            ObjectField::new(val, FieldVisibility::Visible),
-        );
+        properties.insert(key_idx, ObjectField::new(val, FieldVisibility::Visible));
     }
     let obj_alloc = memory_manager.allocate_object_with_properties(properties);
     Ok(Value::Object(obj_alloc.index))
