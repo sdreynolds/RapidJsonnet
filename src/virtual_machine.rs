@@ -1338,184 +1338,146 @@ impl VirtualMachine {
     }
 
     pub fn force_value(&mut self, val: Value) -> Result<Value, RuntimeError> {
-        if let Value::Import(import_idx) = val {
-            // 1. Initial checks and set evaluating flag
-            let (target_path_str, already_cached) = {
-                let import = self.memory_manager.load_import(import_idx);
-
+        match val {
+            Value::Import(import_idx) => {
                 // Check if already cached
-                if let Some(cached) = import.cached_result {
+                if let Some(cached) = self.memory_manager.load_import(import_idx).cached_result {
                     return Ok(cached);
                 }
 
                 // Detect cyclic imports
-                if import.evaluating.get() {
-                    let path_str_idx = import.path;
-                    let path_str = self.memory_manager.load_string(path_str_idx).to_string();
-                    return Err(RuntimeError::new(
-                        self.get_current_span(),
-                        format!(
-                            "Cyclic import detected: file '{}' is already being evaluated",
-                            path_str
-                        ),
-                        self.current_chunk().source_id.to_string(),
-                    ));
-                }
-
-                // Mark as evaluating
-                import.evaluating.set(true);
-
-                let path_str_idx = import.path;
-                (
-                    self.memory_manager.load_string(path_str_idx).to_string(),
-                    false,
-                )
-            };
-
-            if already_cached {
-                return Ok(self
-                    .memory_manager
-                    .load_import(import_idx)
-                    .cached_result
-                    .unwrap());
-            }
-
-            // Protect the current VM roots from GC during nested compilation and execution
-            let mut roots = Vec::from(self.stack.clone());
-            roots.push(val); // Protect the value we are currently forcing
-            for i in 0..self.frame_count {
-                roots.push(Value::Closure(self.frames[i].closure));
-            }
-            // Also root ext_vars so compiler GC doesn't collect them
-            for ext_val in self.ext_vars.values() {
-                roots.push(*ext_val);
-            }
-
-            let mut open_upvalue_roots = Vec::new();
-            let mut upvalue = self.open_upvalues;
-            while let Some(upvalue_index) = upvalue {
-                open_upvalue_roots.push(upvalue_index);
-                upvalue = self.memory_manager.load_upvalue(upvalue_index).next;
-            }
-
-            self.memory_manager
-                .push_external_roots(roots, open_upvalue_roots);
-
-            // 2. Check for pre-compiled file, otherwise read source and compile
-            let compiled_path = format!("{}c", target_path_str);
-            let owned_chunk = if std::path::Path::new(&compiled_path).exists() {
-                // Load pre-compiled bytecode
-                let bytes = match std::fs::read(&compiled_path) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        self.memory_manager.pop_external_roots();
-                        self.memory_manager
-                            .load_import(import_idx)
-                            .evaluating
-                            .set(false);
+                let path_str = {
+                    let import = self.memory_manager.load_import(import_idx);
+                    if import.evaluating.get() {
+                        let path_str = self.memory_manager.load_string(import.path).to_string();
                         return Err(RuntimeError::new(
                             self.get_current_span(),
-                            format!("Failed to read compiled file '{}': {}", compiled_path, e),
+                            format!(
+                                "Cyclic import detected: file '{}' is already being evaluated",
+                                path_str
+                            ),
                             self.current_chunk().source_id.to_string(),
                         ));
                     }
-                };
-                serialized_chunk::deserialize_program(&bytes, &mut self.memory_manager)
-            } else {
-                // Read the source file and compile it
-                let content = match std::fs::read_to_string(&target_path_str) {
-                    Ok(content) => content,
-                    Err(e) => {
-                        self.memory_manager.pop_external_roots();
-                        self.memory_manager
-                            .load_import(import_idx)
-                            .evaluating
-                            .set(false);
-                        return Err(RuntimeError::new(
-                            self.get_current_span(),
-                            format!("Failed to read imported file '{}': {}", target_path_str, e),
-                            self.current_chunk().source_id.to_string(),
-                        ));
-                    }
+                    import.evaluating.set(true);
+                    self.memory_manager.load_string(import.path).to_string()
                 };
 
-                let mut scanner = scanner::Scanner::new(&content, &target_path_str);
-                let compiler = compiler::Compiler::new(&mut scanner, &target_path_str);
-                match compiler.compile(&mut self.memory_manager) {
-                    Ok(chunk) => chunk.into_owned(),
-                    Err(e) => {
-                        self.memory_manager.pop_external_roots();
-                        self.memory_manager
-                            .load_import(import_idx)
-                            .evaluating
-                            .set(false);
-                        return Err(RuntimeError {
-                            span: self.get_current_span(),
-                            message: format!("while evaluating import \"{}\"", target_path_str),
-                            source_id: self.current_chunk().source_id.to_string(),
-                            cause: Some(Box::new(e)),
-                        });
-                    }
+                // Protect the current VM roots from GC during nested compilation and execution
+                let mut roots = Vec::from(self.stack.clone());
+                roots.push(val); // Protect the value we are currently forcing
+                for i in 0..self.frame_count {
+                    roots.push(Value::Closure(self.frames[i].closure));
                 }
-            };
-
-            // 3. Execute the chunk
-            let dummy_memory_manager = memory_manager::MemoryManager::new();
-            let actual_memory_manager =
-                std::mem::replace(&mut self.memory_manager, dummy_memory_manager);
-
-            let mut sub_vm = VirtualMachine::new_from_owned(owned_chunk, actual_memory_manager);
-            sub_vm.jpaths = self.jpaths.clone();
-            if self.coverage_collector.is_some() {
-                sub_vm.enable_coverage();
-            }
-            let result = sub_vm.interpret();
-
-            if let Some(sub_coverage) = sub_vm.take_coverage() {
-                if let Some(parent_coverage) = &mut self.coverage_collector {
-                    parent_coverage.merge(sub_coverage);
+                for ext_val in self.ext_vars.values() {
+                    roots.push(*ext_val);
                 }
-            }
-            self.memory_manager = sub_vm.memory_manager;
-            self.memory_manager.pop_external_roots();
 
-            match result {
-                Ok(evaluated_value) => {
-                    // Recursively force the result (e.g. if the imported file itself
-                    // returns an import or a thunk)
-                    let forced = match self.force_value(evaluated_value) {
-                        Ok(v) => v,
+                let mut open_upvalue_roots = Vec::new();
+                let mut upvalue = self.open_upvalues;
+                while let Some(upvalue_index) = upvalue {
+                    open_upvalue_roots.push(upvalue_index);
+                    upvalue = self.memory_manager.load_upvalue(upvalue_index).next;
+                }
+
+                self.memory_manager
+                    .push_external_roots(roots, open_upvalue_roots);
+
+                let compiled_path = format!("{}c", path_str);
+                let owned_chunk = if std::path::Path::new(&compiled_path).exists() {
+                    let bytes = match std::fs::read(&compiled_path) {
+                        Ok(bytes) => bytes,
                         Err(e) => {
-                            let import = self.memory_manager.load_import_mut(import_idx);
-                            import.evaluating.set(false);
+                            self.memory_manager.pop_external_roots();
+                            self.memory_manager.load_import_mut(import_idx).evaluating.set(false);
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!("Failed to read compiled file '{}': {}", compiled_path, e),
+                                self.current_chunk().source_id.to_string(),
+                            ));
+                        }
+                    };
+                    serialized_chunk::deserialize_program(&bytes, &mut self.memory_manager)
+                } else {
+                    let content = match std::fs::read_to_string(&path_str) {
+                        Ok(content) => content,
+                        Err(e) => {
+                            self.memory_manager.pop_external_roots();
+                            self.memory_manager.load_import_mut(import_idx).evaluating.set(false);
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!("Failed to read imported file '{}': {}", path_str, e),
+                                self.current_chunk().source_id.to_string(),
+                            ));
+                        }
+                    };
+
+                    let mut scanner = scanner::Scanner::new(&content, &path_str);
+                    let compiler = compiler::Compiler::new(&mut scanner, &path_str);
+                    match compiler.compile(&mut self.memory_manager) {
+                        Ok(chunk) => chunk.into_owned(),
+                        Err(e) => {
+                            self.memory_manager.pop_external_roots();
+                            self.memory_manager.load_import_mut(import_idx).evaluating.set(false);
                             return Err(RuntimeError {
                                 span: self.get_current_span(),
-                                message: format!("while evaluating import \"{}\"", target_path_str),
+                                message: format!("while evaluating import \"{}\"", path_str),
                                 source_id: self.current_chunk().source_id.to_string(),
                                 cause: Some(Box::new(e)),
                             });
                         }
-                    };
-                    let import = self.memory_manager.load_import_mut(import_idx);
-                    import.cached_result = Some(forced);
-                    import.evaluating.set(false);
-                    Ok(forced)
+                    }
+                };
+
+                let dummy_memory_manager = memory_manager::MemoryManager::new();
+                let actual_memory_manager = std::mem::replace(&mut self.memory_manager, dummy_memory_manager);
+                let mut sub_vm = VirtualMachine::new_from_owned(owned_chunk, actual_memory_manager);
+                sub_vm.jpaths = self.jpaths.clone();
+                if self.coverage_collector.is_some() { sub_vm.enable_coverage(); }
+                let result = sub_vm.interpret();
+
+                if let Some(sub_coverage) = sub_vm.take_coverage() {
+                    if let Some(parent_coverage) = &mut self.coverage_collector {
+                        parent_coverage.merge(sub_coverage);
+                    }
                 }
-                Err(e) => {
-                    self.memory_manager
-                        .load_import_mut(import_idx)
-                        .evaluating
-                        .set(false);
-                    Err(RuntimeError {
-                        span: self.get_current_span(),
-                        message: format!("while evaluating import \"{}\"", target_path_str),
-                        source_id: self.current_chunk().source_id.to_string(),
-                        cause: Some(Box::new(e)),
-                    })
+                self.memory_manager = sub_vm.memory_manager;
+                self.memory_manager.pop_external_roots();
+
+                match result {
+                    Ok(evaluated_value) => {
+                        let forced = match self.force_value(evaluated_value) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                self.memory_manager.load_import_mut(import_idx).evaluating.set(false);
+                                return Err(RuntimeError {
+                                    span: self.get_current_span(),
+                                    message: format!("while evaluating import \"{}\"", path_str),
+                                    source_id: self.current_chunk().source_id.to_string(),
+                                    cause: Some(Box::new(e)),
+                                });
+                            }
+                        };
+                        let import = self.memory_manager.load_import_mut(import_idx);
+                        import.cached_result = Some(forced);
+                        import.evaluating.set(false);
+                        Ok(forced)
+                    }
+                    Err(e) => {
+                        self.memory_manager.load_import_mut(import_idx).evaluating.set(false);
+                        Err(RuntimeError {
+                            span: self.get_current_span(),
+                            message: format!("while evaluating import \"{}\"", path_str),
+                            source_id: self.current_chunk().source_id.to_string(),
+                            cause: Some(Box::new(e)),
+                        })
+                    }
                 }
             }
-        } else {
-            Ok(val)
+            Value::Closure(ci) if self.memory_manager.load_closure(ci).is_thunk => {
+                self.force_thunk(ci)
+            }
+            _ => Ok(val),
         }
     }
 
@@ -11713,5 +11675,23 @@ mod tests {
         } else {
             panic!("Expected object result");
         }
+    }
+
+    #[test]
+    fn test_force_value_thunk_materialization() {
+        let mut chunk = create_test_chunk();
+        // Create a thunk that returns 42
+        let idx_42 = chunk.add_constant(Value::Number(42.0));
+        chunk.write_opcode_u16(Opcode::LoadConst, idx_42 as u16, 0..5);
+        chunk.write_opcode(Opcode::Return, 5..10);
+
+        let mut mm = MemoryManager::new();
+        let func_idx = mm.allocate_function(None, 0, 0, chunk.into_owned()).index;
+        let thunk_idx = mm.allocate_thunk(func_idx, vec![]).index;
+
+        let mut vm = VirtualMachine::new(create_test_chunk(), mm);
+        let result = vm.force_value(Value::Closure(thunk_idx)).unwrap();
+
+        assert_eq!(result, Value::Number(42.0));
     }
 }
