@@ -31,8 +31,9 @@ pub struct CallFrame {
     pub super_obj: Option<ObjectIndex>,
     /// The field name this thunk is being evaluated for (for dynamic +: overrides)
     pub field_name: Option<StringIndex>,
-    /// Memoization target: when this frame returns, write the result back to object.field.memo_value
-    pub memo_target: Option<(ObjectIndex, StringIndex)>,
+    /// When set, the return value of this frame should be cached in the VM's field_cache
+    /// under (object_index, field_key, self_obj).
+    pub cache_target: Option<(ObjectIndex, StringIndex, ObjectIndex)>,
 }
 
 impl CallFrame {
@@ -51,7 +52,7 @@ impl CallFrame {
             self_obj,
             super_obj,
             field_name: None,
-            memo_target: None,
+            cache_target: None,
         }
     }
 }
@@ -74,14 +75,18 @@ pub struct VirtualMachine {
     pub ext_vars: std::collections::HashMap<String, Value>,
     /// Pending field name for the next thunk call (consumed by call_closure)
     pending_field_name: Option<StringIndex>,
-    /// Pending memoization target for the next field thunk call (consumed by call_closure)
-    pending_memo_target: Option<(ObjectIndex, StringIndex)>,
+    /// Pending cache target for the next field thunk call (consumed by call_closure)
+    pending_cache_target: Option<(ObjectIndex, StringIndex, ObjectIndex)>,
     /// Cached std object (created on first LoadStd, reused after)
     std_object: Option<Value>,
     /// Library search paths for import resolution (like -J / --jpath)
     jpaths: Vec<String>,
     /// Optional coverage collector for span tracking during test runs
     coverage_collector: Option<CoverageCollector>,
+    /// Cache for evaluated object field thunks, keyed by (object, field, self).
+    /// The self component is needed because `super.field` evaluates the thunk with
+    /// the merged object as self, not the super object.
+    field_cache: std::collections::HashMap<(ObjectIndex, StringIndex, ObjectIndex), Value>,
 }
 
 impl VirtualMachine {
@@ -118,10 +123,11 @@ impl VirtualMachine {
             instruction_start_ip: 0,
             ext_vars: std::collections::HashMap::new(),
             pending_field_name: None,
-            pending_memo_target: None,
+            pending_cache_target: None,
             std_object: None,
             jpaths: Vec::new(),
             coverage_collector: None,
+            field_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -1192,7 +1198,7 @@ impl VirtualMachine {
 
         // Consume pending field name if set (for dynamic +: override thunks)
         new_frame.field_name = self.pending_field_name.take();
-        new_frame.memo_target = self.pending_memo_target.take();
+        new_frame.cache_target = self.pending_cache_target.take();
 
         // Push frame
         if self.frame_count < self.frames.len() {
@@ -1681,6 +1687,14 @@ impl VirtualMachine {
                     };
 
                     if let Value::String(field_key) = field_name {
+                        // Check the field cache (self = self_obj_key for SuperIndex)
+                        let cache_key = (super_obj_key, field_key, self_obj_key);
+                        if let Some(&cached) = self.field_cache.get(&cache_key) {
+                            self.push(cached)?;
+                            self.advance_pc();
+                            continue;
+                        }
+
                         let resolution = self.get_object_field_resolution(super_obj_key, field_key);
 
                         if let Some((field, defining_node)) = resolution {
@@ -1698,6 +1712,8 @@ impl VirtualMachine {
 
                                     // Set field name for LoadFieldName opcode
                                     self.pending_field_name = Some(field_key);
+                                    // Set cache target so Return can cache the result
+                                    self.pending_cache_target = Some(cache_key);
                                     self.call_closure(
                                         closure_idx,
                                         2,
@@ -2406,52 +2422,53 @@ impl VirtualMachine {
                     if let Value::Object(object_key) = object_value {
                         // Ensure field name is a string
                         if let Value::String(field_key) = field_name {
-                            // Check memo cache first
-                            let obj = self.memory_manager.load_object(object_key);
-                            if let Some(memo) = obj.memo_cache.get(&field_key) {
-                                self.push(memo.clone())?;
-                            } else {
-                                let resolution =
-                                    self.get_object_field_resolution(object_key, field_key);
+                            // Check the field cache first (self = object_key for ObjectIndex)
+                            let cache_key = (object_key, field_key, object_key);
+                            if let Some(&cached) = self.field_cache.get(&cache_key) {
+                                self.push(cached)?;
+                                self.advance_pc();
+                                continue;
+                            }
 
-                                if let Some((field, defining_node)) = resolution {
-                                    match field.value {
-                                        Value::Closure(closure_idx) => {
-                                            // It's a thunk! We need to call it with (self, super)
-                                            self.advance_pc(); // Advance past ObjectIndex before calling
-                                            self.push(Value::Closure(closure_idx))?;
-                                            self.push(Value::Object(object_key))?; // self
+                            let resolution =
+                                self.get_object_field_resolution(object_key, field_key);
 
-                                            let new_super = self
-                                                .memory_manager
-                                                .load_object(defining_node)
-                                                .base_object;
-                                            let super_val =
-                                                new_super.map(Value::Object).unwrap_or(Value::Null);
-                                            self.push(super_val)?; // super
+                            if let Some((field, defining_node)) = resolution {
+                                match field.value {
+                                    Value::Closure(closure_idx) => {
+                                        // It's a thunk! We need to call it with (self, super)
+                                        self.advance_pc(); // Advance past ObjectIndex before calling
+                                        self.push(Value::Closure(closure_idx))?;
+                                        self.push(Value::Object(object_key))?; // self
 
-                                            // Set field name for LoadFieldName opcode
-                                            self.pending_field_name = Some(field_key);
-                                            // Set memo target so Return can cache the result
-                                            self.pending_memo_target =
-                                                Some((object_key, field_key));
-                                            self.call_closure(
-                                                closure_idx,
-                                                2,
-                                                Some(object_key),
-                                                new_super,
-                                            )?;
-                                            continue;
-                                        }
-                                        _ => {
-                                            // It's a raw value
-                                            self.push(field.value.clone())?;
-                                        }
+                                        let new_super = self
+                                            .memory_manager
+                                            .load_object(defining_node)
+                                            .base_object;
+                                        let super_val =
+                                            new_super.map(Value::Object).unwrap_or(Value::Null);
+                                        self.push(super_val)?; // super
+
+                                        // Set field name for LoadFieldName opcode
+                                        self.pending_field_name = Some(field_key);
+                                        // Set cache target so Return can cache the result
+                                        self.pending_cache_target = Some(cache_key);
+                                        self.call_closure(
+                                            closure_idx,
+                                            2,
+                                            Some(object_key),
+                                            new_super,
+                                        )?;
+                                        continue;
                                     }
-                                } else {
-                                    // Property doesn't exist, push null
-                                    self.push(Value::Null)?;
+                                    _ => {
+                                        // It's a raw value
+                                        self.push(field.value.clone())?;
+                                    }
                                 }
+                            } else {
+                                // Property doesn't exist, push null
+                                self.push(Value::Null)?;
                             }
                         } else {
                             return Err(RuntimeError::new(
@@ -7422,14 +7439,12 @@ impl VirtualMachine {
                         return Ok(return_value);
                     }
 
-                    // Write memo cache if this frame was called from ObjectIndex
+                    // Write field cache if this frame was called from ObjectIndex or SuperIndex
                     // Only cache non-Closure values (closures are methods, not thunk results)
                     if !matches!(return_value, Value::Closure(_)) {
-                        let memo_target = self.current_frame().memo_target;
-                        if let Some((obj_key, fld_key)) = memo_target {
-                            if let Some(obj) = self.memory_manager.get_object_mut(obj_key) {
-                                obj.memo_cache.insert(fld_key, return_value);
-                            }
+                        let cache_target = self.current_frame().cache_target;
+                        if let Some(cache_key) = cache_target {
+                            self.field_cache.insert(cache_key, return_value);
                         }
                     }
 
@@ -7987,6 +8002,14 @@ impl VirtualMachine {
         // Root the cached std object so GC doesn't collect it
         if let Some(std_obj) = self.std_object {
             roots.push(std_obj);
+        }
+
+        // Root all cached field values so GC doesn't collect them
+        for (&(obj_key, field_key, self_key), &value) in &self.field_cache {
+            roots.push(Value::Object(obj_key));
+            roots.push(Value::String(field_key));
+            roots.push(Value::Object(self_key));
+            roots.push(value);
         }
 
         // Collect open upvalues - these are upvalues that point to stack locations

@@ -33,8 +33,6 @@ impl ObjectField {
 pub struct ManagedObject {
     /// Object properties mapping interned string keys to fields
     pub properties: HashMap<StringIndex, ObjectField>,
-    /// Cache of evaluated properties, scoped to this exact self object
-    pub memo_cache: HashMap<StringIndex, Value>,
     /// List of object-level assertions to be evaluated during manifestation
     pub assertions: Vec<ClosureIndex>,
     /// Prototype object for inheritance
@@ -50,11 +48,9 @@ impl ManagedObject {
         // HashMap capacity accounts for actual allocated memory, not just length
         let map_capacity_bytes = self.properties.capacity()
             * (std::mem::size_of::<StringIndex>() + std::mem::size_of::<ObjectField>());
-        let memo_capacity_bytes = self.memo_cache.capacity()
-            * (std::mem::size_of::<StringIndex>() + std::mem::size_of::<Value>());
         let assertions_capacity_bytes =
             self.assertions.capacity() * std::mem::size_of::<ClosureIndex>();
-        base_size + map_capacity_bytes + memo_capacity_bytes + assertions_capacity_bytes
+        base_size + map_capacity_bytes + assertions_capacity_bytes
     }
 
     /// Create a new empty Jsonnet object
@@ -62,7 +58,6 @@ impl ManagedObject {
         let properties = HashMap::new();
         Self {
             properties,
-            memo_cache: HashMap::new(),
             assertions: Vec::new(),
             base_object: None,
             marked: Cell::new(false),
@@ -73,7 +68,6 @@ impl ManagedObject {
     pub fn with_properties(properties: HashMap<StringIndex, ObjectField>) -> Self {
         Self {
             properties,
-            memo_cache: HashMap::new(),
             assertions: Vec::new(),
             base_object: None,
             marked: Cell::new(false),
@@ -87,7 +81,6 @@ impl ManagedObject {
     ) -> Self {
         Self {
             properties,
-            memo_cache: HashMap::new(),
             assertions,
             base_object: None,
             marked: Cell::new(false),
@@ -733,11 +726,6 @@ impl MemoryManager {
                             for (field_key, field) in &managed_object.properties {
                                 values.push_back(Value::String(*field_key));
                                 values.push_back(field.value);
-                            }
-
-                            for (memo_key, memo_val) in &managed_object.memo_cache {
-                                values.push_back(Value::String(*memo_key));
-                                values.push_back(*memo_val);
                             }
 
                             if let Some(base) = managed_object.base_object {
