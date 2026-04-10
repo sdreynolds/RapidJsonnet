@@ -363,28 +363,6 @@ impl VirtualMachine {
 
     /// Execute a thunk (field closure) synchronously and return its result.
     /// Force all closure field values in an object to their evaluated results.
-    fn force_object_fields(&mut self, obj_idx: ObjectIndex) -> Result<(), RuntimeError> {
-        // Walk the full base_object chain so inherited fields are also forced.
-        let mut curr = Some(obj_idx);
-        while let Some(node_idx) = curr {
-            let (keys, base) = {
-                let obj = self.memory_manager.load_object(node_idx);
-                let keys: Vec<_> = obj.properties.keys().cloned().collect();
-                (keys, obj.base_object)
-            };
-            for key in keys {
-                let field_val = self.memory_manager.load_object(node_idx).properties[&key].value;
-                if let Value::Closure(ci) = field_val {
-                    // self = root merged object (obj_idx), stored back into the node
-                    let result = self.execute_thunk_sync(ci, Some(obj_idx), None)?;
-                    let obj = self.memory_manager.get_object_mut(node_idx).unwrap();
-                    obj.properties.get_mut(&key).unwrap().value = result;
-                }
-            }
-            curr = base;
-        }
-        Ok(())
-    }
 
     /// Force a lazy thunk (0-arg closure from a local binding).
     fn force_thunk(&mut self, closure_index: ClosureIndex) -> Result<Value, RuntimeError> {
@@ -461,6 +439,49 @@ impl VirtualMachine {
                 self.force_all_array_elements(nested_idx)?;
             }
         }
+        self.memory_manager.external_roots.pop();
+        Ok(())
+    }
+
+    /// Force all non-hidden fields of an object recursively through its inheritance chain.
+    fn force_all_object_fields(
+        &mut self,
+        object_key: chunk::ObjectIndex,
+    ) -> Result<(), RuntimeError> {
+        // Root the object to protect from GC
+        self.memory_manager
+            .external_roots
+            .push(vec![Value::Object(object_key)]);
+
+        let mut curr = Some(object_key);
+        while let Some(node_idx) = curr {
+            let (keys, next_base) = {
+                let obj = self.memory_manager.load_object(node_idx);
+                (
+                    obj.properties.keys().cloned().collect::<Vec<_>>(),
+                    obj.base_object,
+                )
+            };
+
+            for key in keys {
+                let field_val = self.memory_manager.load_object(node_idx).properties[&key].value;
+                if let Value::Closure(ci) = field_val {
+                    if self.memory_manager.load_closure(ci).is_thunk {
+                        let result = self.execute_thunk_sync_with_field(
+                            ci,
+                            Some(object_key),
+                            next_base,
+                            Some(key),
+                        )?;
+                        // Write back result to cache it in the object property
+                        let obj = self.memory_manager.get_object_mut(node_idx).unwrap();
+                        obj.properties.get_mut(&key).unwrap().value = result;
+                    }
+                }
+            }
+            curr = next_base;
+        }
+
         self.memory_manager.external_roots.pop();
         Ok(())
     }
@@ -1889,7 +1910,7 @@ impl VirtualMachine {
                     if matches!(a, Value::String(_)) {
                         // Force all thunks in arguments before passing to format
                         if let Value::Object(obj_idx) = b {
-                            self.force_object_fields(obj_idx)?;
+                            self.force_all_object_fields(obj_idx)?;
                         }
                         if let Value::Array(arr_idx) = b {
                             self.force_all_array_elements(arr_idx)?;
@@ -2834,10 +2855,29 @@ impl VirtualMachine {
                     })?;
 
                     // Extract arguments from stack
-                    let args = self.stack[self.stack.len() - arg_count..].to_vec();
+                    let mut args = self.stack[self.stack.len() - arg_count..].to_vec();
                     // Pop arguments and the native function value itself
                     for _ in 0..=arg_count {
                         self.pop()?;
+                    }
+
+                    // Force all arguments
+                    for arg in args.iter_mut() {
+                        *arg = self.force_value(*arg)?;
+                    }
+
+                    // For specific native functions, recursively force container elements
+                    if matches!(
+                        func_id,
+                        chunk::NativeFuncId::Join | chunk::NativeFuncId::Format
+                    ) {
+                        for arg in args.iter() {
+                            match arg {
+                                Value::Array(a) => self.force_all_array_elements(*a)?,
+                                Value::Object(o) => self.force_all_object_fields(*o)?,
+                                _ => {}
+                            }
+                        }
                     }
 
                     // Handle std.get: field value may be a thunk closure
