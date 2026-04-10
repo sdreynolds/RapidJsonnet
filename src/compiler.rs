@@ -2688,6 +2688,7 @@ impl<'a> Compiler<'a> {
             result_slot,
             memory_manager,
             &span,
+            None,
         )?;
 
         self.emit_opcode(Opcode::Pop, span.clone());
@@ -2710,6 +2711,7 @@ impl<'a> Compiler<'a> {
         result_slot: usize,
         memory_manager: &mut MemoryManager,
         span: &Range<usize>,
+        precomputed_source: Option<usize>,
     ) -> Result<(), CompilerError> {
         if clause_idx >= clauses.len() {
             self.compiling_chunk.write_opcode_u16(
@@ -2820,8 +2822,17 @@ impl<'a> Compiler<'a> {
                 source_checkpoint,
                 span: clause_span,
             } => {
-                self.parser.restore_checkpoint(source_checkpoint.clone());
-                self.parse_expr_notail(0, memory_manager)?;
+                // Parse source array expression, or use a precomputed slot
+                if let Some(slot) = precomputed_source {
+                    self.compiling_chunk.write_opcode_u16(
+                        Opcode::LoadVar,
+                        slot as u16,
+                        clause_span.clone(),
+                    );
+                } else {
+                    self.parser.restore_checkpoint(source_checkpoint.clone());
+                    self.parse_expr_notail(0, memory_manager)?;
+                }
 
                 self.begin_scope();
 
@@ -2840,6 +2851,21 @@ impl<'a> Compiler<'a> {
                 self.emit_constant(0.0)?;
                 self.declare_local("__comp_counter".to_string())?;
                 let counter_slot = self.locals.last().unwrap().stack_slot;
+
+                // Hoist the next for-clause's source if it doesn't depend on var_name.
+                let next_precomputed = match clauses.get(clause_idx + 1) {
+                    Some(ComprehensionClause::For {
+                        source_checkpoint: next_src_cp,
+                        ..
+                    }) if !self.expr_references_ident(next_src_cp, var_name) => {
+                        let next_src_cp = next_src_cp.clone();
+                        self.parser.restore_checkpoint(next_src_cp);
+                        self.parse_expr_notail(0, memory_manager)?;
+                        self.declare_local("__comp_hoisted_source".to_string())?;
+                        Some(self.locals.last().unwrap().stack_slot)
+                    }
+                    _ => None,
+                };
 
                 let loop_start = self.compiling_chunk.count();
 
@@ -2880,6 +2906,7 @@ impl<'a> Compiler<'a> {
                     result_slot,
                     memory_manager,
                     span,
+                    next_precomputed,
                 )?;
 
                 self.end_scope();
@@ -2921,6 +2948,7 @@ impl<'a> Compiler<'a> {
                     result_slot,
                     memory_manager,
                     span,
+                    None,
                 )?;
 
                 let jump_to_end = self.emit_jump(Opcode::Jump, clause_span.clone());
@@ -3049,6 +3077,7 @@ impl<'a> Compiler<'a> {
             result_slot,
             memory_manager,
             &span,
+            None,
         )?;
 
         // Pop the dummy value left by recursion
@@ -3067,6 +3096,48 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// Returns true if the expression starting at `checkpoint` contains an
+    /// identifier token matching `ident` before the expression ends.
+    /// Tracks bracket/brace/paren depth to avoid false positives inside
+    /// nested brackets. Stops at `for`/`if`/`]` at depth 0 (comprehension
+    /// terminators). Fully restores parser state afterward.
+    fn expr_references_ident(&mut self, checkpoint: &ParserCheckpoint, ident: &str) -> bool {
+        let original = self.parser.save_checkpoint();
+        self.parser.restore_checkpoint(checkpoint.clone());
+
+        let mut depth = 0i32;
+        let mut found = false;
+        loop {
+            if self.parser.advance().is_err() {
+                break;
+            }
+            let tok = match self.parser.previous_token() {
+                Some(t) => t.token.clone(),
+                None => break,
+            };
+            match tok {
+                Token::LeftParen | Token::LeftBracket | Token::LeftBrace => depth += 1,
+                Token::RightParen | Token::RightBrace => depth -= 1,
+                Token::RightBracket => {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                Token::For | Token::If if depth == 0 => break,
+                Token::Eof => break,
+                Token::Identifier(ref name) if name == ident => {
+                    found = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        self.parser.restore_checkpoint(original);
+        found
+    }
+
     /// Recursively emit code for comprehension clauses
     fn emit_comprehension_clauses(
         &mut self,
@@ -3076,6 +3147,7 @@ impl<'a> Compiler<'a> {
         result_slot: usize,
         memory_manager: &mut MemoryManager,
         span: &Range<usize>,
+        precomputed_source: Option<usize>,
     ) -> Result<(), CompilerError> {
         if clause_idx >= clauses.len() {
             // All clauses emitted, now emit the body evaluation and append
@@ -3083,17 +3155,14 @@ impl<'a> Compiler<'a> {
             self.parser.restore_checkpoint(body_checkpoint);
             self.parse_expr_notail(0, memory_manager)?;
 
-            // Append body_value to result
+            // Append body_value directly into the result array in-place (no allocation).
+            // The result array is private to this comprehension and never shared, so
+            // mutation is always safe.
             self.compiling_chunk.write_opcode_u16(
-                Opcode::LoadVar,
+                Opcode::ArrayAppendInPlace,
                 result_slot as u16,
                 span.clone(),
             );
-            self.emit_opcode(Opcode::Swap, span.clone());
-            self.emit_opcode(Opcode::ArrayAppend, span.clone());
-
-            // Store new_result back to result slot
-            self.emit_store_var(result_slot, span.clone());
 
             // Push dummy value for end_scope
             self.emit_opcode(Opcode::LoadNull, span.clone());
@@ -3107,9 +3176,17 @@ impl<'a> Compiler<'a> {
                 source_checkpoint,
                 span: clause_span,
             } => {
-                // Parse source array expression
-                self.parser.restore_checkpoint(source_checkpoint.clone());
-                self.parse_expr_notail(0, memory_manager)?;
+                // Parse source array expression, or use a precomputed slot
+                if let Some(slot) = precomputed_source {
+                    self.compiling_chunk.write_opcode_u16(
+                        Opcode::LoadVar,
+                        slot as u16,
+                        clause_span.clone(),
+                    );
+                } else {
+                    self.parser.restore_checkpoint(source_checkpoint.clone());
+                    self.parse_expr_notail(0, memory_manager)?;
+                }
 
                 // Enter a scope for the loop state
                 self.begin_scope();
@@ -3131,6 +3208,22 @@ impl<'a> Compiler<'a> {
                 self.emit_constant(0.0)?;
                 self.declare_local("__comp_counter".to_string())?;
                 let counter_slot = self.locals.last().unwrap().stack_slot;
+
+                // Hoist the next for-clause's source if it doesn't depend on var_name.
+                // This avoids re-evaluating the inner source on every outer iteration.
+                let next_precomputed = match clauses.get(clause_idx + 1) {
+                    Some(ComprehensionClause::For {
+                        source_checkpoint: next_src_cp,
+                        ..
+                    }) if !self.expr_references_ident(next_src_cp, var_name) => {
+                        let next_src_cp = next_src_cp.clone();
+                        self.parser.restore_checkpoint(next_src_cp);
+                        self.parse_expr_notail(0, memory_manager)?;
+                        self.declare_local("__comp_hoisted_source".to_string())?;
+                        Some(self.locals.last().unwrap().stack_slot)
+                    }
+                    _ => None,
+                };
 
                 // LOOP_START:
                 let loop_start = self.compiling_chunk.count();
@@ -3176,6 +3269,7 @@ impl<'a> Compiler<'a> {
                     result_slot,
                     memory_manager,
                     span,
+                    next_precomputed,
                 )?;
 
                 // End scope for loop variable
@@ -3227,6 +3321,7 @@ impl<'a> Compiler<'a> {
                     result_slot,
                     memory_manager,
                     span,
+                    None,
                 )?;
 
                 let end_if_jump = self.emit_jump(Opcode::Jump, clause_span.clone());

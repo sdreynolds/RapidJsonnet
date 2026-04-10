@@ -2751,6 +2751,39 @@ impl VirtualMachine {
                     self.advance_pc();
                 }
 
+                Opcode::ArrayAppendInPlace => {
+                    // Pops TOS (value to append) and pushes it directly into the
+                    // array stored at `slot`, mutating it in-place with no allocation.
+                    // Safe because the comprehension result array is always private
+                    // (created as __comp_result and never shared with user code).
+                    let slot = self.read_u16_operand()? as usize;
+                    let value_to_append = self.pop()?;
+
+                    let frame_base = self.current_frame().stack_base;
+                    let abs_slot = frame_base + slot;
+
+                    let array_key = match self.stack[abs_slot] {
+                        Value::Array(key) => key,
+                        ref v => {
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                format!(
+                                    "ArrayAppendInPlace: slot {} is not an array: {:?}",
+                                    slot, v
+                                ),
+                                self.current_chunk().source_id.to_string(),
+                            ));
+                        }
+                    };
+
+                    self.memory_manager
+                        .load_array_mut(array_key)
+                        .elements
+                        .push(value_to_append);
+                    // read_u16_operand() already advanced PC by 3 (opcode + u16).
+                    // result_slot still holds the same array key — no StoreVar needed.
+                }
+
                 Opcode::ObjectMerge => {
                     let right_value = self.pop_forced()?; // Right-hand side object
                     let left_value = self.pop_forced()?; // Left-hand side object
