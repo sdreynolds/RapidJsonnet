@@ -1754,22 +1754,9 @@ impl VirtualMachine {
 
                     // Copy value from slot to top of stack
                     let value = self.stack[stack_slot];
-
-                    // Force thunks: if the value is a closure marked as a thunk,
-                    // evaluate it and cache the result back in the slot.
-                    // Set Null sentinel before forcing to handle recursive references.
-                    if let Value::Closure(closure_index) = value {
-                        if self.memory_manager.load_closure(closure_index).is_thunk {
-                            self.stack[stack_slot] = Value::Null;
-                            let result = self.force_thunk(closure_index)?;
-                            self.stack[stack_slot] = result;
-                            self.push(result)?;
-                        } else {
-                            self.push(value)?;
-                        }
-                    } else {
-                        self.push(value)?;
-                    }
+                    let result = self.force_value(value)?;
+                    self.stack[stack_slot] = result;
+                    self.push(result)?;
                 }
 
                 // Binary arithmetic operations
@@ -7459,38 +7446,15 @@ impl VirtualMachine {
                             ));
                         }
                         let val = self.stack[location];
-                        // Force thunk if needed
-                        if let Value::Closure(ci) = val {
-                            if self.memory_manager.load_closure(ci).is_thunk {
-                                self.stack[location] = Value::Null;
-                                let result = self.force_thunk(ci)?;
-                                self.stack[location] = result;
-                                result
-                            } else {
-                                val
-                            }
-                        } else {
-                            val
-                        }
+                        let res = self.force_value(val)?;
+                        self.stack[location] = res;
+                        res
                     } else if let Some(closed_value) = upvalue.closed_value {
                         // Upvalue is closed - read from heap
-                        // Force thunk if needed
-                        if let Value::Closure(ci) = closed_value {
-                            if self.memory_manager.load_closure(ci).is_thunk {
-                                let upvalue_mut =
-                                    self.memory_manager.load_upvalue_mut(upvalue_index);
-                                upvalue_mut.closed_value = Some(Value::Null);
-                                let result = self.force_thunk(ci)?;
-                                let upvalue_mut =
-                                    self.memory_manager.load_upvalue_mut(upvalue_index);
-                                upvalue_mut.closed_value = Some(result);
-                                result
-                            } else {
-                                closed_value
-                            }
-                        } else {
-                            closed_value
-                        }
+                        let res = self.force_value(closed_value)?;
+                        let upvalue_mut = self.memory_manager.load_upvalue_mut(upvalue_index);
+                        upvalue_mut.closed_value = Some(res);
+                        res
                     } else {
                         return Err(RuntimeError::new(
                             self.get_current_span(),
