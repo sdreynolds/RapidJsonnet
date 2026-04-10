@@ -1068,7 +1068,9 @@ impl<'a> Compiler<'a> {
             Vec::new(),
             span,
             memory_manager,
-        )
+            false,
+        )?;
+        Ok(())
     }
 
     /// Emit a Closure instruction with function metadata including parameter names and defaults
@@ -1081,6 +1083,7 @@ impl<'a> Compiler<'a> {
         param_names: Vec<StringIndex>,
         span: Range<usize>,
         memory_manager: &mut MemoryManager,
+        is_thunk: bool,
     ) -> Result<(), CompilerError> {
         // Convert chunk to owned chunk for storage
         let owned_chunk = chunk.into_owned();
@@ -1103,9 +1106,14 @@ impl<'a> Compiler<'a> {
         // Add function to constants pool
         let func_index = self.add_constant_pooled(Value::Function(func_result.index))?;
 
-        // Emit Closure opcode with function index (opcode + u16)
+        // Emit Closure/MakeThunk opcode with function index (opcode + u16)
+        let opcode = if is_thunk {
+            Opcode::MakeThunk
+        } else {
+            Opcode::Closure
+        };
         self.compiling_chunk
-            .write_opcode_u16(Opcode::Closure, func_index, span.clone());
+            .write_opcode_u16(opcode, func_index, span.clone());
 
         // Manually push upvalue count byte to code vector
         self.compiling_chunk
@@ -1882,6 +1890,7 @@ impl<'a> Compiler<'a> {
                         Vec::new(),
                         key_token_span.clone(),
                         memory_manager,
+                        true,
                     )?;
 
                     // Attach the closure to the object
@@ -2091,6 +2100,7 @@ impl<'a> Compiler<'a> {
                 Vec::new(),
                 key_token_span.clone(),
                 memory_manager,
+                true,
             )?;
 
             // Emit ObjectInsert with visibility operand
@@ -2801,6 +2811,7 @@ impl<'a> Compiler<'a> {
                 Vec::new(),
                 span.clone(),
                 memory_manager,
+                true,
             )?;
 
             // ObjectInsert consumes the key string from the stack
@@ -3973,6 +3984,7 @@ impl<'a> Compiler<'a> {
             param_name_indices,
             name_span,
             memory_manager,
+            false,
         )?;
 
         // Pop the external roots we pushed for param name protection

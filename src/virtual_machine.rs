@@ -1410,7 +1410,10 @@ impl VirtualMachine {
                         Ok(bytes) => bytes,
                         Err(e) => {
                             self.memory_manager.pop_external_roots();
-                            self.memory_manager.load_import_mut(import_idx).evaluating.set(false);
+                            self.memory_manager
+                                .load_import_mut(import_idx)
+                                .evaluating
+                                .set(false);
                             return Err(RuntimeError::new(
                                 self.get_current_span(),
                                 format!("Failed to read compiled file '{}': {}", compiled_path, e),
@@ -1424,7 +1427,10 @@ impl VirtualMachine {
                         Ok(content) => content,
                         Err(e) => {
                             self.memory_manager.pop_external_roots();
-                            self.memory_manager.load_import_mut(import_idx).evaluating.set(false);
+                            self.memory_manager
+                                .load_import_mut(import_idx)
+                                .evaluating
+                                .set(false);
                             return Err(RuntimeError::new(
                                 self.get_current_span(),
                                 format!("Failed to read imported file '{}': {}", path_str, e),
@@ -1439,7 +1445,10 @@ impl VirtualMachine {
                         Ok(chunk) => chunk.into_owned(),
                         Err(e) => {
                             self.memory_manager.pop_external_roots();
-                            self.memory_manager.load_import_mut(import_idx).evaluating.set(false);
+                            self.memory_manager
+                                .load_import_mut(import_idx)
+                                .evaluating
+                                .set(false);
                             return Err(RuntimeError {
                                 span: self.get_current_span(),
                                 message: format!("while evaluating import \"{}\"", path_str),
@@ -1451,10 +1460,13 @@ impl VirtualMachine {
                 };
 
                 let dummy_memory_manager = memory_manager::MemoryManager::new();
-                let actual_memory_manager = std::mem::replace(&mut self.memory_manager, dummy_memory_manager);
+                let actual_memory_manager =
+                    std::mem::replace(&mut self.memory_manager, dummy_memory_manager);
                 let mut sub_vm = VirtualMachine::new_from_owned(owned_chunk, actual_memory_manager);
                 sub_vm.jpaths = self.jpaths.clone();
-                if self.coverage_collector.is_some() { sub_vm.enable_coverage(); }
+                if self.coverage_collector.is_some() {
+                    sub_vm.enable_coverage();
+                }
                 let result = sub_vm.interpret();
 
                 if let Some(sub_coverage) = sub_vm.take_coverage() {
@@ -1470,7 +1482,10 @@ impl VirtualMachine {
                         let forced = match self.force_value(evaluated_value) {
                             Ok(v) => v,
                             Err(e) => {
-                                self.memory_manager.load_import_mut(import_idx).evaluating.set(false);
+                                self.memory_manager
+                                    .load_import_mut(import_idx)
+                                    .evaluating
+                                    .set(false);
                                 return Err(RuntimeError {
                                     span: self.get_current_span(),
                                     message: format!("while evaluating import \"{}\"", path_str),
@@ -1485,7 +1500,10 @@ impl VirtualMachine {
                         Ok(forced)
                     }
                     Err(e) => {
-                        self.memory_manager.load_import_mut(import_idx).evaluating.set(false);
+                        self.memory_manager
+                            .load_import_mut(import_idx)
+                            .evaluating
+                            .set(false);
                         Err(RuntimeError {
                             span: self.get_current_span(),
                             message: format!("while evaluating import \"{}\"", path_str),
@@ -1496,7 +1514,16 @@ impl VirtualMachine {
                 }
             }
             Value::Closure(ci) if self.memory_manager.load_closure(ci).is_thunk => {
-                self.force_thunk(ci)
+                let func = self
+                    .memory_manager
+                    .load_function(self.memory_manager.load_closure(ci).function);
+                if func.arity == 0 {
+                    self.force_thunk(ci)
+                } else {
+                    // It's a field thunk, we can't force it without object context (self, super).
+                    // We return it as-is and expect the caller (e.g. value_to_json) to handle it.
+                    Ok(val)
+                }
             }
             _ => Ok(val),
         }
@@ -7900,12 +7927,16 @@ impl VirtualMachine {
 
                     for (key, value, super_obj) in properties {
                         let field_value = match value {
-                            Value::Closure(closure_idx) => self.execute_thunk_sync_with_field(
-                                closure_idx,
-                                Some(object_key),
-                                super_obj,
-                                Some(key),
-                            )?,
+                            Value::Closure(closure_idx)
+                                if self.memory_manager.load_closure(closure_idx).is_thunk =>
+                            {
+                                self.execute_thunk_sync_with_field(
+                                    closure_idx,
+                                    Some(object_key),
+                                    super_obj,
+                                    Some(key),
+                                )?
+                            }
                             v => v,
                         };
                         let json_value = self.value_to_json(&field_value, visited)?;
@@ -10891,7 +10922,17 @@ pub fn execute_with_ext_vars(
         vm.set_ext_var_code(k, code)?;
     }
 
-    let value = vm.interpret()?;
+    let mut value = vm.interpret()?;
+
+    // Auto-invoke top-level function if it has 0 required parameters
+    if let Value::Closure(ci) = value {
+        let func = vm
+            .memory_manager
+            .load_function(vm.memory_manager.load_closure(ci).function);
+        if func.required_params == 0 {
+            value = vm.call_test_closure(ci)?;
+        }
+    }
 
     // Convert VM value to JSON value with circular reference detection
     let mut visited = std::collections::HashSet::new();
