@@ -95,10 +95,10 @@ function(
     field_x1: '-----',
     field_xxxxxxxxxxxxxxxx2: std.join([], [
       func1(offset * count + i)
-      for _i in std.range(0, count - 1)
+      for i in std.range(0, count - 1)
     ]),
     field_xxxxxxxxxxxxxxxxxxxxxx3: std.join([], [
       func2(offset * count + i)
-      for _i in std.range(0, count - 1)
+      for i in std.range(0, count - 1)
     ]),
   }
