@@ -965,6 +965,32 @@ impl MemoryManager {
                         }
                     }
                 }
+                Value::NativeThunk(thunk_index) => {
+                    if let Some(thunk) = self.native_thunks.get_mut(thunk_index) {
+                        if !thunk.marked.get() {
+                            thunk.marked.set(true);
+                            #[cfg(feature = "gc_debug")]
+                            {
+                                eprintln!("[MemoryManager] Marking NativeThunk {:?}", thunk_index)
+                            }
+                            // Mark the function and argument
+                            values.push_back(thunk.func);
+                            values.push_back(thunk.arg);
+                            // Mark the cached result if present
+                            if let Some(cached) = thunk.cached {
+                                values.push_back(cached);
+                            }
+                        }
+                    } else {
+                        #[cfg(feature = "gc_debug")]
+                        {
+                            eprintln!(
+                                "[MemoryManager] WARNING: Failed to mark NativeThunk {:?} - not found",
+                                thunk_index
+                            )
+                        }
+                    }
+                }
 
                 _ => continue,
             };
@@ -1120,6 +1146,24 @@ impl MemoryManager {
                 eprintln!("[MemoryManager] Removing Binary {:?}", binary_idx)
             }
             self.binaries.remove(binary_idx);
+        }
+
+        let mut native_thunks_to_delete: Vec<NativeThunkIndex> = Vec::new();
+        for (thunk_idx, thunk) in self.native_thunks.iter_mut() {
+            if thunk.marked.get() {
+                thunk.marked.set(false);
+            } else {
+                native_thunks_to_delete.push(thunk_idx);
+                self.allocated_bytes = self.allocated_bytes.saturating_sub(thunk.size());
+            }
+        }
+
+        for thunk_idx in native_thunks_to_delete {
+            #[cfg(feature = "gc_debug")]
+            {
+                eprintln!("[MemoryManager] Removing NativeThunk {:?}", thunk_idx)
+            }
+            self.native_thunks.remove(thunk_idx);
         }
 
         self.gc_threshold = self.allocated_bytes * 2;
