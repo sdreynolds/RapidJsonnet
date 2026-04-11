@@ -417,6 +417,12 @@ impl VirtualMachine {
                 return Ok(result);
             }
         }
+        if let Value::NativeThunk(_) = element {
+            let result = self.force_value(element)?;
+            // Cache the forced value back into the array
+            self.memory_manager.load_array_mut(array_key).elements[index] = result;
+            return Ok(result);
+        }
         Ok(element)
     }
 
@@ -664,7 +670,6 @@ impl VirtualMachine {
                 _ => call_native(id, args, &mut self.memory_manager, span, source_id),
             }
         } else if id == chunk::NativeFuncId::MakeArray && args.len() == 2 {
-            // Handle MakeArray in the VM since it needs to call closures
             let sz_val = args[0];
             let func_val = args[1];
             let sz = match sz_val {
@@ -680,34 +685,29 @@ impl VirtualMachine {
                     ));
                 }
             };
-            // Build lazy thunks. Each element thunk calls func(i) only when
-            // forced, so the array can be returned before any element is
-            // evaluated. This lets func reference the array itself (e.g.,
-            // slowId[i-1]) without hitting the null sentinel set during
-            // thunk forcing.
+            // Build lazy NativeThunks: each stores (func, i) and is forced on demand.
+            // This avoids creating 3 GC objects (Chunk + ManagedFunction + ManagedClosure)
+            // per element — only one ManagedNativeThunk is needed.
             let mut elements = Vec::with_capacity(sz);
             let mut should_gc = false;
             for i in 0..sz {
-                let mut element_chunk = chunk::Chunk::new("<makearray_element>");
-                let fc_idx = element_chunk.add_constant(func_val);
-                let ii_idx = element_chunk.add_constant(Value::Number(i as f64));
-                element_chunk.write_opcode_u16(Opcode::LoadConst, fc_idx as u16, 0..0);
-                element_chunk.write_opcode_u16(Opcode::LoadConst, ii_idx as u16, 0..0);
-                element_chunk.write_opcode_u8_u8(Opcode::Call, 1, 0, 0..0);
-                element_chunk.write_opcode(Opcode::Return, 0..0);
-                let owned = element_chunk.into_owned();
-                let func_alloc = self.memory_manager.allocate_function(None, 0, 0, owned);
                 let thunk_alloc = self
                     .memory_manager
-                    .allocate_thunk(func_alloc.index, Vec::new());
-                should_gc |=
-                    func_alloc.should_garbage_collect || thunk_alloc.should_garbage_collect;
-                elements.push(Value::Closure(thunk_alloc.index));
+                    .allocate_native_thunk(func_val, Value::Number(i as f64));
+                should_gc |= thunk_alloc.should_garbage_collect;
+                elements.push(Value::NativeThunk(thunk_alloc.index));
             }
             self.memory_manager
                 .push_external_roots(elements.clone(), Vec::new());
             let alloc = self.memory_manager.allocate_array(elements);
             self.memory_manager.pop_external_roots();
+            if should_gc || alloc.should_garbage_collect {
+                let result_val = Value::Array(alloc.index);
+                self.memory_manager
+                    .push_external_roots(vec![result_val], Vec::new());
+                self.run_garbage_collection();
+                self.memory_manager.pop_external_roots();
+            }
             Ok(Value::Array(alloc.index))
         } else if id == chunk::NativeFuncId::ManifestYamlDoc && args.len() == 3 {
             let value = args[0];
@@ -3057,7 +3057,6 @@ impl VirtualMachine {
                     }
 
                     if func_id == chunk::NativeFuncId::MakeArray {
-                        // Handle MakeArray natively within the VM to allow calling closures
                         let sz_val = args[0];
                         let func_val = args[1];
 
@@ -3067,7 +3066,7 @@ impl VirtualMachine {
                                 return Err(RuntimeError::new(
                                     self.get_current_span(),
                                     format!(
-                                        "std.makeArray expected positive integer for size, got {}",
+                                        "std.makeArray expected positive integer for size, got {:?}",
                                         sz_val
                                     ),
                                     self.current_chunk().source_id.to_string(),
@@ -3075,39 +3074,27 @@ impl VirtualMachine {
                             }
                         };
 
-                        // Build lazy thunks. Each element thunk calls func(i)
-                        // only when forced, so the array can be returned before
-                        // any element is evaluated. This lets func reference the
-                        // array itself (e.g., slowId[i-1]) without hitting the
-                        // null sentinel set during thunk forcing.
-                        let mut elements: Vec<Value> = Vec::with_capacity(sz);
+                        let mut elements = Vec::with_capacity(sz);
                         let mut should_gc = false;
                         for i in 0..sz {
-                            let mut element_chunk = chunk::Chunk::new("<makearray_element>");
-                            let fc_idx = element_chunk.add_constant(func_val);
-                            let ii_idx = element_chunk.add_constant(Value::Number(i as f64));
-                            element_chunk.write_opcode_u16(Opcode::LoadConst, fc_idx as u16, 0..0);
-                            element_chunk.write_opcode_u16(Opcode::LoadConst, ii_idx as u16, 0..0);
-                            element_chunk.write_opcode_u8_u8(Opcode::Call, 1, 0, 0..0);
-                            element_chunk.write_opcode(Opcode::Return, 0..0);
-                            let owned = element_chunk.into_owned();
-                            let func_alloc =
-                                self.memory_manager.allocate_function(None, 0, 0, owned);
                             let thunk_alloc = self
                                 .memory_manager
-                                .allocate_thunk(func_alloc.index, Vec::new());
-                            should_gc |= func_alloc.should_garbage_collect
-                                || thunk_alloc.should_garbage_collect;
-                            elements.push(Value::Closure(thunk_alloc.index));
+                                .allocate_native_thunk(func_val, Value::Number(i as f64));
+                            should_gc |= thunk_alloc.should_garbage_collect;
+                            elements.push(Value::NativeThunk(thunk_alloc.index));
                         }
                         self.memory_manager
                             .push_external_roots(elements.clone(), Vec::new());
                         let array_alloc = self.memory_manager.allocate_array(elements);
                         self.memory_manager.pop_external_roots();
-                        self.push(Value::Array(array_alloc.index))?;
-                        if array_alloc.should_garbage_collect || should_gc {
+                        if should_gc || array_alloc.should_garbage_collect {
+                            let result_val = Value::Array(array_alloc.index);
+                            self.memory_manager
+                                .push_external_roots(vec![result_val], Vec::new());
                             self.run_garbage_collection();
+                            self.memory_manager.pop_external_roots();
                         }
+                        self.push(Value::Array(array_alloc.index))?;
                         continue;
                     }
 
