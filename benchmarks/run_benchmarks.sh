@@ -36,6 +36,8 @@ for item in "${BENCHMARKS[@]}"; do
         "realistic_1.jsonnet" | \
         "realistic_2.jsonnet" | \
         "std_base64.jsonnet" | \
+        "std_base64Decode.jsonnet" | \
+        "std_base64DecodeBytes.jsonnet" | \
         "comparison_array.jsonnet" | \
         "comparison_primitives.jsonnet")
             echo "Skipping GoogleJsonnet for $filename (known performance/stability issue)"
