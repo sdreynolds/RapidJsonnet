@@ -1,13 +1,12 @@
-load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
 filegroup(
     name = "extra_benchmarks",
     srcs = glob(["extra/*.jsonnet"]),
 )
 
-sh_test(
-    name = "benchmark_test",
-    size = "large",
+sh_binary(
+    name = "benchmark",
     srcs = ["run_benchmarks.sh"],
     args = [
         "$(location @hyperfine_bin//:hyperfine)",
