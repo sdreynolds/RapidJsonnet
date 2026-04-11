@@ -3341,6 +3341,7 @@ impl VirtualMachine {
                             .allocate_array(vec![Value::Null; n])
                             .index;
                         // Third frame: result array + optional last_key
+                        // Initially only the result array; last_key is added when first set.
                         self.memory_manager
                             .push_external_roots(vec![Value::Array(result_arr_idx)], vec![]);
                         let mut count = 0usize;
@@ -3361,7 +3362,15 @@ impl VirtualMachine {
                                     continue;
                                 }
                             }
+                            // New unique element: update last_key in the root frame so the
+                            // heap-allocated key value (String/Array/Object) is not swept by GC
+                            // during the next call_value_with_one_arg invocation.
                             last_key = Some(key);
+                            self.memory_manager.pop_external_roots();
+                            self.memory_manager.push_external_roots(
+                                vec![Value::Array(result_arr_idx), key],
+                                vec![],
+                            );
                             self.memory_manager
                                 .set_array_element(result_arr_idx, count, elem);
                             count += 1;
@@ -4869,13 +4878,25 @@ impl VirtualMachine {
                             groups.get_mut(&key_str).unwrap().push(elem);
                         }
                         self.memory_manager.pop_external_roots();
+                        // Allocation phase: allocate_array and allocate_string can trigger GC.
+                        // Root all accumulated group arrays as we build them so previously
+                        // allocated arrays are not swept during subsequent allocations.
                         let mut properties: std::collections::HashMap<
                             chunk::StringIndex,
                             memory_manager::ObjectField,
                         > = std::collections::HashMap::new();
+                        // Start with an empty root frame for the allocation phase.
+                        let mut rooted_arrays: Vec<Value> = Vec::new();
+                        self.memory_manager
+                            .push_external_roots(rooted_arrays.clone(), vec![]);
                         for key_str in &group_order {
                             let group_elems = groups.remove(key_str).unwrap_or_default();
                             let arr_alloc = self.memory_manager.allocate_array(group_elems);
+                            // Root the newly allocated array before allocating the key string.
+                            rooted_arrays.push(Value::Array(arr_alloc.index));
+                            self.memory_manager.pop_external_roots();
+                            self.memory_manager
+                                .push_external_roots(rooted_arrays.clone(), vec![]);
                             let k_alloc = self.memory_manager.allocate_string(key_str);
                             properties.insert(
                                 k_alloc.index,
@@ -4885,6 +4906,7 @@ impl VirtualMachine {
                                 ),
                             );
                         }
+                        self.memory_manager.pop_external_roots();
                         let obj_alloc = self
                             .memory_manager
                             .allocate_object_with_properties(properties);
