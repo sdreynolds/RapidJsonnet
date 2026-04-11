@@ -20,10 +20,30 @@ echo "Running benchmarks using hyperfine..."
 for item in "${BENCHMARKS[@]}"; do
     filename=$(basename "$item")
 
-    $HYPERFINE_BIN -w 3 \
-      --export-markdown "$OUT_DIR/$filename-results.md" \
-      -n "RapidJsonnet: $filename" "$MAIN_BIN -q $item" \
-      -n "GoogleJsonnet: $filename" "$GOOGLE_BIN $item"
+    # Always benchmark RapidJsonnet
+    hyperfine_args=(
+      "-w" "3"
+      "--export-markdown" "$OUT_DIR/$filename-results.md"
+      "-n" "RapidJsonnet: $filename" "$MAIN_BIN -q $item"
+    )
+
+    # Conditionally benchmark GoogleJsonnet
+    case "$filename" in
+        "bench.07.jsonnet" | \
+        "bench.09.jsonnet" | \
+        "realistic_1.jsonnet" | \
+        "realistic_2.jsonnet" | \
+        "std_base64.jsonnet" | \
+        "comparison_array.jsonnet" | \
+        "comparison_primitives.jsonnet")
+            echo "Skipping GoogleJsonnet for $filename (known performance/stability issue)"
+            ;;
+        *)
+            hyperfine_args+=("-n" "GoogleJsonnet: $filename" "$GOOGLE_BIN $item")
+            ;;
+    esac
+
+    $HYPERFINE_BIN "${hyperfine_args[@]}"
 done
 
 echo "=== BENCHMARK RESULTS SAVED TO $OUT_DIR/ ==="
