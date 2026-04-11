@@ -1318,15 +1318,15 @@ impl std::hash::Hash for Value {
                 key.hash(state);
             }
             Value::NativeThunk(key) => {
-                12u8.hash(state);
+                10u8.hash(state);
                 key.hash(state);
             }
             Value::NativeFunction(id) => {
-                10u8.hash(state);
+                11u8.hash(state);
                 id.hash(state);
             }
             Value::Uninitialized => {
-                11u8.hash(state);
+                12u8.hash(state);
             }
         }
     }
