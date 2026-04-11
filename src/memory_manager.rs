@@ -1,6 +1,6 @@
 use chunk::{
     ArrayIndex, BinaryIndex, ClosureIndex, FieldVisibility, FunctionIndex, ImportIndex,
-    ObjectIndex, OwnedChunk, SpanRunLength, StringIndex, UpvalueIndex, Value,
+    NativeThunkIndex, ObjectIndex, OwnedChunk, SpanRunLength, StringIndex, UpvalueIndex, Value,
 };
 use slotmap::SlotMap;
 use std::cell::Cell;
@@ -373,6 +373,33 @@ impl ManagedBinary {
     }
 }
 
+/// A lightweight native thunk: a (func, arg) pair evaluated lazily without bytecode.
+/// Used by std.makeArray to avoid per-element Chunk allocation.
+pub struct ManagedNativeThunk {
+    /// The function to call when forced
+    pub func: Value,
+    /// The argument to pass to func
+    pub arg: Value,
+    /// Cached result after first forcing (None = not yet forced)
+    pub cached: Option<Value>,
+    pub(crate) marked: Cell<bool>,
+}
+
+impl ManagedNativeThunk {
+    pub fn new(func: Value, arg: Value) -> Self {
+        Self {
+            func,
+            arg,
+            cached: None,
+            marked: Cell::new(false),
+        }
+    }
+
+    fn size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
 /// A HashSet-based string interning system with garbage collection support
 pub struct MemoryManager {
     /// HashSet containing all interned strings
@@ -392,6 +419,8 @@ pub struct MemoryManager {
     imports: SlotMap<ImportIndex, ManagedImport>,
     /// Collection of Binary objects
     binaries: SlotMap<BinaryIndex, ManagedBinary>,
+    /// Collection of Native Thunks (for std.makeArray lazy elements)
+    native_thunks: SlotMap<NativeThunkIndex, ManagedNativeThunk>,
     /// Lookup map for imports by absolute path to ensure uniqueness
     import_lookup: HashMap<String, ImportIndex>,
     /// Total bytes allocated for all strings
@@ -417,6 +446,7 @@ impl MemoryManager {
             upvalues: SlotMap::with_key(),
             imports: SlotMap::with_key(),
             binaries: SlotMap::with_key(),
+            native_thunks: SlotMap::with_key(),
             import_lookup: HashMap::new(),
             allocated_bytes: 0,
             gc_threshold: 1024 * 1024, // 1MB initial threshold
@@ -660,6 +690,30 @@ impl MemoryManager {
 
     pub fn load_binary_mut(&mut self, index: BinaryIndex) -> &mut ManagedBinary {
         self.binaries.get_mut(index).expect("Binary must exist")
+    }
+
+    pub fn allocate_native_thunk(
+        &mut self,
+        func: Value,
+        arg: Value,
+    ) -> AllocationResult<NativeThunkIndex> {
+        let thunk = ManagedNativeThunk::new(func, arg);
+        self.allocated_bytes += thunk.size();
+        let index = self.native_thunks.insert(thunk);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    pub fn load_native_thunk(&self, key: NativeThunkIndex) -> &ManagedNativeThunk {
+        self.native_thunks.get(key).expect("NativeThunk not found")
+    }
+
+    pub fn load_native_thunk_mut(&mut self, key: NativeThunkIndex) -> &mut ManagedNativeThunk {
+        self.native_thunks
+            .get_mut(key)
+            .expect("NativeThunk not found")
     }
 
     /// Check if garbage collection should be triggered
@@ -1125,6 +1179,28 @@ impl MemoryManager {
         self.arrays
             .get_mut(key)
             .expect(format!("Array not found in SlotMap: {:?}", key).as_str())
+    }
+
+    /// Set a single element of an existing GC-managed array in-place.
+    /// Used by std iteration functions to fill pre-allocated result arrays without
+    /// rebuilding GC root lists on every iteration.
+    /// Panics if index i is out of bounds.
+    pub fn set_array_element(&mut self, idx: ArrayIndex, i: usize, val: Value) {
+        let arr = self.arrays.get_mut(idx).expect("Array not found");
+        arr.elements[i] = val;
+    }
+
+    /// Truncate a GC-managed array to new_len elements.
+    /// Used by std.filter (and similar) to shrink a worst-case-sized result array
+    /// to the actual number of elements retained.
+    /// Panics if new_len > current length.
+    pub fn truncate_array(&mut self, idx: ArrayIndex, new_len: usize) {
+        let arr = self.arrays.get_mut(idx).expect("Array not found");
+        assert!(
+            new_len <= arr.elements.len(),
+            "truncate_array: new_len exceeds current length"
+        );
+        arr.elements.truncate(new_len);
     }
 
     pub fn load_function(&self, key: FunctionIndex) -> &ManagedFunction {
