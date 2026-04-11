@@ -1537,6 +1537,21 @@ impl VirtualMachine {
                     Ok(val)
                 }
             }
+            Value::NativeThunk(thunk_idx) => {
+                // Return cached result if already forced
+                if let Some(cached) = self.memory_manager.load_native_thunk(thunk_idx).cached {
+                    return Ok(cached);
+                }
+                // Load func and arg (copy out to avoid borrow checker issue)
+                let (func, arg) = {
+                    let t = self.memory_manager.load_native_thunk(thunk_idx);
+                    (t.func, t.arg)
+                };
+                // Call func(arg) and cache the result
+                let result = self.call_value_with_one_arg(func, arg)?;
+                self.memory_manager.load_native_thunk_mut(thunk_idx).cached = Some(result);
+                Ok(result)
+            }
             _ => Ok(val),
         }
     }
