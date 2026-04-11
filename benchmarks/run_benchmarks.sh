@@ -4,7 +4,9 @@ set -e
 HYPERFINE_BIN=$1
 MAIN_BIN=$2
 GOOGLE_BIN=$3
-shift 3
+GO_BIN=$4
+# To add another implementation: add it here as $5 and increment shift to 5
+shift 4
 
 BENCHMARKS=("$@")
 
@@ -27,7 +29,7 @@ for item in "${BENCHMARKS[@]}"; do
       "-n" "RapidJsonnet: $filename" "$MAIN_BIN -q $item"
     )
 
-    # Conditionally benchmark GoogleJsonnet
+    # Conditionally benchmark GoogleJsonnet (C++)
     case "$filename" in
         "bench.07.jsonnet" | \
         "bench.09.jsonnet" | \
@@ -41,6 +43,13 @@ for item in "${BENCHMARKS[@]}"; do
         *)
             hyperfine_args+=("-n" "GoogleJsonnet: $filename" "$GOOGLE_BIN $item")
             ;;
+    esac
+
+    # Conditionally benchmark GoJsonnet
+    # Note: large_string_template.jsonnet crashes Go (OS stack exhaustion) — if it's
+    # ever added to benchmarks/extra/, add it to the skip list below.
+    case "$filename" in
+        *) hyperfine_args+=("-n" "GoJsonnet: $filename" "$GO_BIN $item") ;;
     esac
 
     $HYPERFINE_BIN "${hyperfine_args[@]}"
