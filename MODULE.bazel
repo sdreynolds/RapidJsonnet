@@ -73,6 +73,7 @@ use_repo(crate, "crates")
 
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "jsonnet", version = "0.22.0")
+bazel_dep(name = "jsonnet_go", version = "0.22.0")
 
 jsonnet_tests = use_extension("//third_party_test_suite:extension.bzl", "jsonnet_tests")
 use_repo(jsonnet_tests, "jsonnet_test_suite_source")
