@@ -51,6 +51,9 @@ for item in "${BENCHMARKS[@]}"; do
     # Note: large_string_template.jsonnet crashes Go (OS stack exhaustion) — if it's
     # ever added to benchmarks/extra/, add it to the skip list below.
     case "$filename" in
+        "bench.07.jsonnet")
+            echo "Skipping GoJsonnet for $filename (max stack frames exceeded)"
+            ;;
         *) hyperfine_args+=("-n" "GoJsonnet: $filename" "$GO_BIN $item") ;;
     esac
 
