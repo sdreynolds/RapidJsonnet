@@ -2898,6 +2898,12 @@ impl VirtualMachine {
                         func_id,
                         chunk::NativeFuncId::Join | chunk::NativeFuncId::Format
                     ) {
+                        // Root ALL args before forcing any container elements.
+                        // force_all_array_elements only roots the specific array being
+                        // processed; without this, other args can be freed by GC when a
+                        // thunk element allocates (e.g. a nested array literal creates
+                        // closures, triggering a collection under stress_gc).
+                        self.memory_manager.external_roots.push(args.clone());
                         for arg in args.iter() {
                             match arg {
                                 Value::Array(a) => self.force_all_array_elements(*a)?,
@@ -2905,6 +2911,7 @@ impl VirtualMachine {
                                 _ => {}
                             }
                         }
+                        self.memory_manager.external_roots.pop();
                     }
 
                     // Handle std.get: field value may be a thunk closure
