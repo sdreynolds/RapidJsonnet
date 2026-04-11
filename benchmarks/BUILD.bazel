@@ -12,6 +12,7 @@ sh_binary(
         "$(location @hyperfine_bin//:hyperfine)",
         "$(location //:main)",
         "$(location @jsonnet//cmd:jsonnet)",
+        "$(location @jsonnet_go//cmd/jsonnet:jsonnet)",
         "$(locations @jsonnet_test_suite_source//:benchmarks)",
         "$(locations //benchmarks:extra_benchmarks)",
     ],
@@ -21,5 +22,6 @@ sh_binary(
         "//benchmarks:extra_benchmarks",
         "@hyperfine_bin//:hyperfine",
         "@jsonnet//cmd:jsonnet",
+        "@jsonnet_go//cmd/jsonnet:jsonnet",
     ],
 )
