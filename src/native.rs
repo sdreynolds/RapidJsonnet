@@ -1335,15 +1335,18 @@ fn std_join(
 
     match sep_val {
         Value::String(sep_idx) => {
-            // String mode: join array of strings with separator (nulls skipped)
             let sep = memory_manager.load_string(sep_idx).to_string();
             let elements: Vec<Value> = memory_manager.load_array(arr_idx).elements.clone();
-            let mut parts: Vec<String> = Vec::with_capacity(elements.len());
+
+            // Pass 1: validate all elements and compute total output length
+            let mut total_len = 0usize;
+            let mut non_null_count = 0usize;
             for elem in &elements {
                 match elem {
                     Value::Null => continue,
                     Value::String(s_idx) => {
-                        parts.push(memory_manager.load_string(*s_idx).to_string());
+                        total_len += memory_manager.load_string(*s_idx).len();
+                        non_null_count += 1;
                     }
                     _ => {
                         return Err(RuntimeError::new(
@@ -1355,7 +1358,23 @@ fn std_join(
                     }
                 }
             }
-            let result = parts.join(&sep);
+            if non_null_count > 1 {
+                total_len += sep.len() * (non_null_count - 1);
+            }
+
+            // Pass 2: build result in a single allocation — no intermediate Vec<String>
+            let mut result = String::with_capacity(total_len);
+            let mut first = true;
+            for elem in &elements {
+                if let Value::String(s_idx) = elem {
+                    if !first {
+                        result.push_str(&sep);
+                    }
+                    result.push_str(memory_manager.load_string(*s_idx));
+                    first = false;
+                }
+            }
+
             let alloc = memory_manager.allocate_string(&result);
             Ok(Value::String(alloc.index))
         }
