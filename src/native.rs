@@ -700,7 +700,10 @@ fn std_type(
         Value::String(_) => "string",
         Value::Object(_) => "object",
         Value::Array(_) => "array",
-        Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) => "function",
+        Value::Function(_)
+        | Value::Closure(_)
+        | Value::NativeFunction(_)
+        | Value::NativeThunk(_) => "function",
         Value::Import(_) => "import",
         Value::Binary(_) => "binary",
         Value::Uninitialized => "uninitialized",

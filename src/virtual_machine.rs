@@ -2067,9 +2067,9 @@ impl VirtualMachine {
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                                 Value::Array(_) => "{array}".to_string(),
-                                Value::Function(_) | Value::NativeFunction(_) => {
-                                    "{function}".to_string()
-                                }
+                                Value::Function(_)
+                                | Value::NativeFunction(_)
+                                | Value::NativeThunk(_) => "{function}".to_string(),
                                 Value::Closure(_) => "{closure}".to_string(),
                                 Value::Import(_) => "{import}".to_string(),
                                 Value::Binary(_) => "{binary}".to_string(),
@@ -2082,9 +2082,9 @@ impl VirtualMachine {
                                 Value::Null => "null".to_string(),
                                 Value::Object(_) => "{object}".to_string(),
                                 Value::Array(_) => "{array}".to_string(),
-                                Value::Function(_) | Value::NativeFunction(_) => {
-                                    "{function}".to_string()
-                                }
+                                Value::Function(_)
+                                | Value::NativeFunction(_)
+                                | Value::NativeThunk(_) => "{function}".to_string(),
                                 Value::Closure(_) => "{closure}".to_string(),
                                 Value::Import(_) => "{import}".to_string(),
                                 Value::Binary(_) => "{binary}".to_string(),
@@ -8057,6 +8057,7 @@ impl VirtualMachine {
             Value::Function(_) => Ok(true), // Functions are truthy
             Value::Closure(_) => Ok(true),  // Closures are truthy
             Value::NativeFunction(_) => Ok(true), // Native functions are truthy
+            Value::NativeThunk(_) => Ok(true), // Thunks are truthy
             Value::Import(_) => Ok(true),   // Should be unreachable due to force_value
             Value::Uninitialized => Ok(false),
         }
@@ -8570,7 +8571,9 @@ impl VirtualMachine {
                 let forced = self.force_value(*val)?;
                 self.value_to_string_inner(&forced)
             }
-            Value::NativeFunction(_) | Value::Function(_) => Ok("<<function>>".to_string()),
+            Value::NativeFunction(_) | Value::Function(_) | Value::NativeThunk(_) => {
+                Ok("<<function>>".to_string())
+            }
             Value::Binary(_) | Value::Uninitialized => Ok("<<internal>>".to_string()),
         }
     }

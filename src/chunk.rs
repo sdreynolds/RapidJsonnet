@@ -19,6 +19,7 @@ pub type ClosureIndex = DefaultKey;
 pub type ImportIndex = DefaultKey;
 pub type UpvalueIndex = DefaultKey;
 pub type BinaryIndex = DefaultKey;
+pub type NativeThunkIndex = DefaultKey;
 
 /// Unique identifier for each native function
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1235,6 +1236,7 @@ pub enum Value {
     Closure(ClosureIndex),
     Import(ImportIndex),
     Binary(BinaryIndex),
+    NativeThunk(NativeThunkIndex),
     NativeFunction(NativeFuncId),
     /// Sentinel for function parameters not provided by the caller.
     /// Never observable from Jsonnet code.
@@ -1254,7 +1256,10 @@ impl Value {
             Value::String(_) => "string",
             Value::Object(_) => "object",
             Value::Array(_) => "array",
-            Value::Function(_) | Value::Closure(_) | Value::NativeFunction(_) => "function",
+            Value::Function(_)
+            | Value::Closure(_)
+            | Value::NativeFunction(_)
+            | Value::NativeThunk(_) => "function",
             Value::Uninitialized => "uninitialized",
             Value::Import(_) => "import",
             Value::Binary(_) => "binary",
@@ -1312,6 +1317,10 @@ impl std::hash::Hash for Value {
                 9u8.hash(state);
                 key.hash(state);
             }
+            Value::NativeThunk(key) => {
+                12u8.hash(state);
+                key.hash(state);
+            }
             Value::NativeFunction(id) => {
                 10u8.hash(state);
                 id.hash(state);
@@ -1348,6 +1357,7 @@ impl std::fmt::Display for Value {
             Value::Closure(index) => write!(f, "Closure[{:?}]", index),
             Value::Import(index) => write!(f, "Import[{:?}]", index),
             Value::Binary(index) => write!(f, "Binary[{:?}]", index),
+            Value::NativeThunk(_) => write!(f, "<thunk>"),
             Value::NativeFunction(id) => write!(f, "NativeFunction[{:?}]", id),
             Value::Uninitialized => write!(f, "Uninitialized"),
         }
