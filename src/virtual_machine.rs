@@ -3573,7 +3573,14 @@ impl VirtualMachine {
                         let mut count = 0usize;
                         for i in 0..n {
                             let elem = elements[i];
-                            let passes = self.call_value_with_one_arg(func_val, elem)?;
+                            let passes = match self.call_value_with_one_arg(func_val, elem) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    self.memory_manager.pop_external_roots();
+                                    self.memory_manager.pop_external_roots();
+                                    return Err(e);
+                                }
+                            };
                             match passes {
                                 Value::Boolean(true) => {
                                     self.memory_manager.set_array_element(
@@ -3670,7 +3677,14 @@ impl VirtualMachine {
                                 );
 
                                 for &elem in &elements {
-                                    let sub = self.call_value_with_one_arg(func_val, elem)?;
+                                    let sub = match self.call_value_with_one_arg(func_val, elem) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            self.memory_manager.pop_external_roots();
+                                            self.memory_manager.pop_external_roots();
+                                            return Err(e);
+                                        }
+                                    };
                                     match sub {
                                         Value::Array(sub_idx) => {
                                             let sub_elems = self
