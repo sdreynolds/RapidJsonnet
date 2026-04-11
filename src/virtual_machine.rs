@@ -3495,30 +3495,41 @@ impl VirtualMachine {
                             }
                         };
                         let elements = self.memory_manager.load_array(arr_idx).elements.clone();
-                        let mut results = Vec::with_capacity(elements.len());
-                        for &elem in &elements {
-                            // Only root things NOT already on stack or in args (if args were rooted).
-                            // Since args is not rooted in StdCall yet, we must root func_val and elements.
-                            let mut roots = Vec::new();
-                            roots.extend_from_slice(&elements);
-                            roots.extend_from_slice(&results);
-                            roots.push(func_val);
-                            roots.push(elem);
+                        let n = elements.len();
 
-                            let mut open_upvalue_roots = Vec::new();
-                            let mut upvalue = self.open_upvalues;
-                            while let Some(uv_idx) = upvalue {
-                                open_upvalue_roots.push(uv_idx);
-                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                            }
-                            self.memory_manager
-                                .push_external_roots(roots, open_upvalue_roots);
-                            let result = self.call_value_with_one_arg(func_val, elem);
-                            self.memory_manager.pop_external_roots();
-                            results.push(result?);
+                        // Collect open upvalue roots once — the chain doesn't change mid-loop
+                        let mut open_upvalue_roots = Vec::new();
+                        let mut upvalue = self.open_upvalues;
+                        while let Some(uv_idx) = upvalue {
+                            open_upvalue_roots.push(uv_idx);
+                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
                         }
-                        let alloc = self.memory_manager.allocate_array(results);
-                        self.push(Value::Array(alloc.index))?;
+
+                        // Push input elements + func as stable roots once before the loop
+                        let mut input_roots = elements.clone();
+                        input_roots.push(func_val);
+                        self.memory_manager
+                            .push_external_roots(input_roots, open_upvalue_roots);
+
+                        // Pre-allocate result array so GC can trace results as they're written
+                        let result_arr_idx = self
+                            .memory_manager
+                            .allocate_array(vec![Value::Null; n])
+                            .index;
+                        self.memory_manager
+                            .push_external_roots(vec![Value::Array(result_arr_idx)], vec![]);
+
+                        // Fill in-place — no per-iteration Vec allocation
+                        for i in 0..n {
+                            let elem = elements[i];
+                            let result = self.call_value_with_one_arg(func_val, elem)?;
+                            self.memory_manager
+                                .set_array_element(result_arr_idx, i, result);
+                        }
+
+                        self.memory_manager.pop_external_roots(); // result array frame
+                        self.memory_manager.pop_external_roots(); // input elements frame
+                        self.push(Value::Array(result_arr_idx))?;
                         continue;
                     }
 
@@ -3723,30 +3734,41 @@ impl VirtualMachine {
                             }
                         };
                         let elements = self.memory_manager.load_array(arr_idx).elements.clone();
-                        let mut results = Vec::with_capacity(elements.len());
-                        for (i, &elem) in elements.iter().enumerate() {
-                            let mut roots = Vec::from(self.stack.clone());
-                            roots.extend_from_slice(&elements);
-                            roots.extend_from_slice(&results);
-                            roots.push(func_val);
-                            let mut open_upvalue_roots = Vec::new();
-                            let mut upvalue = self.open_upvalues;
-                            while let Some(uv_idx) = upvalue {
-                                open_upvalue_roots.push(uv_idx);
-                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                            }
-                            self.memory_manager
-                                .push_external_roots(roots, open_upvalue_roots);
+                        let n = elements.len();
+
+                        let mut open_upvalue_roots = Vec::new();
+                        let mut upvalue = self.open_upvalues;
+                        while let Some(uv_idx) = upvalue {
+                            open_upvalue_roots.push(uv_idx);
+                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
+                        }
+
+                        let mut input_roots = elements.clone();
+                        input_roots.push(func_val);
+                        self.memory_manager
+                            .push_external_roots(input_roots, open_upvalue_roots);
+
+                        let result_arr_idx = self
+                            .memory_manager
+                            .allocate_array(vec![Value::Null; n])
+                            .index;
+                        self.memory_manager
+                            .push_external_roots(vec![Value::Array(result_arr_idx)], vec![]);
+
+                        for i in 0..n {
+                            let elem = elements[i];
                             let result = self.call_value_with_two_args(
                                 func_val,
                                 Value::Number(i as f64),
                                 elem,
-                            );
-                            self.memory_manager.pop_external_roots();
-                            results.push(result?);
+                            )?;
+                            self.memory_manager
+                                .set_array_element(result_arr_idx, i, result);
                         }
-                        let alloc = self.memory_manager.allocate_array(results);
-                        self.push(Value::Array(alloc.index))?;
+
+                        self.memory_manager.pop_external_roots();
+                        self.memory_manager.pop_external_roots();
+                        self.push(Value::Array(result_arr_idx))?;
                         continue;
                     }
 
