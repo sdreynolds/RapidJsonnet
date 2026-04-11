@@ -3626,23 +3626,40 @@ impl VirtualMachine {
                             }
                         };
                         let elements = self.memory_manager.load_array(arr_idx).elements.clone();
-                        for &elem in &elements {
-                            let mut roots = Vec::from(self.stack.clone());
-                            roots.extend_from_slice(&elements);
-                            roots.push(func_val);
-                            roots.push(acc);
-                            let mut open_upvalue_roots = Vec::new();
-                            let mut upvalue = self.open_upvalues;
-                            while let Some(uv_idx) = upvalue {
-                                open_upvalue_roots.push(uv_idx);
-                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                            }
-                            self.memory_manager
-                                .push_external_roots(roots, open_upvalue_roots);
-                            let result = self.call_value_with_two_args(func_val, acc, elem);
-                            self.memory_manager.pop_external_roots();
-                            acc = result?;
+
+                        let mut open_upvalue_roots = Vec::new();
+                        let mut upvalue = self.open_upvalues;
+                        while let Some(uv_idx) = upvalue {
+                            open_upvalue_roots.push(uv_idx);
+                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
                         }
+
+                        // Push elements + func once as stable roots
+                        let mut input_roots = elements.clone();
+                        input_roots.push(func_val);
+                        self.memory_manager
+                            .push_external_roots(input_roots, open_upvalue_roots);
+
+                        // Push initial acc as a single-element frame; update it each iteration
+                        self.memory_manager.push_external_roots(vec![acc], vec![]);
+
+                        for &elem in &elements {
+                            let new_acc = match self.call_value_with_two_args(func_val, acc, elem) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    self.memory_manager.pop_external_roots();
+                                    self.memory_manager.pop_external_roots();
+                                    return Err(e);
+                                }
+                            };
+                            // O(1): pop single-element frame, push new acc
+                            self.memory_manager.pop_external_roots();
+                            acc = new_acc;
+                            self.memory_manager.push_external_roots(vec![acc], vec![]);
+                        }
+
+                        self.memory_manager.pop_external_roots(); // acc frame
+                        self.memory_manager.pop_external_roots(); // elements+func frame
                         self.push(acc)?;
                         continue;
                     }
@@ -3837,23 +3854,37 @@ impl VirtualMachine {
                         };
                         let elements: Vec<Value> =
                             self.memory_manager.load_array(arr_idx).elements.clone();
-                        for &elem in elements.iter().rev() {
-                            let mut roots = Vec::from(self.stack.clone());
-                            roots.extend_from_slice(&elements);
-                            roots.push(func_val);
-                            roots.push(acc);
-                            let mut open_upvalue_roots = Vec::new();
-                            let mut upvalue = self.open_upvalues;
-                            while let Some(uv_idx) = upvalue {
-                                open_upvalue_roots.push(uv_idx);
-                                upvalue = self.memory_manager.load_upvalue(uv_idx).next;
-                            }
-                            self.memory_manager
-                                .push_external_roots(roots, open_upvalue_roots);
-                            let result = self.call_value_with_two_args(func_val, elem, acc);
-                            self.memory_manager.pop_external_roots();
-                            acc = result?;
+
+                        let mut open_upvalue_roots = Vec::new();
+                        let mut upvalue = self.open_upvalues;
+                        while let Some(uv_idx) = upvalue {
+                            open_upvalue_roots.push(uv_idx);
+                            upvalue = self.memory_manager.load_upvalue(uv_idx).next;
                         }
+
+                        let mut input_roots = elements.clone();
+                        input_roots.push(func_val);
+                        self.memory_manager
+                            .push_external_roots(input_roots, open_upvalue_roots);
+
+                        self.memory_manager.push_external_roots(vec![acc], vec![]);
+
+                        for &elem in elements.iter().rev() {
+                            let new_acc = match self.call_value_with_two_args(func_val, elem, acc) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    self.memory_manager.pop_external_roots();
+                                    self.memory_manager.pop_external_roots();
+                                    return Err(e);
+                                }
+                            };
+                            self.memory_manager.pop_external_roots();
+                            acc = new_acc;
+                            self.memory_manager.push_external_roots(vec![acc], vec![]);
+                        }
+
+                        self.memory_manager.pop_external_roots();
+                        self.memory_manager.pop_external_roots();
                         self.push(acc)?;
                         continue;
                     }
