@@ -37,6 +37,9 @@ pub struct ManagedObject {
     pub assertions: Vec<ClosureIndex>,
     /// Prototype object for inheritance
     pub base_object: Option<ObjectIndex>,
+    /// Keys logically removed by std.objectRemoveKey, accumulated during chain walk.
+    /// None means no deletions (common case, avoids allocation).
+    pub deleted_keys: Option<std::collections::HashSet<StringIndex>>,
     // GC marking
     pub(crate) marked: Cell<bool>,
 }
@@ -60,6 +63,7 @@ impl ManagedObject {
             properties,
             assertions: Vec::new(),
             base_object: None,
+            deleted_keys: None,
             marked: Cell::new(false),
         }
     }
@@ -70,6 +74,7 @@ impl ManagedObject {
             properties,
             assertions: Vec::new(),
             base_object: None,
+            deleted_keys: None,
             marked: Cell::new(false),
         }
     }
@@ -83,6 +88,7 @@ impl ManagedObject {
             properties,
             assertions,
             base_object: None,
+            deleted_keys: None,
             marked: Cell::new(false),
         }
     }
@@ -507,6 +513,32 @@ impl MemoryManager {
     ) -> AllocationResult<ObjectIndex> {
         let mut obj = ManagedObject::with_properties_and_assertions(properties, assertions);
         obj.base_object = base_object;
+        self.allocated_bytes += obj.size();
+        let index = self.objects.insert(obj);
+        AllocationResult {
+            should_garbage_collect: self.should_collect(),
+            index,
+        }
+    }
+
+    /// Allocate a result object for std.objectRemoveKey.
+    ///
+    /// Preserves the original object's base_object chain so that `super` references
+    /// inside field thunks continue to resolve correctly.  The target key is added
+    /// to `deleted_keys` so that all chain-walking functions skip it at every level.
+    pub fn allocate_object_remove_key(
+        &mut self,
+        base_object: Option<ObjectIndex>,
+        properties: HashMap<StringIndex, ObjectField>,
+        assertions: Vec<ClosureIndex>,
+        inherited_deleted: Option<std::collections::HashSet<StringIndex>>,
+        new_key: StringIndex,
+    ) -> AllocationResult<ObjectIndex> {
+        let mut obj = ManagedObject::with_properties_and_assertions(properties, assertions);
+        obj.base_object = base_object;
+        let mut deleted = inherited_deleted.unwrap_or_default();
+        deleted.insert(new_key);
+        obj.deleted_keys = Some(deleted);
         self.allocated_bytes += obj.size();
         let index = self.objects.insert(obj);
         AllocationResult {
@@ -1057,12 +1089,16 @@ impl MemoryManager {
         root: ObjectIndex,
     ) -> Vec<(StringIndex, Value, FieldVisibility)> {
         let mut seen = std::collections::HashSet::new();
+        let mut deleted = std::collections::HashSet::new();
         let mut result = Vec::new();
         let mut curr = Some(root);
         while let Some(idx) = curr {
             let obj = self.load_object(idx);
+            if let Some(dk) = &obj.deleted_keys {
+                deleted.extend(dk.iter().copied());
+            }
             for (key, field) in &obj.properties {
-                if seen.insert(*key) {
+                if !deleted.contains(key) && seen.insert(*key) {
                     result.push((*key, field.value, field.visibility));
                 }
             }

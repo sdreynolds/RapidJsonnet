@@ -4126,7 +4126,12 @@ fn std_is_decimal(
 
 // ─── std.objectRemoveKey ──────────────────────────────────────────────────────
 
-/// std.objectRemoveKey(obj, key): Returns a new object with the named key removed
+/// std.objectRemoveKey(obj, key): Returns a new object with the named key removed.
+///
+/// Crucially, the new object preserves the original's `base_object` chain so that
+/// `super` references inside field thunks continue to resolve correctly.  The key
+/// is recorded in `deleted_keys` so that all chain-walking functions skip it at
+/// every level — without disturbing the inheritance structure that thunks depend on.
 fn std_object_remove_key(
     obj_val: Value,
     key_val: Value,
@@ -4145,7 +4150,7 @@ fn std_object_remove_key(
         }
     };
     let target_key = match key_val {
-        Value::String(s_idx) => memory_manager.load_string(s_idx).to_string(),
+        Value::String(s_idx) => s_idx,
         _ => {
             return Err(RuntimeError::new(
                 span,
@@ -4154,16 +4159,31 @@ fn std_object_remove_key(
             ));
         }
     };
-    // Walk the full chain and flatten, then filter out the target key
-    let all_fields = memory_manager.collect_object_fields_chain(o_idx);
-    let mut new_properties = std::collections::HashMap::new();
-    for (key_idx, val, vis) in all_fields {
-        let key_name = memory_manager.load_string(key_idx).to_string();
-        if key_name != target_key {
-            new_properties.insert(key_idx, ObjectField::new(val, vis));
-        }
-    }
-    let obj_alloc = memory_manager.allocate_object_with_properties(new_properties);
+
+    // Read the top-level node's data (one borrow, then release).
+    let (filtered_properties, base_object, assertions, inherited_deleted) = {
+        let obj = memory_manager.load_object(o_idx);
+        let filtered: std::collections::HashMap<_, _> = obj
+            .properties
+            .iter()
+            .filter(|(k, _)| **k != target_key)
+            .map(|(k, f)| (*k, f.clone()))
+            .collect();
+        (
+            filtered,
+            obj.base_object,
+            obj.assertions.clone(),
+            obj.deleted_keys.clone(),
+        )
+    };
+
+    let obj_alloc = memory_manager.allocate_object_remove_key(
+        base_object,
+        filtered_properties,
+        assertions,
+        inherited_deleted,
+        target_key,
+    );
     Ok(Value::Object(obj_alloc.index))
 }
 

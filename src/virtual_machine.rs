@@ -1060,16 +1060,23 @@ impl VirtualMachine {
 
     /// Merge two objects (left + right) and return the resulting ObjectIndex.
     /// Used to build full super chains during multi-level inheritance.
+    /// Keys present in any node's `deleted_keys` are treated as absent throughout the chain.
     pub fn get_object_field_resolution(
         &self,
         target_obj: ObjectIndex,
         key: StringIndex,
     ) -> Option<(ObjectField, ObjectIndex)> {
+        let mut deleted = std::collections::HashSet::new();
         let mut curr = Some(target_obj);
         while let Some(obj_idx) = curr {
             let obj = self.memory_manager.load_object(obj_idx);
-            if let Some(field) = obj.get_field(&key) {
-                return Some((field.clone(), obj_idx));
+            if let Some(dk) = &obj.deleted_keys {
+                deleted.extend(dk.iter().copied());
+            }
+            if !deleted.contains(&key) {
+                if let Some(field) = obj.get_field(&key) {
+                    return Some((field.clone(), obj_idx));
+                }
             }
             curr = obj.base_object;
         }
@@ -1078,18 +1085,23 @@ impl VirtualMachine {
 
     /// Enumerate all fields of an object by walking the base_object chain.
     /// Returns (key, value, super_obj_for_field, visibility) with shallower nodes winning on collision.
+    /// Keys in any node's `deleted_keys` set are skipped at every level of the chain.
     fn enumerate_object_fields(
         &self,
         root: ObjectIndex,
     ) -> Vec<(StringIndex, Value, Option<ObjectIndex>, FieldVisibility)> {
         let mut seen = std::collections::HashSet::new();
+        let mut deleted = std::collections::HashSet::new();
         let mut result = Vec::new();
         let mut curr = Some(root);
         while let Some(idx) = curr {
             let obj = self.memory_manager.load_object(idx);
+            if let Some(dk) = &obj.deleted_keys {
+                deleted.extend(dk.iter().copied());
+            }
             let base = obj.base_object;
             for (key, field) in &obj.properties {
-                if seen.insert(*key) {
+                if !deleted.contains(key) && seen.insert(*key) {
                     result.push((*key, field.value, base, field.visibility));
                 }
             }
