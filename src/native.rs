@@ -5040,4 +5040,684 @@ mod tests {
     fn _use_mk_array(mm: &mut MemoryManager) {
         let _ = mk_array(mm, vec![]);
     }
+
+    // Task 3 — String error-path tests
+
+    #[test]
+    fn test_codepoint_multi_char() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "ab");
+        let err = call_native(NativeFuncId::Codepoint, &[s], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_codepoint_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Codepoint, &[Value::Number(65.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_char_out_of_range() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Char, &[Value::Number(0x110000 as f64)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_char_surrogate() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Char, &[Value::Number(0xD800 as f64)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_char_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "A");
+        let err = call_native(NativeFuncId::Char, &[s], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_substr_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Substr, &[Value::Number(1.0), Value::Number(0.0), Value::Number(1.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_parse_int_invalid() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "xyz");
+        let err = call_native(NativeFuncId::ParseInt, &[s], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_parse_octal_invalid() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "9");
+        let err = call_native(NativeFuncId::ParseOctal, &[s], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hex_invalid() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "gg");
+        let err = call_native(NativeFuncId::ParseHex, &[s], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_length_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Length, &[Value::Number(5.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_starts_with_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "foo");
+        let err = call_native(NativeFuncId::StartsWith, &[Value::Number(1.0), s], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_ends_with_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "foo");
+        let err = call_native(NativeFuncId::EndsWith, &[Value::Number(1.0), s], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_split_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Split, &[Value::Number(1.0), Value::Number(2.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_ascii_upper_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::AsciiUpper, &[Value::Boolean(true)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Task 4 — Array/object error-path tests
+
+    #[test]
+    fn test_flatten_arrays_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::FlattenArrays, &[Value::Number(1.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_reverse_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let err = call_native(NativeFuncId::Reverse, &[s], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_range_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "a");
+        let err = call_native(NativeFuncId::Range, &[s, Value::Number(5.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_object_fields_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::ObjectFields, &[Value::Number(1.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_object_has_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "key");
+        let err = call_native(NativeFuncId::ObjectHas, &[Value::Number(1.0), s], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_object_values_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::ObjectValues, &[Value::Boolean(false)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_member_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Member, &[Value::Number(1.0), Value::Number(2.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_count_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Count, &[Value::Number(1.0), Value::Number(2.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_sum_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Sum, &[Value::Number(1.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_find_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Find, &[Value::Number(1.0), Value::Number(2.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_assert_equal_mismatch() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::AssertEqual, &[Value::Number(1.0), Value::Number(2.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_join_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0)]);
+        let err = call_native(NativeFuncId::Join, &[Value::Number(1.0), arr], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_coerce_to_sorted_array_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::SetMember, &[Value::Number(1.0), Value::Boolean(false)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Task 5 — Direct happy-path tests
+
+    #[test]
+    fn test_abs_positive() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Abs, &[Value::Number(-5.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(5.0));
+    }
+
+    #[test]
+    fn test_abs_zero() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Abs, &[Value::Number(0.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(0.0));
+    }
+
+    #[test]
+    fn test_floor() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Floor, &[Value::Number(3.7)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(3.0));
+    }
+
+    #[test]
+    fn test_ceil() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Ceil, &[Value::Number(3.1)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(4.0));
+    }
+
+    #[test]
+    fn test_round() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Round, &[Value::Number(3.5)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(4.0));
+    }
+
+    #[test]
+    fn test_type_number() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Type, &[Value::Number(1.0)], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "number"); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_type_string() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hi");
+        let result = call_native(NativeFuncId::Type, &[s], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "string"); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_type_null() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Type, &[Value::Null], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "null"); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_type_boolean() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Type, &[Value::Boolean(true)], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "boolean"); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_type_array() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![]);
+        let result = call_native(NativeFuncId::Type, &[arr], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "array"); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_is_array_true() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![]);
+        let result = call_native(NativeFuncId::IsArray, &[arr], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_is_array_false() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::IsArray, &[Value::Number(1.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_is_string_true() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hi");
+        let result = call_native(NativeFuncId::IsString, &[s], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_is_number_true() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::IsNumber, &[Value::Number(3.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_is_boolean_true() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::IsBoolean, &[Value::Boolean(false)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_is_null_true() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::IsNull, &[Value::Null], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_length_string() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let result = call_native(NativeFuncId::Length, &[s], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(5.0));
+    }
+
+    #[test]
+    fn test_length_array() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0)]);
+        let result = call_native(NativeFuncId::Length, &[arr], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(2.0));
+    }
+
+    #[test]
+    fn test_ascii_upper() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let result = call_native(NativeFuncId::AsciiUpper, &[s], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "HELLO"); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_ascii_lower() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "WORLD");
+        let result = call_native(NativeFuncId::AsciiLower, &[s], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "world"); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_codepoint_a() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "A");
+        let result = call_native(NativeFuncId::Codepoint, &[s], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(65.0));
+    }
+
+    #[test]
+    fn test_char_65() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Char, &[Value::Number(65.0)], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "A"); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_parse_int_valid() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "42");
+        let result = call_native(NativeFuncId::ParseInt, &[s], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(42.0));
+    }
+
+    #[test]
+    fn test_parse_hex_valid() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "ff");
+        let result = call_native(NativeFuncId::ParseHex, &[s], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(255.0));
+    }
+
+    #[test]
+    fn test_starts_with_true() {
+        let mut mm = MemoryManager::new();
+        let haystack = mk_string(&mut mm, "hello world");
+        let needle = mk_string(&mut mm, "hello");
+        let result = call_native(NativeFuncId::StartsWith, &[haystack, needle], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_ends_with_true() {
+        let mut mm = MemoryManager::new();
+        let haystack = mk_string(&mut mm, "hello world");
+        let needle = mk_string(&mut mm, "world");
+        let result = call_native(NativeFuncId::EndsWith, &[haystack, needle], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_is_empty_empty_string() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "");
+        let result = call_native(NativeFuncId::IsEmpty, &[s], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_is_empty_nonempty_string() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "x");
+        let result = call_native(NativeFuncId::IsEmpty, &[s], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_range_basic() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Range, &[Value::Number(0.0), Value::Number(3.0)], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result {
+            let arr = mm.load_array(idx);
+            assert_eq!(arr.len(), 4);
+        } else { panic!("expected array"); }
+    }
+
+    #[test]
+    fn test_clamp_in_range() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Clamp, &[Value::Number(5.0), Value::Number(0.0), Value::Number(10.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(5.0));
+    }
+
+    #[test]
+    fn test_clamp_below_min() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Clamp, &[Value::Number(-1.0), Value::Number(0.0), Value::Number(10.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(0.0));
+    }
+
+    #[test]
+    fn test_sum_empty() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![]);
+        let result = call_native(NativeFuncId::Sum, &[arr], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(0.0));
+    }
+
+    #[test]
+    fn test_sum_values() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)]);
+        let result = call_native(NativeFuncId::Sum, &[arr], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(6.0));
+    }
+
+    #[test]
+    fn test_reverse_array() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)]);
+        let result = call_native(NativeFuncId::Reverse, &[arr], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result {
+            let arr = mm.load_array(idx);
+            assert_eq!(arr.elements[0], Value::Number(3.0));
+            assert_eq!(arr.elements[2], Value::Number(1.0));
+        } else { panic!("expected array"); }
+    }
+
+    #[test]
+    fn test_member_found() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0)]);
+        let result = call_native(NativeFuncId::Member, &[arr, Value::Number(2.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_member_not_found() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0)]);
+        let result = call_native(NativeFuncId::Member, &[arr, Value::Number(99.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_count_basic() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0), Value::Number(1.0)]);
+        let result = call_native(NativeFuncId::Count, &[arr, Value::Number(1.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(2.0));
+    }
+
+    #[test]
+    fn test_values_equal_numbers() {
+        let mm = MemoryManager::new();
+        assert!(values_equal(Value::Number(1.0), Value::Number(1.0), &mm));
+        assert!(!values_equal(Value::Number(1.0), Value::Number(2.0), &mm));
+    }
+
+    #[test]
+    fn test_values_equal_null() {
+        let mm = MemoryManager::new();
+        assert!(values_equal(Value::Null, Value::Null, &mm));
+        assert!(!values_equal(Value::Null, Value::Boolean(false), &mm));
+    }
+
+    #[test]
+    fn test_sign_positive() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Sign, &[Value::Number(5.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(1.0));
+    }
+
+    #[test]
+    fn test_sign_negative() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Sign, &[Value::Number(-3.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(-1.0));
+    }
+
+    #[test]
+    fn test_sign_zero() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Sign, &[Value::Number(0.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(0.0));
+    }
+
+    // Task 6 — Encoding/format/utility tests
+
+    #[test]
+    fn test_base64_encode() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let result = call_native(NativeFuncId::Base64, &[s], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "aGVsbG8="); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_base64_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Base64, &[Value::Number(1.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_escape_string_json() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "say \"hi\"");
+        let result = call_native(NativeFuncId::EscapeStringJson, &[s], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result {
+            assert!(mm.load_string(idx).contains("\\\""));
+        } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_escape_string_bash() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello world");
+        let result = call_native(NativeFuncId::EscapeStringBash, &[s], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result {
+            let out = mm.load_string(idx).to_string();
+            assert!(out.contains('\''), "got: {}", out);
+        } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_escape_string_xml() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "<tag>");
+        let result = call_native(NativeFuncId::EscapeStringXml, &[s], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result {
+            let out = mm.load_string(idx).to_string();
+            assert!(out.contains("&lt;"), "got: {}", out);
+        } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_min_numbers() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Min, &[Value::Number(3.0), Value::Number(7.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(3.0));
+    }
+
+    #[test]
+    fn test_max_numbers() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::Max, &[Value::Number(3.0), Value::Number(7.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(7.0));
+    }
+
+    #[test]
+    fn test_to_string_number() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::ToString, &[Value::Number(42.0)], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "42"); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_is_even_true() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::IsEven, &[Value::Number(4.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_is_odd_true() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(NativeFuncId::IsOdd, &[Value::Number(3.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_avg_basic() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(2.0), Value::Number(4.0)]);
+        let result = call_native(NativeFuncId::Avg, &[arr], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Number(3.0));
+    }
+
+    #[test]
+    fn test_contains_true() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0)]);
+        let result = call_native(NativeFuncId::Contains, &[arr, Value::Number(1.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_contains_false() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0)]);
+        let result = call_native(NativeFuncId::Contains, &[arr, Value::Number(99.0)], &mut mm, span(), sid()).unwrap();
+        assert_eq!(result, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_find_substr_basic() {
+        let mut mm = MemoryManager::new();
+        let haystack = mk_string(&mut mm, "foobarfoo");
+        let needle = mk_string(&mut mm, "foo");
+        let result = call_native(NativeFuncId::FindSubstr, &[needle, haystack], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result {
+            let arr = mm.load_array(idx);
+            assert_eq!(arr.len(), 2);
+            assert_eq!(arr.elements[0], Value::Number(0.0));
+            assert_eq!(arr.elements[1], Value::Number(6.0));
+        } else { panic!("expected array"); }
+    }
+
+    #[test]
+    fn test_str_replace_basic() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello world");
+        let from = mk_string(&mut mm, "world");
+        let to = mk_string(&mut mm, "rust");
+        let result = call_native(NativeFuncId::StrReplace, &[s, from, to], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result { assert_eq!(mm.load_string(idx), "hello rust"); } else { panic!("expected string"); }
+    }
+
+    #[test]
+    fn test_remove_basic() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)]);
+        let result = call_native(NativeFuncId::Remove, &[arr, Value::Number(2.0)], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result { assert_eq!(mm.load_array(idx).len(), 2); } else { panic!("expected array"); }
+    }
+
+    #[test]
+    fn test_flatten_arrays_basic() {
+        let mut mm = MemoryManager::new();
+        let inner1 = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0)]);
+        let inner2 = mk_array(&mut mm, vec![Value::Number(3.0)]);
+        let outer = mk_array(&mut mm, vec![inner1, inner2]);
+        let result = call_native(NativeFuncId::FlattenArrays, &[outer], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result { assert_eq!(mm.load_array(idx).len(), 3); } else { panic!("expected array"); }
+    }
 }
