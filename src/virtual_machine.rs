@@ -12725,4 +12725,26 @@ mod tests {
             other => panic!("expected Object, got {:?}", other),
         }
     }
+
+    #[test]
+    fn test_std_deg2rad_pipeline() {
+        assert_bool("std.deg2rad(0) == 0");
+    }
+
+    #[test]
+    fn test_std_rad2deg_pipeline() {
+        assert_bool("std.rad2deg(0) == 0");
+    }
+
+    #[test]
+    fn test_std_filter_object_pipeline() {
+        // filterObject(func, obj): func receives (key, value)
+        assert_bool("std.filterObject(function(k, v) v > 1, {a: 1, b: 2, c: 3}) == {b: 2, c: 3}");
+    }
+
+    #[test]
+    fn test_std_group_by_pipeline() {
+        // groupBy(arr, keyF): keyF maps each element to a string key
+        assert_bool("std.groupBy([1, 2, 3], function(x) if x < 3 then 'small' else 'big') == {small: [1, 2], big: [3]}");
+    }
 }
