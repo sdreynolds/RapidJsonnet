@@ -12620,4 +12620,109 @@ mod tests {
 
         assert_eq!(result, Value::Number(42.0));
     }
+
+    // --- Group 1: inverse trig ---
+    #[test]
+    fn test_std_inverse_trig_pipeline() {
+        assert_bool("std.asin(0) == 0");
+        assert_bool("std.acos(1) == 0");
+        assert_bool("std.atan(0) == 0");
+    }
+
+    // --- Group 2: mapWithIndex ---
+    #[test]
+    fn test_std_map_with_index_pipeline() {
+        assert_bool("std.mapWithIndex(function(i, v) i + v, [10, 20, 30]) == [10, 21, 32]");
+    }
+
+    // --- Group 3: objectValuesAll, objectHasAll, objectFieldsAll ---
+    #[test]
+    fn test_std_object_all_fields_pipeline() {
+        // objectFieldsAll includes hidden fields (:: syntax)
+        assert_bool("std.objectFieldsAll({a: 1, b:: 2}) == ['a', 'b']");
+        assert_bool("std.objectValuesAll({a: 1, b:: 2}) == [1, 2]");
+        assert_bool("std.objectHasAll({a: 1, b:: 2}, 'b')");
+    }
+
+    // --- Group 4: removeAt ---
+    #[test]
+    fn test_std_remove_at_pipeline() {
+        assert_bool("std.removeAt([10, 20, 30], 1) == [10, 30]");
+    }
+
+    // --- Group 5: base64Decode, base64DecodeBytes ---
+    #[test]
+    fn test_std_base64_decode_pipeline() {
+        assert_bool("std.base64Decode('aGVsbG8=') == 'hello'");
+    }
+
+    #[test]
+    fn test_std_base64_decode_bytes_pipeline() {
+        // base64DecodeBytes returns an array of byte values; 'hello' = [104,101,108,108,111]
+        assert_bool("std.base64DecodeBytes('aGVsbG8=')[0] == 104");
+    }
+
+    // --- Group 6: format specifiers %e, %g, %X, %c ---
+    #[test]
+    fn test_std_format_e_pipeline() {
+        assert_bool("std.format('%e', 1000.0) == '1.000000e+03'");
+    }
+
+    #[test]
+    fn test_std_format_g_pipeline() {
+        // %g uses shortest representation
+        assert_bool("std.format('%g', 100.0) == '100'");
+    }
+
+    #[test]
+    fn test_std_format_upper_x_pipeline() {
+        assert_bool("std.format('%X', 255) == 'FF'");
+    }
+
+    #[test]
+    fn test_std_format_c_pipeline() {
+        assert_bool("std.format('%c', 65) == 'A'");
+    }
+
+    // --- Group 7: set operations ---
+    #[test]
+    fn test_std_set_pipeline() {
+        assert_bool("std.set([3, 1, 2, 1]) == [1, 2, 3]");
+    }
+
+    #[test]
+    fn test_std_set_union_pipeline() {
+        assert_bool("std.setUnion([1, 2], [2, 3]) == [1, 2, 3]");
+    }
+
+    #[test]
+    fn test_std_set_inter_pipeline() {
+        assert_bool("std.setInter([1, 2, 3], [2, 3, 4]) == [2, 3]");
+    }
+
+    #[test]
+    fn test_std_set_diff_pipeline() {
+        assert_bool("std.setDiff([1, 2, 3], [2, 3]) == [1]");
+    }
+
+    #[test]
+    fn test_std_set_member_pipeline() {
+        assert_bool("std.setMember(2, [1, 2, 3])");
+        assert_bool("!std.setMember(5, [1, 2, 3])");
+    }
+
+    // --- Group 8: unary type errors and value_to_json object ---
+    #[test]
+    fn test_type_error_negate_string() {
+        assert_err("-'hello'");
+    }
+
+    #[test]
+    fn test_value_to_json_object_pipeline() {
+        // Run a Jsonnet expression that returns an Object value
+        match run_jsonnet("{a: 1, b: 2}") {
+            Ok(Value::Object(_)) => {},
+            other => panic!("expected Object, got {:?}", other),
+        }
+    }
 }
