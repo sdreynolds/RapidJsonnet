@@ -22,6 +22,10 @@ use std::ops::Range;
 
 pub type CompilerError = ScanError;
 
+#[cfg(test)]
+#[path = "compiler_integration_test.rs"]
+mod compiler_integration_test;
+
 // Comprehension clause tracking for parsing and code generation
 #[derive(Debug, Clone)]
 enum ComprehensionClause {
@@ -1063,28 +1067,6 @@ impl<'a> Compiler<'a> {
         self.compiling_chunk
             .write_opcode_u16(Opcode::LoadConst, index, span);
         Ok(index)
-    }
-
-    /// Emit a Closure instruction with function and upvalue descriptors
-    fn emit_closure(
-        &mut self,
-        chunk: chunk::Chunk,
-        upvalues: Vec<CompilerUpvalue>,
-        arity: u8,
-        memory_manager: &mut MemoryManager,
-    ) -> Result<(), CompilerError> {
-        let span = self.current_span();
-        self.emit_closure_with_params(
-            chunk,
-            upvalues,
-            arity,
-            arity,
-            Vec::new(),
-            span,
-            memory_manager,
-            false,
-        )?;
-        Ok(())
     }
 
     /// Emit a Closure instruction with function metadata including parameter names and defaults
@@ -4726,5 +4708,31 @@ mod tests {
             "Function sugar with closure should compile: {:?}",
             chunk.err()
         );
+    }
+
+    fn compile_source_err(source: &str) -> String {
+        let mut scanner = scanner::Scanner::new(source, "test.jsonnet");
+        let mut mm = memory_manager::MemoryManager::new();
+        let compiler = Compiler::new(&mut scanner, "test.jsonnet");
+        compiler.compile(&mut mm).unwrap_err().message
+    }
+
+    #[test]
+    fn test_duplicate_param_error() {
+        let msg = compile_source_err("function(x, x) x");
+        assert!(
+            msg.contains("duplicate") || msg.contains("already") || msg.contains("Duplicate"),
+            "got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_super_outside_object_compiles() {
+        // super.x compiles without error; validation happens at runtime
+        let mut scanner = scanner::Scanner::new("super.x", "test.jsonnet");
+        let mut mm = memory_manager::MemoryManager::new();
+        let compiler = Compiler::new(&mut scanner, "test.jsonnet");
+        assert!(compiler.compile(&mut mm).is_ok());
     }
 }
