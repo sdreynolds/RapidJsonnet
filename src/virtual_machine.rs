@@ -12058,6 +12058,551 @@ mod tests {
         }
     }
 
+    // --- Pipeline test helpers ---
+
+    fn run_jsonnet(source: &str) -> Result<Value, RuntimeError> {
+        let mut scanner_inst = scanner::Scanner::new(source, "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler_inst = compiler::Compiler::new(&mut scanner_inst, "test.jsonnet");
+        let chunk = compiler_inst.compile(&mut memory_manager).expect("compile failed");
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        vm.interpret()
+    }
+
+    fn assert_bool(source: &str) {
+        match run_jsonnet(source).unwrap_or_else(|e| panic!("expected success for: {}\n  error: {:?}", source, e)) {
+            Value::Boolean(true) => {}
+            other => panic!("expected true, got {:?} for: {}", other, source),
+        }
+    }
+
+    fn assert_err(source: &str) {
+        run_jsonnet(source).expect_err(&format!("expected error for: {}", source));
+    }
+
+    // --- std math ---
+    #[test]
+    fn test_std_abs_pipeline() {
+        assert_bool("std.abs(-5) == 5");
+        assert_bool("std.abs(3) == 3");
+        assert_bool("std.abs(0) == 0");
+    }
+
+    #[test]
+    fn test_std_floor_ceil_round_pipeline() {
+        assert_bool("std.floor(3.7) == 3");
+        assert_bool("std.ceil(3.2) == 4");
+        assert_bool("std.round(3.5) == 4");
+        assert_bool("std.round(3.4) == 3");
+    }
+
+    #[test]
+    fn test_std_min_max_pipeline() {
+        assert_bool("std.min(3, 7) == 3");
+        assert_bool("std.max(3, 7) == 7");
+    }
+
+    #[test]
+    fn test_std_sign_pipeline() {
+        assert_bool("std.sign(5) == 1");
+        assert_bool("std.sign(-3) == -1");
+        assert_bool("std.sign(0) == 0");
+    }
+
+    #[test]
+    fn test_std_clamp_pipeline() {
+        assert_bool("std.clamp(5, 0, 10) == 5");
+        assert_bool("std.clamp(-1, 0, 10) == 0");
+        assert_bool("std.clamp(11, 0, 10) == 10");
+    }
+
+    #[test]
+    fn test_std_pow_sqrt_pipeline() {
+        assert_bool("std.pow(2, 10) == 1024");
+        assert_bool("std.sqrt(9) == 3");
+    }
+
+    #[test]
+    fn test_std_log_exp_pipeline() {
+        assert_bool("std.log(1) == 0");
+        assert_bool("std.exp(0) == 1");
+    }
+
+    #[test]
+    fn test_std_trig_pipeline() {
+        assert_bool("std.sin(0) == 0");
+        assert_bool("std.cos(0) == 1");
+        assert_bool("std.tan(0) == 0");
+    }
+
+    #[test]
+    fn test_std_hypot_pipeline() {
+        assert_bool("std.hypot(3, 4) == 5");
+    }
+
+    // --- std type predicates ---
+    #[test]
+    fn test_std_type_pipeline() {
+        assert_bool(r#"std.type(1) == "number""#);
+        assert_bool(r#"std.type("s") == "string""#);
+        assert_bool(r#"std.type(null) == "null""#);
+        assert_bool(r#"std.type(true) == "boolean""#);
+        assert_bool(r#"std.type([]) == "array""#);
+        assert_bool(r#"std.type({}) == "object""#);
+        assert_bool(r#"std.type(function() 0) == "function""#);
+    }
+
+    #[test]
+    fn test_std_is_predicates_pipeline() {
+        assert_bool("std.isArray([])");
+        assert_bool("std.isBoolean(true)");
+        assert_bool("std.isNumber(1)");
+        assert_bool("std.isObject({})");
+        assert_bool(r#"std.isString("hi")"#);
+        assert_bool("std.isNull(null)");
+        assert_bool("std.isFunction(function() 0)");
+        assert_bool("!std.isArray(1)");
+    }
+
+    // --- std string operations ---
+    #[test]
+    fn test_std_length_pipeline() {
+        assert_bool(r#"std.length("hello") == 5"#);
+        assert_bool("std.length([1,2,3]) == 3");
+        assert_bool("std.length({a:1,b:2}) == 2");
+    }
+
+    #[test]
+    fn test_std_substr_pipeline() {
+        assert_bool(r#"std.substr("hello", 1, 3) == "ell""#);
+        assert_bool(r#"std.substr("hello", 0, 5) == "hello""#);
+    }
+
+    #[test]
+    fn test_std_split_join_pipeline() {
+        assert_bool(r#"std.split("a,b,c", ",") == ["a","b","c"]"#);
+        assert_bool(r#"std.join(",", ["a","b","c"]) == "a,b,c""#);
+    }
+
+    #[test]
+    fn test_std_lines_pipeline() {
+        assert_bool(r#"std.lines(["a","b"]) == "a\nb\n""#);
+    }
+
+    #[test]
+    fn test_std_codepoint_char_pipeline() {
+        assert_bool(r#"std.codepoint("A") == 65"#);
+        assert_bool(r#"std.char(65) == "A""#);
+    }
+
+    #[test]
+    fn test_std_to_string_pipeline() {
+        assert_bool(r#"std.toString(42) == "42""#);
+        assert_bool(r#"std.toString(true) == "true""#);
+        assert_bool(r#"std.toString(null) == "null""#);
+    }
+
+    #[test]
+    fn test_std_ascii_case_pipeline() {
+        assert_bool(r#"std.asciiUpper("hello") == "HELLO""#);
+        assert_bool(r#"std.asciiLower("WORLD") == "world""#);
+    }
+
+    #[test]
+    fn test_std_starts_ends_with_pipeline() {
+        assert_bool(r#"std.startsWith("hello", "he")"#);
+        assert_bool(r#"std.endsWith("hello", "lo")"#);
+        assert_bool(r#"!std.startsWith("hello", "lo")"#);
+    }
+
+    #[test]
+    fn test_std_str_replace_pipeline() {
+        assert_bool(r#"std.strReplace("hello world", "world", "rust") == "hello rust""#);
+    }
+
+    #[test]
+    fn test_std_is_empty_pipeline() {
+        assert_bool(r#"std.isEmpty("")"#);
+        assert_bool(r#"!std.isEmpty("x")"#);
+    }
+
+    #[test]
+    fn test_std_find_substr_pipeline() {
+        assert_bool(r#"std.findSubstr("foo", "foobarfoo") == [0, 6]"#);
+    }
+
+    #[test]
+    fn test_std_parse_pipeline() {
+        assert_bool(r#"std.parseInt("42") == 42"#);
+        assert_bool(r#"std.parseHex("ff") == 255"#);
+        assert_bool(r#"std.parseOctal("7") == 7"#);
+    }
+
+    // --- std array operations ---
+    #[test]
+    fn test_std_range_pipeline() {
+        assert_bool("std.range(0, 3) == [0,1,2,3]");
+    }
+
+    #[test]
+    fn test_std_reverse_pipeline() {
+        assert_bool("std.reverse([1,2,3]) == [3,2,1]");
+    }
+
+    #[test]
+    fn test_std_flatten_pipeline() {
+        assert_bool("std.flattenArrays([[1,2],[3]]) == [1,2,3]");
+    }
+
+    #[test]
+    fn test_std_sort_uniq_pipeline() {
+        assert_bool("std.sort([3,1,2]) == [1,2,3]");
+        assert_bool("std.uniq([1,1,2,2,3]) == [1,2,3]");
+    }
+
+    #[test]
+    fn test_std_sum_avg_pipeline() {
+        assert_bool("std.sum([1,2,3]) == 6");
+        assert_bool("std.avg([2,4]) == 3");
+    }
+
+    #[test]
+    fn test_std_member_contains_pipeline() {
+        assert_bool("std.member([1,2,3], 2)");
+        assert_bool("!std.member([1,2,3], 99)");
+        assert_bool("std.contains([1,2,3], 2)");
+    }
+
+    #[test]
+    fn test_std_count_find_pipeline() {
+        assert_bool("std.count([1,2,1,3], 1) == 2");
+        assert_bool("std.find(2, [1,2,3,2]) == [1,3]");
+    }
+
+    #[test]
+    fn test_std_remove_pipeline() {
+        assert_bool("std.remove([1,2,3], 2) == [1,3]");
+    }
+
+    #[test]
+    fn test_std_all_any_pipeline() {
+        assert_bool("std.all([true, true, true])");
+        assert_bool("!std.all([true, false])");
+        assert_bool("std.any([false, true])");
+        assert_bool("!std.any([false, false])");
+    }
+
+    #[test]
+    fn test_std_map_filter_pipeline() {
+        assert_bool("std.map(function(x) x * 2, [1,2,3]) == [2,4,6]");
+        assert_bool("std.filter(function(x) x > 1, [1,2,3]) == [2,3]");
+    }
+
+    #[test]
+    fn test_std_foldl_foldr_pipeline() {
+        assert_bool("std.foldl(function(acc, x) acc + x, [1,2,3], 0) == 6");
+        assert_bool("std.foldr(function(x, acc) x + acc, [1,2,3], 0) == 6");
+    }
+
+    #[test]
+    fn test_std_flatmap_pipeline() {
+        assert_bool("std.flatMap(function(x) [x, x], [1,2]) == [1,1,2,2]");
+    }
+
+    #[test]
+    fn test_std_make_array_pipeline() {
+        assert_bool("std.makeArray(3, function(i) i * 2) == [0,2,4]");
+    }
+
+    #[test]
+    fn test_std_string_chars_pipeline() {
+        assert_bool(r#"std.stringChars("abc") == ["a","b","c"]"#);
+    }
+
+    // --- std object operations ---
+    #[test]
+    fn test_std_object_fields_pipeline() {
+        assert_bool(r#"std.objectFields({a:1,b:2}) == ["a","b"]"#);
+    }
+
+    #[test]
+    fn test_std_object_has_pipeline() {
+        assert_bool(r#"std.objectHas({a:1}, "a")"#);
+        assert_bool(r#"!std.objectHas({a:1}, "b")"#);
+    }
+
+    #[test]
+    fn test_std_object_values_pipeline() {
+        assert_bool("std.objectValues({a:1,b:2}) == [1,2]");
+    }
+
+    #[test]
+    fn test_std_get_pipeline() {
+        assert_bool(r#"std.get({a:1}, "a") == 1"#);
+        assert_bool(r#"std.get({a:1}, "b", 0) == 0"#);
+    }
+
+    // --- std encoding ---
+    #[test]
+    fn test_std_base64_pipeline() {
+        assert_bool(r#"std.base64("hello") == "aGVsbG8=""#);
+    }
+
+    #[test]
+    fn test_std_escape_string_json_pipeline() {
+        assert_bool(r#"std.escapeStringJson("hi") != """#);
+    }
+
+    #[test]
+    fn test_std_escape_string_xml_pipeline() {
+        assert_bool(r#"std.escapeStringXml("<b>") == "&lt;b&gt;""#);
+    }
+
+    // --- std format ---
+    #[test]
+    fn test_std_format_string_pipeline() {
+        assert_bool(r#"std.format("Hello %s", "world") == "Hello world""#);
+        assert_bool(r#"std.format("%d", 42) == "42""#);
+        assert_bool(r#"std.format("%.2f", 3.14159) == "3.14""#);
+        assert_bool(r#"std.format("%05d", 42) == "00042""#);
+        assert_bool(r#"std.format("100%%", []) == "100%""#);
+        assert_bool(r#"std.format("%x", 255) == "ff""#);
+        assert_bool(r#"std.format("%o", 8) == "10""#);
+    }
+
+    #[test]
+    fn test_std_format_operator_pipeline() {
+        assert_bool(r#""Hello %s" % "world" == "Hello world""#);
+        assert_bool(r#""%d + %d" % [1, 2] == "1 + 2""#);
+    }
+
+    #[test]
+    fn test_std_manifest_json_pipeline() {
+        assert_bool(r#"std.manifestJson({a: 1}) != """#);
+    }
+
+    #[test]
+    fn test_std_assert_equal_pipeline() {
+        assert_bool("std.assertEqual(1, 1)");
+    }
+
+    #[test]
+    fn test_std_deep_join_pipeline() {
+        assert_bool(r#"std.deepJoin(["a", ["b", "c"]]) == "abc""#);
+    }
+
+    // --- Language features ---
+    #[test]
+    fn test_if_then_else_true() {
+        assert_bool("if true then true else false");
+    }
+
+    #[test]
+    fn test_if_then_else_false() {
+        assert_bool("if false then false else true");
+    }
+
+    #[test]
+    fn test_if_then_else_nested() {
+        assert_bool("if true then (if false then false else true) else false");
+    }
+
+    #[test]
+    fn test_object_field_access() {
+        assert_bool("{a: 1}.a == 1");
+        assert_bool(r#"{a: 1}["a"] == 1"#);
+    }
+
+    #[test]
+    fn test_object_computed_field() {
+        assert_bool(r#"local k = "x"; {[k]: 42}.x == 42"#);
+    }
+
+    #[test]
+    fn test_object_plus_override() {
+        assert_bool("{a: 1, b: 2} + {b: 99} == {a: 1, b: 99}");
+    }
+
+    #[test]
+    fn test_object_field_override_syntax() {
+        assert_bool("{a: 1} + {a+: 10} == {a: 11}");
+    }
+
+    #[test]
+    fn test_object_hidden_field() {
+        assert_bool(r#"local o = {a:: 1, b: 2}; std.objectFields(o) == ["b"]"#);
+        assert_bool(r#"local o = {a:: 1, b: 2}; std.objectFieldsAll(o) == ["a","b"]"#);
+    }
+
+    #[test]
+    fn test_self_reference() {
+        assert_bool("{a: 1, b: self.a + 1}.b == 2");
+    }
+
+    #[test]
+    fn test_super_reference() {
+        assert_bool("local base = {x: 1}; (base + {x: super.x + 1}).x == 2");
+    }
+
+    #[test]
+    fn test_array_indexing() {
+        assert_bool("[10, 20, 30][1] == 20");
+    }
+
+    #[test]
+    fn test_array_slicing() {
+        assert_bool("[1,2,3,4,5][1:3] == [2,3]");
+        assert_bool("[1,2,3,4,5][:2] == [1,2]");
+        assert_bool("[1,2,3,4,5][3:] == [4,5]");
+        assert_bool("[1,2,3,4,5][::2] == [1,3,5]");
+    }
+
+    #[test]
+    fn test_string_indexing_slicing() {
+        assert_bool(r#""hello"[1] == "e""#);
+        assert_bool(r#""hello"[1:3] == "el""#);
+    }
+
+    #[test]
+    fn test_function_basic() {
+        assert_bool("local f = function(x) x * 2; f(5) == 10");
+    }
+
+    #[test]
+    fn test_function_default_param() {
+        assert_bool("local f = function(x, y=10) x + y; f(5) == 15 && f(5, 20) == 25");
+    }
+
+    #[test]
+    fn test_closure_capture() {
+        assert_bool("local x = 5; local f = function() x; f() == 5");
+    }
+
+    #[test]
+    fn test_closure_escaping() {
+        assert_bool("local make = function(n) function() n; local f = make(42); f() == 42");
+    }
+
+    #[test]
+    fn test_shared_upvalue() {
+        assert_bool("local x = 1; local f = function() x; local g = function() x; f() == g()");
+    }
+
+    #[test]
+    fn test_array_comprehension_basic() {
+        assert_bool("[x * 2 for x in [1,2,3]] == [2,4,6]");
+    }
+
+    #[test]
+    fn test_array_comprehension_filter() {
+        assert_bool("[x for x in [1,2,3,4] if x > 2] == [3,4]");
+    }
+
+    #[test]
+    fn test_object_comprehension_basic() {
+        assert_bool(r#"{[k]: 1 for k in ["a","b"]} == {a: 1, b: 1}"#);
+    }
+
+    #[test]
+    fn test_error_expression() {
+        assert_err(r#"error "boom""#);
+    }
+
+    #[test]
+    fn test_assert_pass() {
+        assert_bool("assert true; true");
+    }
+
+    #[test]
+    fn test_assert_fail() {
+        assert_err("assert false : \"bad\"; true");
+    }
+
+    #[test]
+    fn test_lazy_eval_unevaluated_branch() {
+        assert_bool("if true then true else error \"should not run\"");
+    }
+
+    #[test]
+    fn test_local_shadowing_pipeline() {
+        assert_bool("local x = 1; local x = 2; x == 2");
+    }
+
+    #[test]
+    fn test_local_function_sugar_pipeline() {
+        assert_bool("local f(x) = x + 1; f(5) == 6");
+    }
+
+    #[test]
+    fn test_root_dollar_reference() {
+        assert_bool("{x: 1, y: $.x + 1}.y == 2");
+    }
+
+    // --- VM error paths ---
+    #[test]
+    fn test_type_error_add_number_to_object() {
+        assert_err("1 + {}");
+    }
+
+    #[test]
+    fn test_array_index_out_of_bounds() {
+        assert_err("[1,2,3][10]");
+    }
+
+    #[test]
+    fn test_call_non_function() {
+        assert_err("1()");
+    }
+
+    #[test]
+    fn test_function_too_many_args() {
+        assert_err("local f = function(x) x; f(1, 2)");
+    }
+
+    #[test]
+    fn test_function_too_few_args() {
+        assert_err("local f = function(x, y) x + y; f(1)");
+    }
+
+    // --- value_to_json (via pipeline) ---
+    #[test]
+    fn test_value_to_json_null_pipeline() {
+        let result = run_jsonnet("null").expect("expected success");
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn test_value_to_json_bool_pipeline() {
+        let r = run_jsonnet("true").expect("expected success");
+        assert_eq!(r, Value::Boolean(true));
+        let r2 = run_jsonnet("false").expect("expected success");
+        assert_eq!(r2, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_value_to_json_number_pipeline() {
+        let r = run_jsonnet("42").expect("expected success");
+        assert_eq!(r, Value::Number(42.0));
+    }
+
+    #[test]
+    fn test_value_to_json_string_pipeline() {
+        let r = run_jsonnet(r#""hello""#).expect("expected success");
+        match r {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_value_to_json_array_pipeline() {
+        let r = run_jsonnet("[1, 2]").expect("expected success");
+        match r {
+            Value::Array(_) => {}
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_force_value_thunk_materialization() {
         let mut chunk = create_test_chunk();
