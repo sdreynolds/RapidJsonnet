@@ -282,6 +282,11 @@ rust_test(
 )
 
 rust_test(
+    name = "native_test",
+    crate = ":native",
+)
+
+rust_test(
     name = "serialized_chunk_test",
     crate = ":serialized_chunk",
 )
