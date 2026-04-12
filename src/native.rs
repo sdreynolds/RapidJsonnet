@@ -4952,3 +4952,92 @@ fn std_product(
     let alloc = memory_manager.allocate_array(output);
     Ok(Value::Array(alloc.index))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memory_manager::MemoryManager;
+
+    fn span() -> std::ops::Range<usize> {
+        0..1
+    }
+
+    fn sid() -> String {
+        "test".to_string()
+    }
+
+    fn mk_string(mm: &mut MemoryManager, s: &str) -> Value {
+        Value::String(mm.allocate_string(s).index)
+    }
+
+    fn mk_array(mm: &mut MemoryManager, elems: Vec<Value>) -> Value {
+        Value::Array(mm.allocate_array(elems).index)
+    }
+
+    #[test]
+    fn test_abs_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let err = call_native(NativeFuncId::Abs, &[s], &mut mm, span(), sid()).unwrap_err();
+        assert!(err.message.to_lowercase().contains("number"), "expected 'number' in error: {}", err.message);
+    }
+
+    #[test]
+    fn test_abs_arity_mismatch() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Abs, &[], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_floor_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let err = call_native(NativeFuncId::Floor, &[s], &mut mm, span(), sid()).unwrap_err();
+        assert!(err.message.to_lowercase().contains("number"), "expected 'number' in error: {}", err.message);
+    }
+
+    #[test]
+    fn test_ceil_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Ceil, &[Value::Boolean(true)], &mut mm, span(), sid()).unwrap_err();
+        assert!(err.message.to_lowercase().contains("number"), "expected 'number' in error: {}", err.message);
+    }
+
+    #[test]
+    fn test_round_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(NativeFuncId::Round, &[Value::Null], &mut mm, span(), sid()).unwrap_err();
+        assert!(err.message.to_lowercase().contains("number"), "expected 'number' in error: {}", err.message);
+    }
+
+    #[test]
+    fn test_sign_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let err = call_native(NativeFuncId::Sign, &[s], &mut mm, span(), sid()).unwrap_err();
+        assert!(err.message.to_lowercase().contains("number"), "expected 'number' in error: {}", err.message);
+    }
+
+    #[test]
+    fn test_pow_wrong_types() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let err = call_native(NativeFuncId::Pow, &[s, Value::Number(2.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(err.message.to_lowercase().contains("number"), "expected 'number' in error: {}", err.message);
+    }
+
+    #[test]
+    fn test_clamp_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let err = call_native(NativeFuncId::Clamp, &[s, Value::Number(0.0), Value::Number(1.0)], &mut mm, span(), sid()).unwrap_err();
+        assert!(err.message.to_lowercase().contains("number"), "expected 'number' in error: {}", err.message);
+    }
+
+    // mk_array is available for future tests
+    #[allow(dead_code)]
+    fn _use_mk_array(mm: &mut MemoryManager) {
+        let _ = mk_array(mm, vec![]);
+    }
+}
