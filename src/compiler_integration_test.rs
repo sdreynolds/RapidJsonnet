@@ -105,6 +105,7 @@ mod integration_tests {
 
     #[test]
     fn test_object_override_syntax_compilation() {
+        // +: is a field merge operator; test verifies the compiler accepts the syntax
         assert_compiles("{a: 1} + {a+: 10}");
     }
 
@@ -183,6 +184,9 @@ mod integration_tests {
     #[test]
     fn test_compile_err_invalid_syntax() {
         let msg = compile_err("local = 1;");
-        assert!(!msg.is_empty());
+        assert!(
+            msg.contains("identifier") || msg.contains("Expected") || msg.contains("unexpected"),
+            "unexpected message: {}", msg
+        );
     }
 }
