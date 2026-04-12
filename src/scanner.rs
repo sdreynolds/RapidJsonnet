@@ -942,4 +942,158 @@ mod tests {
         let result = scanner.scan_all();
         assert!(result.is_ok());
     }
+
+    fn scan_all_ok(input: &str) -> Vec<Token> {
+        let mut scanner = Scanner::new(input, "test");
+        scanner.scan_all().unwrap().into_iter().map(|t| t.token).collect()
+    }
+
+    fn scan_all_err(input: &str) -> Vec<ScanError> {
+        let mut scanner = Scanner::new(input, "test");
+        scanner.scan_all().unwrap_err()
+    }
+
+    #[test]
+    fn test_text_block_basic() {
+        let input = "|||\n  hello\n  world\n|||";
+        let tokens = scan_all_ok(input);
+        assert!(matches!(&tokens[0], Token::String(s) if s == "hello\nworld\n"));
+    }
+
+    #[test]
+    fn test_text_block_strip_newline() {
+        let input = "|||-\n  hello\n|||";
+        let tokens = scan_all_ok(input);
+        assert!(matches!(&tokens[0], Token::String(s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_text_block_missing_newline_error() {
+        let mut scanner = Scanner::new("|||   no-newline", "test");
+        let result = scanner.scan_next();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_text_block_unterminated_error() {
+        let mut scanner = Scanner::new("|||\n  hello\n", "test");
+        let result = scanner.scan_next();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_text_block_mismatched_indent_error() {
+        let input = "|||\n  good\n bad\n|||";
+        let mut scanner = Scanner::new(input, "test");
+        let result = scanner.scan_next();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verbatim_string_double_quote_escape() {
+        let tokens = scan_all_ok(r#"@"foo""bar""#);
+        assert!(matches!(&tokens[0], Token::String(s) if s == r#"foo"bar"#));
+    }
+
+    #[test]
+    fn test_verbatim_string_single_quote_escape() {
+        let tokens = scan_all_ok("@'it''s'");
+        assert!(matches!(&tokens[0], Token::String(s) if s == "it's"));
+    }
+
+    #[test]
+    fn test_unicode_escape_basic() {
+        let tokens = scan_all_ok(r#""\u0041""#); // A
+        assert!(matches!(&tokens[0], Token::String(s) if s == "A"));
+    }
+
+    #[test]
+    fn test_unicode_surrogate_pair() {
+        // U+1F600 GRINNING FACE = \uD83D\uDE00
+        let tokens = scan_all_ok(r#""\uD83D\uDE00""#);
+        assert!(matches!(&tokens[0], Token::String(s) if s == "\u{1F600}"));
+    }
+
+    #[test]
+    fn test_unicode_unpaired_high_surrogate_error() {
+        let mut scanner = Scanner::new(r#""\uD83D""#, "test");
+        let result = scanner.scan_next();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unicode_invalid_low_surrogate_error() {
+        let mut scanner = Scanner::new(r#""\uD83D\u0041""#, "test");
+        let result = scanner.scan_next();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_block_comment_unterminated() {
+        let errors = scan_all_err("/* unterminated");
+        assert!(!errors.is_empty());
+        assert!(errors[0].message.contains("Unterminated"));
+    }
+
+    #[test]
+    fn test_is_incomplete_input_true() {
+        let err = ScanError::new(0..1, "Unexpected end of input".to_string(), "test".to_string());
+        assert!(err.is_incomplete_input());
+
+        let err2 = ScanError::new(0..1, "Unterminated string".to_string(), "test".to_string());
+        assert!(err2.is_incomplete_input());
+    }
+
+    #[test]
+    fn test_is_incomplete_input_false() {
+        let err = ScanError::new(0..1, "Unexpected character 'x'".to_string(), "test".to_string());
+        assert!(!err.is_incomplete_input());
+    }
+
+    #[test]
+    fn test_into_report_with_cause() {
+        let cause = ScanError::new(0..3, "root cause".to_string(), "test".to_string());
+        let mut outer = ScanError::new(5..8, "outer error".to_string(), "test".to_string());
+        outer.cause = Some(Box::new(cause));
+
+        let (report, source_ids) = outer.into_report();
+        let _ = report; // just verify it doesn't panic
+        assert_eq!(source_ids.len(), 1);
+    }
+
+    #[test]
+    fn test_save_and_restore_position() {
+        let mut scanner = Scanner::new("foo bar", "test");
+        // Consume "foo" token to advance past it
+        scanner.scan_next().unwrap();
+        let checkpoint = scanner.save_position();
+        // Consume "bar" token
+        scanner.scan_next().unwrap();
+        scanner.restore_position(checkpoint);
+        // Should be back at "bar"
+        let result = scanner.scan_next().unwrap();
+        assert!(matches!(result.token, Token::Identifier(s) if s == "bar"));
+    }
+
+    #[test]
+    fn test_collected_strings_after_scan() {
+        let mut scanner = Scanner::new(r#""hello" "world""#, "test");
+        scanner.scan_all().unwrap();
+        assert_eq!(scanner.collected_strings().len(), 2);
+    }
+
+    #[test]
+    fn test_invalid_escape_sequence() {
+        let mut scanner = Scanner::new(r#""\q""#, "test");
+        let result = scanner.scan_next();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Invalid escape"));
+    }
+
+    #[test]
+    fn test_number_invalid_exponent() {
+        let errors = scan_all_err("1e");
+        assert!(!errors.is_empty());
+    }
 }
