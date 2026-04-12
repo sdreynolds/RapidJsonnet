@@ -12350,7 +12350,7 @@ mod tests {
 
     #[test]
     fn test_std_escape_string_json_pipeline() {
-        assert_bool(r#"std.escapeStringJson("hi") != """#);
+        assert_bool(r#"std.escapeStringJson("hi") == "\"hi\"" "#);
     }
 
     #[test]
@@ -12378,7 +12378,7 @@ mod tests {
 
     #[test]
     fn test_std_manifest_json_pipeline() {
-        assert_bool(r#"std.manifestJson({a: 1}) != """#);
+        assert_bool(r#"std.manifestJson({a: 1}) == "{\n   \"a\": 1\n}""#);
     }
 
     #[test]
