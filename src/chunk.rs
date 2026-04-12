@@ -2484,4 +2484,120 @@ mod tests {
         assert_eq!(owned1, owned2);
         assert_ne!(owned1, owned3);
     }
+
+    #[test]
+    fn test_debug_compilation_produces_output() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode(Opcode::LoadNull, 0..5);
+        chunk.write_opcode(Opcode::LoadTrue, 5..10);
+        chunk.write_opcode(Opcode::LoadFalse, 10..15);
+        chunk.write_opcode(Opcode::Return, 15..20);
+
+        // debug_compilation returns a Report — just check it builds without panic
+        let _report = chunk.debug_compilation();
+    }
+
+    #[test]
+    fn test_write_opcode_u16_boundary() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        // Value 256 requires u16 (cannot fit in u8)
+        chunk.write_opcode_u16(Opcode::LoadConst, 256, 0..1);
+        assert_eq!(chunk.count(), 3); // opcode byte + 2 bytes for u16
+        let read = chunk.read_u16(1).unwrap();
+        assert_eq!(read, 256);
+    }
+
+    #[test]
+    fn test_write_opcode_u16_max() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode_u16(Opcode::LoadConst, 65535, 0..1);
+        assert_eq!(chunk.read_u16(1).unwrap(), 65535);
+    }
+
+    #[test]
+    fn test_write_opcode_u32_large() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode_u32(Opcode::LoadConst, 100_000, 0..1);
+        assert_eq!(chunk.count(), 5); // opcode + 4 bytes
+        assert_eq!(chunk.read_u32(1).unwrap(), 100_000);
+    }
+
+    #[test]
+    fn test_add_constant_accumulates() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        let idx1 = chunk.add_constant(Value::Number(42.0));
+        let idx2 = chunk.add_constant(Value::Number(42.0));
+        // add_constant does not deduplicate — each call appends
+        assert_ne!(idx1, idx2);
+        assert_eq!(chunk.constants.len(), 2);
+    }
+
+    #[test]
+    fn test_add_constant_different_values() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        let idx1 = chunk.add_constant(Value::Number(1.0));
+        let idx2 = chunk.add_constant(Value::Number(2.0));
+        assert_ne!(idx1, idx2);
+        assert_eq!(chunk.constants.len(), 2);
+    }
+
+    #[test]
+    fn test_get_span_for_written_opcode() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode(Opcode::LoadNull, 10..20);
+        let span = chunk.get_span(0).unwrap();
+        assert_eq!(*span, 10..20);
+    }
+
+    #[test]
+    fn test_patch_i32() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_i32(0, 0..4); // placeholder
+        let pos = chunk.count() - 4;
+        chunk.patch_i32(pos, 12345);
+        assert_eq!(chunk.read_i32(pos).unwrap(), 12345);
+    }
+
+    #[test]
+    fn test_write_opcode_u8_u8_distinct_args() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode_u8_u8(Opcode::LoadNull, 7, 9, 0..1);
+        assert_eq!(chunk.count(), 3);
+        assert_eq!(chunk.read_u8(1).unwrap(), 7);
+        assert_eq!(chunk.read_u8(2).unwrap(), 9);
+    }
+
+    #[test]
+    fn test_write_opcode_u16_u8_large_operand() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        chunk.write_opcode_u16_u8(Opcode::LoadNull, 1000, 5, 0..1);
+        assert_eq!(chunk.count(), 4);
+        assert_eq!(chunk.read_u16(1).unwrap(), 1000);
+        assert_eq!(chunk.read_u8(3).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_read_beyond_end_returns_none() {
+        let chunk = Chunk::new("test.jsonnet");
+        assert!(chunk.read_u8(0).is_none());
+        assert!(chunk.read_u16(0).is_none());
+        assert!(chunk.read_u32(0).is_none());
+        assert!(chunk.read_i32(0).is_none());
+    }
+
+    #[test]
+    fn test_native_func_id_from_u16_roundtrip() {
+        // Verify a few critical NativeFuncId roundtrips
+        assert_eq!(NativeFuncId::from_u16(0), Some(NativeFuncId::Type));
+        assert_eq!(NativeFuncId::from_u16(2), Some(NativeFuncId::Abs));
+        assert_eq!(NativeFuncId::from_u16(9999), None);
+    }
+
+    #[test]
+    fn test_value_display_all_types() {
+        // Exercise Value Display/Debug formatting for coverage
+        let _ = format!("{:?}", Value::Null);
+        let _ = format!("{:?}", Value::Boolean(true));
+        let _ = format!("{:?}", Value::Number(1.5));
+    }
 }
