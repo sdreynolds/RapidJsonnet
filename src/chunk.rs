@@ -2600,4 +2600,326 @@ mod tests {
         let _ = format!("{:?}", Value::Boolean(true));
         let _ = format!("{:?}", Value::Number(1.5));
     }
+
+    #[test]
+    fn test_native_func_id_from_u16_all() {
+        // Exercise from_u16 for all defined values to cover match arms
+        for i in 0u16..=163 {
+            let _ = NativeFuncId::from_u16(i);
+        }
+        assert_eq!(NativeFuncId::from_u16(164), None);
+    }
+
+    #[test]
+    fn test_native_func_id_arity_all() {
+        // Call arity() on every variant to cover all match arms
+        for i in 0u16..=163 {
+            if let Some(id) = NativeFuncId::from_u16(i) {
+                let _ = id.arity();
+            }
+        }
+    }
+
+    #[test]
+    fn test_native_func_id_param_names_all() {
+        // Call param_names() on every variant to cover all match arms
+        for i in 0u16..=163 {
+            if let Some(id) = NativeFuncId::from_u16(i) {
+                let _ = id.param_names();
+            }
+        }
+    }
+
+    #[test]
+    fn test_native_func_id_name_all() {
+        // Call name() on every variant to cover all match arms
+        for i in 0u16..=163 {
+            if let Some(id) = NativeFuncId::from_u16(i) {
+                let _ = id.name();
+            }
+        }
+    }
+
+    #[test]
+    fn test_native_func_id_from_name_all() {
+        // Call from_name() for all canonical names to cover all match arms
+        let names = [
+            "type",
+            "length",
+            "abs",
+            "codepoint",
+            "char",
+            "makeArray",
+            "toString",
+            "floor",
+            "ceil",
+            "round",
+            "min",
+            "max",
+            "sign",
+            "isArray",
+            "isBoolean",
+            "isNumber",
+            "isObject",
+            "isString",
+            "isNull",
+            "isFunction",
+            "objectFields",
+            "objectHas",
+            "objectValues",
+            "range",
+            "parseInt",
+            "parseOctal",
+            "parseHex",
+            "asciiUpper",
+            "asciiLower",
+            "substr",
+            "split",
+            "join",
+            "lines",
+            "stringChars",
+            "flattenArrays",
+            "reverse",
+            "member",
+            "count",
+            "find",
+            "clamp",
+            "startsWith",
+            "endsWith",
+            "findSubstr",
+            "strReplace",
+            "isEmpty",
+            "all",
+            "any",
+            "sum",
+            "assertEqual",
+            "format",
+            "splitLimit",
+            "repeat",
+            "slice",
+            "get",
+            "objectHasAll",
+            "objectFieldsAll",
+            "encodeUTF8",
+            "decodeUTF8",
+            "sort",
+            "uniq",
+            "splitLimitR",
+            "stripChars",
+            "lstripChars",
+            "rstripChars",
+            "trim",
+            "objectKeysValues",
+            "avg",
+            "remove",
+            "base64",
+            "base64DecodeBytes",
+            "escapeStringJson",
+            "escapeStringXml",
+            "escapeStringBash",
+            "parseFloat",
+            "pow",
+            "sqrt",
+            "exp",
+            "log",
+            "isEven",
+            "isOdd",
+            "contains",
+            "objectValuesAll",
+            "sin",
+            "cos",
+            "tan",
+            "log2",
+            "log10",
+            "xor",
+            "xnor",
+            "objectKeysValuesAll",
+            "asin",
+            "acos",
+            "atan",
+            "atan2",
+            "isInteger",
+            "isDecimal",
+            "objectRemoveKey",
+            "flattenDeepArray",
+            "deg2rad",
+            "rad2deg",
+            "hypot",
+            "removeAt",
+            "escapeStringDollars",
+            "equalsIgnoreCase",
+            "trace",
+            "base64Decode",
+            "manifestJsonEx",
+            "manifestJson",
+            "manifestJsonMinified",
+            "prune",
+            "minArray",
+            "maxArray",
+            "deepJoin",
+            "map",
+            "filter",
+            "foldl",
+            "flatMap",
+            "mergePatch",
+            "parseJson",
+            "mapWithIndex",
+            "foldr",
+            "mapWithKey",
+            "filterMap",
+            "set",
+            "setUnion",
+            "setInter",
+            "setDiff",
+            "setMember",
+            "manifestIni",
+            "manifestPython",
+            "manifestPythonVars",
+            "mantissa",
+            "exponent",
+            "md5",
+            "manifestYamlDoc",
+            "manifestYamlStream",
+            "manifestTomlEx",
+            "sha256",
+            "sha1",
+            "parseYaml",
+            "manifestXmlJsonml",
+            "sha512",
+            "sha3",
+            "extVar",
+            "groupBy",
+            "mapKeys",
+            "filterObject",
+            "gcd",
+            "lcm",
+            "indent",
+            "objectFlatten",
+            "chunk",
+            "zip",
+            "unzip",
+            "objectFromPairs",
+            "pick",
+            "omit",
+            "sortBy",
+            "countBy",
+            "uniqBy",
+            "toPairs",
+            "minBy",
+            "maxBy",
+            "product",
+        ];
+        for name in &names {
+            let _ = NativeFuncId::from_name(name);
+        }
+        assert_eq!(NativeFuncId::from_name("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_opcode_from_u8_all() {
+        // Cover all Opcode::from_u8 match arms including newer ones
+        let known_opcodes = [
+            0u8, 1, 2, 3, 4, 5, 6, 10, 11, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 30, 31, 32,
+            33, 34, 40, 41, 42, 43, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65,
+            67, 70, 71, 72, 73, 80, 81, 82, 83, 84, 90, 91, 92, 93, 100, 101, 102, 103, 104, 105,
+            106, 107, 108,
+        ];
+        for &op in &known_opcodes {
+            assert!(
+                Opcode::from_u8(op).is_some(),
+                "Opcode {} should be valid",
+                op
+            );
+        }
+        assert_eq!(Opcode::from_u8(7), None);
+        assert_eq!(Opcode::from_u8(200), None);
+    }
+
+    #[test]
+    fn test_value_type_name_all() {
+        // Cover all Value::type_name() match arms
+        assert_eq!(Value::Null.type_name(), "null");
+        assert_eq!(Value::Boolean(true).type_name(), "boolean");
+        assert_eq!(Value::Number(1.0).type_name(), "number");
+        assert_eq!(Value::Uninitialized.type_name(), "uninitialized");
+    }
+
+    #[test]
+    fn test_value_display_all() {
+        // Exercise Display for all Value variants
+        assert_eq!(format!("{}", Value::Null), "null");
+        assert_eq!(format!("{}", Value::Boolean(true)), "true");
+        assert_eq!(format!("{}", Value::Boolean(false)), "false");
+        assert_eq!(format!("{}", Value::Number(f64::NAN)), "NaN");
+        assert_eq!(format!("{}", Value::Number(f64::INFINITY)), "Infinity");
+        assert_eq!(format!("{}", Value::Number(f64::NEG_INFINITY)), "-Infinity");
+        assert_eq!(format!("{}", Value::Number(42.0)), "42");
+        assert_eq!(format!("{}", Value::Uninitialized), "Uninitialized");
+        let _ = format!("{}", Value::NativeFunction(NativeFuncId::Abs));
+    }
+
+    #[test]
+    fn test_value_hash_all_variants() {
+        use std::collections::HashMap;
+        // Exercise Hash for all variants
+        let mut map: HashMap<Value, i32> = HashMap::new();
+        map.insert(Value::Null, 1);
+        map.insert(Value::Boolean(true), 2);
+        map.insert(Value::Boolean(false), 3);
+        map.insert(Value::Number(1.0), 4);
+        map.insert(Value::Number(f64::NAN), 5);
+        map.insert(Value::Uninitialized, 6);
+        map.insert(Value::NativeFunction(NativeFuncId::Abs), 7);
+        assert_eq!(map[&Value::Null], 1);
+        assert_eq!(map[&Value::Uninitialized], 6);
+    }
+
+    // Gap-fill: NativeFuncId::all_with_names() — lines 1068-1237
+
+    #[test]
+    fn test_native_func_id_all_with_names() {
+        let pairs = NativeFuncId::all_with_names();
+        assert!(!pairs.is_empty());
+        assert!(pairs.iter().any(|(name, _)| *name == "type"));
+        assert!(pairs.iter().any(|(name, _)| *name == "abs"));
+        assert!(pairs.iter().any(|(name, _)| *name == "length"));
+        assert!(pairs.iter().any(|(name, _)| *name == "format"));
+        assert!(pairs.iter().any(|(name, _)| *name == "trace"));
+    }
+
+    // Gap-fill: debug_compilation() opcode branches — lines 1900-2044
+
+    #[test]
+    fn test_debug_compilation_all_opcode_branches() {
+        let mut chunk = Chunk::new("test.jsonnet");
+        // Single-byte opcodes (no operands — produce the 1-byte label branch)
+        chunk.write_opcode(Opcode::LoadNull, 0..1);
+        chunk.write_opcode(Opcode::LoadTrue, 1..2);
+        chunk.write_opcode(Opcode::LoadFalse, 2..3);
+        chunk.write_opcode(Opcode::Pop, 3..4);
+        chunk.write_opcode(Opcode::Return, 4..5);
+        chunk.write_opcode(Opcode::Add, 5..6);
+        chunk.write_opcode(Opcode::Sub, 6..7);
+        chunk.write_opcode(Opcode::Mul, 7..8);
+        chunk.write_opcode(Opcode::Div, 8..9);
+        chunk.write_opcode(Opcode::Neg, 9..10);
+        chunk.write_opcode(Opcode::Not, 10..11);
+        // u16-operand opcodes (3-byte instructions)
+        chunk.write_opcode_u16(Opcode::LoadConst, 0, 11..12);
+        chunk.write_opcode_u16(Opcode::LoadVar, 0, 12..13);
+        chunk.write_opcode_u16(Opcode::CreateObject, 0, 13..14);
+        chunk.write_opcode_u16(Opcode::CreateArray, 0, 14..15);
+        // u8-operand opcodes (2-byte instructions)
+        chunk.write_opcode_u8(Opcode::ObjectInsert, 0, 15..16);
+        chunk.write_opcode_u8(Opcode::LocalScope, 2, 16..17);
+        // i32-operand opcodes — Jump family (5-byte instructions)
+        chunk.write_opcode_i32(Opcode::Jump, 0, 17..18);
+        chunk.write_opcode_i32(Opcode::JumpIfFalse, 0, 18..19);
+        chunk.write_opcode_i32(Opcode::JumpIfTrue, 0, 19..20);
+        // Import opcodes (u16 operand, produce the Import/ImportStr/ImportBin label branch)
+        chunk.write_opcode_u16(Opcode::Import, 0, 20..21);
+        chunk.write_opcode_u16(Opcode::ImportStr, 0, 21..22);
+        chunk.write_opcode_u16(Opcode::ImportBin, 0, 22..23);
+        let _report = chunk.debug_compilation();
+    }
 }

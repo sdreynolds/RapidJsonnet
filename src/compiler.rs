@@ -4735,4 +4735,168 @@ mod tests {
         let compiler = Compiler::new(&mut scanner, "test.jsonnet");
         assert!(compiler.compile(&mut mm).is_ok());
     }
+
+    fn compile_source_ok(source: &str) {
+        let mut scanner = scanner::Scanner::new(source, "test.jsonnet");
+        let mut mm = memory_manager::MemoryManager::new();
+        let compiler = Compiler::new(&mut scanner, "test.jsonnet");
+        compiler
+            .compile(&mut mm)
+            .unwrap_or_else(|e| panic!("expected compile ok but got: {}", e.message));
+    }
+
+    // Gap-fill tests for uncovered compiler.rs paths
+
+    #[test]
+    fn test_object_with_assert_compiles() {
+        compile_source_ok("{x: 1, assert self.x == 1}");
+    }
+
+    #[test]
+    fn test_object_with_assert_and_msg_compiles() {
+        compile_source_ok(r#"{x: 1, assert self.x == 1 : "x must be 1"}"#);
+    }
+
+    #[test]
+    fn test_object_with_local_field_compiles() {
+        compile_source_ok("{local n = 5, x: n + 1}");
+    }
+
+    #[test]
+    fn test_object_with_local_trailing_comma_compiles() {
+        compile_source_ok("{local n = 5, x: n + 1,}");
+    }
+
+    #[test]
+    fn test_in_operator_compiles() {
+        compile_source_ok(r#""a" in {a: 1}"#);
+    }
+
+    #[test]
+    fn test_super_has_field_compiles() {
+        compile_source_ok("local b = {x: 1}; (b + {y: 'x' in super}).y");
+    }
+
+    #[test]
+    fn test_super_bracket_index_compiles() {
+        compile_source_ok(r#"local b = {x: 1}; (b + {y: super["x"]}).y"#);
+    }
+
+    #[test]
+    fn test_unary_plus_compiles() {
+        compile_source_ok("+5");
+    }
+
+    #[test]
+    fn test_bitnot_compiles() {
+        compile_source_ok("~5");
+    }
+
+    #[test]
+    fn test_string_key_field_compiles() {
+        compile_source_ok(r#"{"hello world": 42}"#);
+    }
+
+    #[test]
+    fn test_computed_field_name_compiles() {
+        compile_source_ok(r#"local k = "x"; {[k]: 1}"#);
+    }
+
+    #[test]
+    fn test_import_non_string_error() {
+        let msg = compile_source_err("import 42");
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn test_importstr_non_string_error() {
+        let msg = compile_source_err("importstr 42");
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn test_importbin_non_string_error() {
+        let msg = compile_source_err("importbin 42");
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn test_super_dot_missing_name_error() {
+        let msg = compile_source_err("local b = {x: 1}; (b + {y: super.}).y");
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn test_named_arg_call_compiles() {
+        compile_source_ok("std.substr('hello', from=1, len=3)");
+    }
+
+    #[test]
+    fn test_object_field_force_visible_compiles() {
+        compile_source_ok("{a::: 1}");
+    }
+
+    #[test]
+    fn test_object_assert_with_comma_after_compiles() {
+        compile_source_ok("{assert true, x: 1}");
+    }
+
+    #[test]
+    fn test_object_assert_trailing_brace_compiles() {
+        compile_source_ok("{x: 1, assert true}");
+    }
+
+    #[test]
+    fn test_too_many_constants_error_skipped() {
+        // This would require >65535 constants to trigger; skip it but we document it
+        // compile_source_err is not practical for this - just validate normal compilation works
+        compile_source_ok("1 + 2");
+    }
+
+    #[test]
+    fn test_slice_double_colon_compiles() {
+        compile_source_ok("[1,2,3,4,5][::2]");
+    }
+
+    #[test]
+    fn test_slice_with_both_ends_and_step_compiles() {
+        compile_source_ok("[1,2,3,4,5][1:4:2]");
+    }
+
+    #[test]
+    fn test_object_comprehension_with_filter_compiles() {
+        compile_source_ok(r#"{[k]: 1 for k in ["a","b","c"] if k != "b"}"#);
+    }
+
+    #[test]
+    fn test_new_from_file_nonexistent_error() {
+        let result = Compiler::new_from_file("nonexistent_test_file_xyz.jsonnet");
+        assert!(result.is_err());
+    }
+
+    // Gap-fill: add_upvalue / resolve_upvalue across nested closure scopes
+
+    fn compile_nested_closure(source: &str) {
+        let mut scanner = Scanner::new(source, "test.jsonnet");
+        let compiler = Compiler::new(&mut scanner, "test.jsonnet");
+        let mut mm = MemoryManager::new();
+        let chunk = compiler.compile(&mut mm).expect("compile failed");
+        assert!(!chunk.is_empty());
+    }
+
+    #[test]
+    fn test_nested_closure_upvalue_resolution() {
+        // A closure inside another closure — forces resolve_upvalue to recurse into enclosing scope
+        compile_nested_closure(
+            "local outer(x) = local inner(y) = x + y; inner; outer(1)(2)",
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_upvalue() {
+        // Three levels of nesting to exercise the chained upvalue path
+        compile_nested_closure(
+            "local f(a) = local g(b) = local h(c) = a + b + c; h; g; f(1)(2)(3)",
+        );
+    }
 }
