@@ -12064,13 +12064,17 @@ mod tests {
         let mut scanner_inst = scanner::Scanner::new(source, "test.jsonnet");
         let mut memory_manager = MemoryManager::new();
         let compiler_inst = compiler::Compiler::new(&mut scanner_inst, "test.jsonnet");
-        let chunk = compiler_inst.compile(&mut memory_manager).expect("compile failed");
+        let chunk = compiler_inst
+            .compile(&mut memory_manager)
+            .expect("compile failed");
         let mut vm = VirtualMachine::new(chunk, memory_manager);
         vm.interpret()
     }
 
     fn assert_bool(source: &str) {
-        match run_jsonnet(source).unwrap_or_else(|e| panic!("expected success for: {}\n  error: {:?}", source, e)) {
+        match run_jsonnet(source)
+            .unwrap_or_else(|e| panic!("expected success for: {}\n  error: {:?}", source, e))
+        {
             Value::Boolean(true) => {}
             other => panic!("expected true, got {:?} for: {}", other, source),
         }
@@ -12721,7 +12725,7 @@ mod tests {
     fn test_value_to_json_object_pipeline() {
         // Run a Jsonnet expression that returns an Object value
         match run_jsonnet("{a: 1, b: 2}") {
-            Ok(Value::Object(_)) => {},
+            Ok(Value::Object(_)) => {}
             other => panic!("expected Object, got {:?}", other),
         }
     }
@@ -12745,6 +12749,696 @@ mod tests {
     #[test]
     fn test_std_group_by_pipeline() {
         // groupBy(arr, keyF): keyF maps each element to a string key
-        assert_bool("std.groupBy([1, 2, 3], function(x) if x < 3 then 'small' else 'big') == {small: [1, 2], big: [3]}");
+        assert_bool(
+            "std.groupBy([1, 2, 3], function(x) if x < 3 then 'small' else 'big') == {small: [1, 2], big: [3]}",
+        );
+    }
+
+    // --- Gap-fill tests for manifest functions ---
+
+    #[test]
+    fn test_std_manifest_json_minified_pipeline() {
+        assert_bool(r#"std.manifestJsonMinified({a: 1, b: 2}) == '{"a":1,"b":2}'"#);
+    }
+
+    #[test]
+    fn test_std_manifest_json_ex_pipeline() {
+        assert_bool(r#"std.manifestJsonEx({a: 1}, "  ") == "{\n  \"a\": 1\n}""#);
+    }
+
+    #[test]
+    fn test_std_manifest_yaml_doc_simple() {
+        // manifestYamlDoc with a simple scalar
+        assert_bool(r#"std.manifestYamlDoc("hello", false, true) == "hello""#);
+    }
+
+    #[test]
+    fn test_std_manifest_yaml_doc_bool() {
+        assert_bool(r#"std.manifestYamlDoc(true, false, true) == "true""#);
+    }
+
+    #[test]
+    fn test_std_manifest_yaml_doc_null() {
+        assert_bool(r#"std.manifestYamlDoc(null, false, true) == "null""#);
+    }
+
+    #[test]
+    fn test_std_manifest_yaml_doc_number() {
+        assert_bool(r#"std.manifestYamlDoc(42, false, true) == "42""#);
+    }
+
+    #[test]
+    fn test_std_manifest_yaml_doc_array() {
+        let result =
+            run_jsonnet(r#"std.manifestYamlDoc([1, 2, 3], false, true)"#).expect("compile/run ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_manifest_yaml_doc_object() {
+        let result =
+            run_jsonnet(r#"std.manifestYamlDoc({a: 1}, false, true)"#).expect("compile/run ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_manifest_yaml_stream_basic() {
+        let result = run_jsonnet(r#"std.manifestYamlStream([{a: 1}, {b: 2}], false, true, true)"#)
+            .expect("compile/run ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_manifest_ini_basic() {
+        let result =
+            run_jsonnet(r#"std.manifestIni({main: {key: "value"}, sections: {sec1: {k: "v"}}})"#)
+                .expect("compile/run ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_manifest_python_basic() {
+        let result =
+            run_jsonnet(r#"std.manifestPython({key: "value", num: 42})"#).expect("compile/run ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_manifest_python_vars_basic() {
+        let result =
+            run_jsonnet(r#"std.manifestPythonVars({x: 1, y: "hello"})"#).expect("compile/run ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_manifest_toml_ex_basic() {
+        let result = run_jsonnet(r#"std.manifestTomlEx({name: "test", count: 42}, "  ")"#)
+            .expect("compile/run ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_manifest_xml_jsonml_basic() {
+        let result = run_jsonnet(r#"std.manifestXmlJsonml(["root", ["child", "content"]])"#)
+            .expect("compile/run ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    // --- minArray / maxArray ---
+
+    #[test]
+    fn test_std_min_array_basic() {
+        assert_bool("std.minArray([3, 1, 2]) == 1");
+    }
+
+    #[test]
+    fn test_std_max_array_basic() {
+        assert_bool("std.maxArray([3, 1, 2]) == 3");
+    }
+
+    #[test]
+    fn test_std_min_array_with_key_f() {
+        assert_bool("std.minArray([[3,'a'], [1,'b'], [2,'c']], function(x) x[0]) == [1,'b']");
+    }
+
+    #[test]
+    fn test_std_max_array_with_key_f() {
+        assert_bool("std.maxArray([[3,'a'], [1,'b'], [2,'c']], function(x) x[0]) == [3,'a']");
+    }
+
+    #[test]
+    fn test_std_min_array_empty_with_on_empty() {
+        assert_bool("std.minArray([], null, 99) == 99");
+    }
+
+    #[test]
+    fn test_std_max_array_empty_error() {
+        assert_err("std.maxArray([])");
+    }
+
+    // --- VM public API tests ---
+
+    #[test]
+    fn test_vm_set_jpaths() {
+        let chunk = create_test_chunk();
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        vm.set_jpaths(vec!["/tmp".to_string()]);
+    }
+
+    #[test]
+    fn test_vm_enable_take_coverage() {
+        let chunk = create_test_chunk();
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        vm.enable_coverage();
+        let cov = vm.take_coverage();
+        assert!(cov.is_some());
+        let cov2 = vm.take_coverage();
+        assert!(cov2.is_none());
+    }
+
+    #[test]
+    fn test_vm_memory_manager_ref() {
+        let chunk = create_test_chunk();
+        let memory_manager = MemoryManager::new();
+        let vm = VirtualMachine::new(chunk, memory_manager);
+        let _mm = vm.memory_manager();
+    }
+
+    #[test]
+    fn test_vm_push_pop_external_roots() {
+        let chunk = create_test_chunk();
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        vm.push_external_roots(vec![Value::Null, Value::Boolean(true)]);
+        vm.pop_external_roots();
+    }
+
+    #[test]
+    fn test_vm_set_ext_var_string() {
+        let mut chunk = create_test_chunk();
+        chunk.write_opcode(Opcode::LoadNull, 0..1);
+        chunk.write_opcode(Opcode::Return, 1..2);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        vm.set_ext_var_string("myvar", "hello");
+    }
+
+    #[test]
+    fn test_vm_set_ext_var_code_json() {
+        let mut chunk = create_test_chunk();
+        chunk.write_opcode(Opcode::LoadNull, 0..1);
+        chunk.write_opcode(Opcode::Return, 1..2);
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        vm.set_ext_var_code("num", "42").unwrap();
+    }
+
+    // --- Additional language feature tests ---
+
+    #[test]
+    fn test_in_operator_basic() {
+        assert_bool(r#"'a' in {a: 1, b: 2}"#);
+        assert_bool(r#"!('c' in {a: 1, b: 2})"#);
+    }
+
+    #[test]
+    fn test_in_operator_error() {
+        assert_err(r#"1 in {a: 1}"#);
+    }
+
+    #[test]
+    fn test_super_field_access_in_object() {
+        assert_bool("local base = {x: 10}; (base + {y: super.x}).y == 10");
+    }
+
+    #[test]
+    fn test_object_with_assert() {
+        assert_bool("{x: 1, assert self.x == 1}.x == 1");
+    }
+
+    #[test]
+    fn test_object_local_field() {
+        assert_bool("{local n = 5, x: n + 1}.x == 6");
+    }
+
+    #[test]
+    fn test_std_gcd_pipeline() {
+        assert_bool("std.gcd(12, 8) == 4");
+    }
+
+    #[test]
+    fn test_std_lcm_pipeline() {
+        assert_bool("std.lcm(4, 6) == 12");
+    }
+
+    #[test]
+    fn test_std_indent_pipeline() {
+        assert_bool(r#"std.indent("line1\nline2", "  ") == "  line1\n  line2""#);
+    }
+
+    #[test]
+    fn test_std_xor_pipeline() {
+        assert_bool("std.xor(true, false)");
+        assert_bool("!std.xor(true, true)");
+    }
+
+    #[test]
+    fn test_std_xnor_pipeline() {
+        assert_bool("std.xnor(true, true)");
+        assert_bool("!std.xnor(true, false)");
+    }
+
+    #[test]
+    fn test_std_log2_pipeline() {
+        assert_bool("std.log2(8) == 3");
+    }
+
+    #[test]
+    fn test_std_log10_pipeline() {
+        assert_bool("std.log10(1000) == 3");
+    }
+
+    #[test]
+    fn test_std_object_keys_values_pipeline() {
+        let result = run_jsonnet(r#"std.objectKeysValues({a: 1, b: 2})"#).expect("ok");
+        match result {
+            Value::Array(_) => {}
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_object_keys_values_all_pipeline() {
+        let result = run_jsonnet(r#"std.objectKeysValuesAll({a:: 1, b: 2})"#).expect("ok");
+        match result {
+            Value::Array(_) => {}
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_equals_ignore_case_pipeline() {
+        assert_bool(r#"std.equalsIgnoreCase("Hello", "hello")"#);
+    }
+
+    #[test]
+    fn test_std_flatten_deep_array_pipeline() {
+        assert_bool("std.flattenDeepArray([1, [2, [3, 4]]]) == [1, 2, 3, 4]");
+    }
+
+    #[test]
+    fn test_std_is_integer_pipeline() {
+        assert_bool("std.isInteger(5)");
+        assert_bool("!std.isInteger(5.5)");
+    }
+
+    #[test]
+    fn test_std_is_decimal_pipeline() {
+        assert_bool("std.isDecimal(5.5)");
+        assert_bool("!std.isDecimal(5)");
+    }
+
+    #[test]
+    fn test_std_object_remove_key_pipeline() {
+        assert_bool(r#"std.objectRemoveKey({a: 1, b: 2}, "a") == {b: 2}"#);
+    }
+
+    #[test]
+    fn test_std_mantissa_exponent_pipeline() {
+        // mantissa/exponent roundtrip: n = mantissa * 2^exponent
+        assert_bool("std.mantissa(8) == 0.5 && std.exponent(8) == 4");
+    }
+
+    #[test]
+    fn test_std_sha256_pipeline() {
+        let result = run_jsonnet(r#"std.sha256("hello")"#).expect("ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_sha1_pipeline() {
+        let result = run_jsonnet(r#"std.sha1("hello")"#).expect("ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_sha512_pipeline() {
+        let result = run_jsonnet(r#"std.sha512("hello")"#).expect("ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_sha3_pipeline() {
+        let result = run_jsonnet(r#"std.sha3("hello")"#).expect("ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_parse_yaml_pipeline() {
+        let result = run_jsonnet(r#"std.parseYaml("key: value")"#).expect("ok");
+        match result {
+            Value::Object(_) => {}
+            other => panic!("expected object, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_is_even_odd_pipeline() {
+        assert_bool("std.isEven(4)");
+        assert_bool("!std.isEven(3)");
+        assert_bool("std.isOdd(3)");
+        assert_bool("!std.isOdd(4)");
+    }
+
+    #[test]
+    fn test_std_contains_pipeline() {
+        assert_bool("std.contains([1, 2, 3], 2)");
+        assert_bool("!std.contains([1, 2, 3], 5)");
+    }
+
+    #[test]
+    fn test_std_split_limit_r_pipeline() {
+        assert_bool(r#"std.splitLimitR("a:b:c", ":", 1) == ["a:b", "c"]"#);
+    }
+
+    #[test]
+    fn test_std_strip_chars_pipeline() {
+        assert_bool(r#"std.stripChars("  hello  ", " ") == "hello""#);
+    }
+
+    #[test]
+    fn test_std_lstrip_chars_pipeline() {
+        assert_bool(r#"std.lstripChars("  hello", " ") == "hello""#);
+    }
+
+    #[test]
+    fn test_std_rstrip_chars_pipeline() {
+        assert_bool(r#"std.rstripChars("hello  ", " ") == "hello""#);
+    }
+
+    #[test]
+    fn test_std_avg_pipeline() {
+        assert_bool("std.avg([1, 2, 3, 4]) == 2.5");
+    }
+
+    #[test]
+    fn test_std_escape_string_dollars_pipeline() {
+        assert_bool(r#"std.escapeStringDollars("hi $world") == "hi $$world""#);
+    }
+
+    #[test]
+    fn test_std_md5_pipeline() {
+        let result = run_jsonnet(r#"std.md5("hello")"#).expect("ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    // test_std_object_from_pairs_pipeline omitted — std.objectFromPairs not yet implemented
+
+    #[test]
+    fn test_std_to_pairs_pipeline() {
+        let result = run_jsonnet(r#"std.toPairs({a: 1, b: 2})"#).expect("ok");
+        match result {
+            Value::Array(_) => {}
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_zip_pipeline() {
+        assert_bool("std.zip([1, 2], [3, 4]) == [[1, 3], [2, 4]]");
+    }
+
+    #[test]
+    fn test_std_unzip_pipeline() {
+        let result = run_jsonnet("std.unzip([[1, 3], [2, 4]])").expect("ok");
+        match result {
+            Value::Array(_) => {}
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_chunk_pipeline() {
+        assert_bool("std.chunk([1, 2, 3, 4], 2) == [[1, 2], [3, 4]]");
+    }
+
+    #[test]
+    fn test_std_pick_pipeline() {
+        assert_bool(r#"std.pick({a: 1, b: 2, c: 3}, ["a", "c"]) == {a: 1, c: 3}"#);
+    }
+
+    #[test]
+    fn test_std_omit_pipeline() {
+        assert_bool(r#"std.omit({a: 1, b: 2, c: 3}, ["b"]) == {a: 1, c: 3}"#);
+    }
+
+    #[test]
+    fn test_std_sort_by_pipeline() {
+        assert_bool("std.sortBy([3, 1, 2], function(x) x) == [1, 2, 3]");
+    }
+
+    #[test]
+    fn test_std_count_by_pipeline() {
+        let result =
+            run_jsonnet("std.countBy([1, 2, 3, 2, 1], function(x) std.toString(x))").expect("ok");
+        match result {
+            Value::Object(_) => {}
+            other => panic!("expected object, got {:?}", other),
+        }
+    }
+
+    // test_std_uniq_by_pipeline omitted — std.uniqBy not yet implemented
+
+    #[test]
+    fn test_std_min_by_pipeline() {
+        assert_bool("std.minBy([{v:3}, {v:1}, {v:2}], function(x) x.v) == {v:1}");
+    }
+
+    #[test]
+    fn test_std_max_by_pipeline() {
+        assert_bool("std.maxBy([{v:3}, {v:1}, {v:2}], function(x) x.v) == {v:3}");
+    }
+
+    // test_std_product_pipeline omitted — std.product not yet implemented
+
+    // test_std_object_flatten_pipeline omitted — std.objectFlatten not yet implemented
+
+    #[test]
+    fn test_std_map_with_key_pipeline() {
+        let result = run_jsonnet(
+            r#"std.mapWithKey(function(k, v) k + "=" + std.toString(v), {a: 1, b: 2})"#,
+        )
+        .expect("ok");
+        match result {
+            Value::Object(_) => {}
+            other => panic!("expected object, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_map_keys_pipeline() {
+        assert_bool(r#"std.mapKeys(function(k) "prefix_" + k, {a: 1}) == {prefix_a: 1}"#);
+    }
+
+    #[test]
+    fn test_std_filter_map_pipeline() {
+        assert_bool("std.filterMap(function(x) x > 1, function(x) x * 10, [1, 2, 3]) == [20, 30]");
+    }
+
+    #[test]
+    fn test_std_merge_patch_pipeline() {
+        assert_bool(r#"std.mergePatch({a: 1, b: 2}, {b: 99, c: 3}) == {a: 1, b: 99, c: 3}"#);
+    }
+
+    #[test]
+    fn test_std_parse_json_pipeline() {
+        assert_bool(r#"std.parseJson('{"a": 1}').a == 1"#);
+    }
+
+    #[test]
+    fn test_std_prune_pipeline() {
+        assert_bool(r#"std.prune({a: 1, b: null, c: []}) == {a: 1}"#);
+    }
+
+    #[test]
+    fn test_std_object_has_all_pipeline() {
+        assert_bool(r#"std.objectHasAll({a:: 1, b: 2}, "a")"#);
+    }
+
+    #[test]
+    fn test_function_length_pipeline() {
+        // std.length of a function returns its arity
+        assert_bool("std.length(function(x) x) == 1");
+        assert_bool("std.length(function(x, y) x + y) == 2");
+    }
+
+    #[test]
+    fn test_std_to_string_object_pipeline() {
+        // std.toString on an object uses value_to_string_for_concat
+        let result = run_jsonnet(r#"std.toString({a: 1})"#).expect("ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_to_string_array_pipeline() {
+        let result = run_jsonnet(r#"std.toString([1, 2, 3])"#).expect("ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_std_atan2_pipeline() {
+        assert_bool("std.atan2(0, 1) == 0");
+    }
+
+    #[test]
+    fn test_std_decode_utf8_pipeline() {
+        assert_bool(r#"std.decodeUTF8([104, 101, 108, 108, 111]) == "hello""#);
+    }
+
+    #[test]
+    fn test_std_encode_utf8_pipeline() {
+        assert_bool(r#"std.encodeUTF8("hello")[0] == 104"#);
+    }
+
+    #[test]
+    fn test_std_uniq_pipeline() {
+        assert_bool("std.uniq([1, 1, 2, 2, 3]) == [1, 2, 3]");
+    }
+
+    #[test]
+    fn test_import_str_expression() {
+        // importstr is handled by the compiler — just test it doesn't crash on compile error
+        // Use assert_err since we don't have actual files
+        assert_err(r#"importstr "nonexistent_file_xyz.txt""#);
+    }
+
+    #[test]
+    fn test_std_object_has_hidden_with_inc_hidden() {
+        // std.get with inc_hidden=true finds hidden fields
+        assert_bool(r#"std.get({a:: 1}, "a", null, true) == 1"#);
+    }
+
+    #[test]
+    fn test_nested_object_inheritance() {
+        assert_bool(
+            "local a = {x: 1}; local b = a + {y: 2}; local c = b + {z: 3}; c.x == 1 && c.y == 2 && c.z == 3",
+        );
+    }
+
+    #[test]
+    fn test_std_set_with_key_f() {
+        // set with keyF
+        assert_bool("std.set([3, 1, 2, 1], function(x) x) == [1, 2, 3]");
+    }
+
+    #[test]
+    fn test_std_set_union_with_key_f() {
+        assert_bool("std.setUnion([1, 2], [2, 3], function(x) x) == [1, 2, 3]");
+    }
+
+    #[test]
+    fn test_std_set_diff_with_key_f() {
+        assert_bool("std.setDiff([1, 2, 3], [2], function(x) x) == [1, 3]");
+    }
+
+    #[test]
+    fn test_std_set_member_with_key_f() {
+        assert_bool("std.setMember(2, [1, 2, 3], function(x) x)");
+    }
+
+    #[test]
+    fn test_std_set_inter_with_key_f() {
+        assert_bool("std.setInter([1, 2, 3], [2, 3, 4], function(x) x) == [2, 3]");
+    }
+
+    #[test]
+    fn test_std_sort_with_key_f() {
+        assert_bool("std.sort([3, 1, 2], function(x) x) == [1, 2, 3]");
+    }
+
+    #[test]
+    fn test_string_concat_pipeline() {
+        assert_bool(r#""hello" + " " + "world" == "hello world""#);
+    }
+
+    #[test]
+    fn test_bitwise_ops_pipeline() {
+        assert_bool("(3 & 5) == 1");
+        assert_bool("(3 | 5) == 7");
+        assert_bool("(3 ^ 5) == 6");
+        assert_bool("~0 == -1");
+        assert_bool("(1 << 3) == 8");
+        assert_bool("(8 >> 2) == 2");
+    }
+
+    #[test]
+    fn test_std_manifest_ini_no_sections() {
+        // manifestIni with only a main section
+        let result = run_jsonnet(r#"std.manifestIni({main: {a: "1"}})"#).expect("ok");
+        match result {
+            Value::String(_) => {}
+            other => panic!("expected string, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_object_field_hidden_force_visible() {
+        // Force-visible field (:::) can be seen in all contexts
+        assert_bool(r#"local b = {x:: 1}; (b + {x::: 2}).x == 2"#);
+    }
+
+    // test_std_object_flatten_deep omitted — std.objectFlatten not yet implemented
+
+    #[test]
+    fn test_std_parse_json_array() {
+        assert_bool(r#"std.parseJson("[1, 2, 3]")[0] == 1"#);
+    }
+
+    #[test]
+    fn test_std_parse_json_null() {
+        assert_bool(r#"std.parseJson("null") == null"#);
+    }
+
+    #[test]
+    fn test_assert_equal_objects_pass() {
+        assert_bool("std.assertEqual({a: 1}, {a: 1})");
+    }
+
+    #[test]
+    fn test_assert_equal_objects_fail() {
+        assert_err("std.assertEqual({a: 1}, {a: 2})");
+    }
+
+    #[test]
+    fn test_super_has_field_operator() {
+        // super.hasField equivalent through 'in'
+        assert_bool("local b = {x: 1}; (b + {y: 'x' in super}).y");
     }
 }

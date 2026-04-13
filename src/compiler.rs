@@ -4887,9 +4887,7 @@ mod tests {
     #[test]
     fn test_nested_closure_upvalue_resolution() {
         // A closure inside another closure — forces resolve_upvalue to recurse into enclosing scope
-        compile_nested_closure(
-            "local outer(x) = local inner(y) = x + y; inner; outer(1)(2)",
-        );
+        compile_nested_closure("local outer(x) = local inner(y) = x + y; inner; outer(1)(2)");
     }
 
     #[test]

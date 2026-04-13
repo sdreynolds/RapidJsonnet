@@ -6910,7 +6910,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_parse_yaml_wrong_type() {
         let mut mm = MemoryManager::new();
@@ -7155,8 +7154,7 @@ mod tests {
         let mut mm = MemoryManager::new();
         let s = mk_string(&mut mm, "ab");
         let n = Value::Number(3.0);
-        let result =
-            call_native(NativeFuncId::Repeat, &[s, n], &mut mm, span(), sid()).unwrap();
+        let result = call_native(NativeFuncId::Repeat, &[s, n], &mut mm, span(), sid()).unwrap();
         assert!(matches!(result, Value::String(_)));
     }
 
@@ -7165,8 +7163,7 @@ mod tests {
         let mut mm = MemoryManager::new();
         let arr = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0)]);
         let n = Value::Number(3.0);
-        let result =
-            call_native(NativeFuncId::Repeat, &[arr, n], &mut mm, span(), sid()).unwrap();
+        let result = call_native(NativeFuncId::Repeat, &[arr, n], &mut mm, span(), sid()).unwrap();
         assert!(matches!(result, Value::Array(_)));
     }
 
@@ -7197,8 +7194,7 @@ mod tests {
     fn test_encode_decode_utf8() {
         let mut mm = MemoryManager::new();
         let s = mk_string(&mut mm, "hello");
-        let encoded =
-            call_native(NativeFuncId::EncodeUTF8, &[s], &mut mm, span(), sid()).unwrap();
+        let encoded = call_native(NativeFuncId::EncodeUTF8, &[s], &mut mm, span(), sid()).unwrap();
         let decoded =
             call_native(NativeFuncId::DecodeUTF8, &[encoded], &mut mm, span(), sid()).unwrap();
         assert!(matches!(decoded, Value::String(_)));
@@ -7209,8 +7205,14 @@ mod tests {
         let mut mm = MemoryManager::new();
         let s = mk_string(&mut mm, "  hello  ");
         let chars = mk_string(&mut mm, " ");
-        let result =
-            call_native(NativeFuncId::StripChars, &[s, chars], &mut mm, span(), sid()).unwrap();
+        let result = call_native(
+            NativeFuncId::StripChars,
+            &[s, chars],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
         assert!(matches!(result, Value::String(_)));
     }
 
@@ -7219,8 +7221,14 @@ mod tests {
         let mut mm = MemoryManager::new();
         let s = mk_string(&mut mm, "  hello");
         let chars = mk_string(&mut mm, " ");
-        let result =
-            call_native(NativeFuncId::LstripChars, &[s, chars], &mut mm, span(), sid()).unwrap();
+        let result = call_native(
+            NativeFuncId::LstripChars,
+            &[s, chars],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
         assert!(matches!(result, Value::String(_)));
     }
 
@@ -7229,8 +7237,14 @@ mod tests {
         let mut mm = MemoryManager::new();
         let s = mk_string(&mut mm, "hello  ");
         let chars = mk_string(&mut mm, " ");
-        let result =
-            call_native(NativeFuncId::RstripChars, &[s, chars], &mut mm, span(), sid()).unwrap();
+        let result = call_native(
+            NativeFuncId::RstripChars,
+            &[s, chars],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
         assert!(matches!(result, Value::String(_)));
     }
 
@@ -7253,18 +7267,28 @@ mod tests {
     #[test]
     fn test_deg2rad_direct() {
         let mut mm = MemoryManager::new();
-        let result =
-            call_native(NativeFuncId::Deg2Rad, &[Value::Number(0.0)], &mut mm, span(), sid())
-                .unwrap();
+        let result = call_native(
+            NativeFuncId::Deg2Rad,
+            &[Value::Number(0.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
         assert_eq!(result, Value::Number(0.0));
     }
 
     #[test]
     fn test_rad2deg_direct() {
         let mut mm = MemoryManager::new();
-        let result =
-            call_native(NativeFuncId::Rad2Deg, &[Value::Number(0.0)], &mut mm, span(), sid())
-                .unwrap();
+        let result = call_native(
+            NativeFuncId::Rad2Deg,
+            &[Value::Number(0.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
         assert_eq!(result, Value::Number(0.0));
     }
 
@@ -7273,8 +7297,7 @@ mod tests {
         let mut mm = MemoryManager::new();
         let msg = mk_string(&mut mm, "test message");
         let val = Value::Number(42.0);
-        let result =
-            call_native(NativeFuncId::Trace, &[msg, val], &mut mm, span(), sid()).unwrap();
+        let result = call_native(NativeFuncId::Trace, &[msg, val], &mut mm, span(), sid()).unwrap();
         assert_eq!(result, Value::Number(42.0));
     }
 
@@ -7298,9 +7321,14 @@ mod tests {
         let s = mk_string(&mut mm, "a,b,c,d");
         let sep = mk_string(&mut mm, ",");
         let limit = Value::Number(2.0);
-        let result =
-            call_native(NativeFuncId::SplitLimit, &[s, sep, limit], &mut mm, span(), sid())
-                .unwrap();
+        let result = call_native(
+            NativeFuncId::SplitLimit,
+            &[s, sep, limit],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
         assert!(matches!(result, Value::Array(_)));
     }
 
@@ -7318,9 +7346,14 @@ mod tests {
         );
         let obj_idx = mm.allocate_object_with_properties(props).index;
         let obj_val = Value::Object(obj_idx);
-        let result =
-            call_native(NativeFuncId::ObjectKeysValues, &[obj_val], &mut mm, span(), sid())
-                .unwrap();
+        let result = call_native(
+            NativeFuncId::ObjectKeysValues,
+            &[obj_val],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
         assert!(matches!(result, Value::Array(_)));
     }
 }
