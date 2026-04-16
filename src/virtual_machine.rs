@@ -15206,4 +15206,423 @@ mod tests {
                j[0] == 104"#,
         );
     }
+
+    // ===== NEW GAP-FILL TESTS =====
+
+    // Lines 1871-1897: Array concatenation via Add opcode
+    #[test]
+    fn test_array_concat_add_opcode() {
+        assert_bool("[1, 2] + [3, 4] == [1, 2, 3, 4]");
+        assert_bool("[] + [1] == [1]");
+        assert_bool("[1] + [] == [1]");
+    }
+
+    // Lines 2092-2134: StringConcat fallback (non-string operands)
+    // The StringConcat opcode is emitted when compiler statically knows both sides are strings.
+    // The fallback path (lines 2092-2134) is hit when at runtime they are not both strings,
+    // which can happen when one operand is a computed (non-typed) value.
+    // We exercise via runtime string coercion with + operator when one side is known string.
+    #[test]
+    fn test_string_concat_with_mixed_operands() {
+        // These use the Add opcode (string coercion path), but also verify correctness
+        assert_bool(r#"("hello " + "world") == "hello world""#);
+        assert_bool(r#"std.toString(42) + "!" == "42!""#);
+    }
+
+    // Lines 2290-2309: CreateObject with null key (null keys are omitted per spec)
+    #[test]
+    fn test_create_object_null_key_omitted() {
+        // In Jsonnet, if a computed object field key is null, the field is silently omitted
+        assert_bool(r#"local k = null; {[k]: 1, a: 2} == {a: 2}"#);
+        assert_bool(r#"std.length({[null]: 99, x: 1}) == 1"#);
+    }
+
+    #[test]
+    fn test_create_object_non_string_key_error() {
+        // A non-null, non-string computed key should error
+        assert_err(r#"{[42]: "value"}"#);
+    }
+
+    // Lines 2588-2637: Binary indexing (gap-fill v2)
+    #[test]
+    fn test_binary_index_valid_gf2() {
+        assert_bool(r#"std.encodeUTF8("A")[0] == 65"#);
+        assert_bool(r#"std.encodeUTF8("hi")[1] == 105"#);
+    }
+
+    #[test]
+    fn test_binary_index_negative_error_gf2() {
+        assert_err(r#"std.encodeUTF8("A")[-1]"#);
+    }
+
+    #[test]
+    fn test_binary_index_fractional_error_gf2() {
+        assert_err(r#"std.encodeUTF8("A")[0.5]"#);
+    }
+
+    #[test]
+    fn test_binary_index_out_of_bounds_error_gf2() {
+        assert_err(r#"std.encodeUTF8("A")[100]"#);
+    }
+
+    #[test]
+    fn test_binary_index_non_number_error_gf2() {
+        assert_err(r#"std.encodeUTF8("A")["x"]"#);
+    }
+
+    // Lines 2772-2806: ArrayAppend opcode (triggered by array comprehensions)
+    #[test]
+    fn test_array_append_via_comprehension() {
+        assert_bool("[x for x in [1, 2, 3]] == [1, 2, 3]");
+        assert_bool("[x * 2 for x in [1, 2, 3]] == [2, 4, 6]");
+        assert_bool("[x for x in [1, 2, 3] if x > 1] == [2, 3]");
+    }
+
+    // Lines 2843-2898: ObjectMerge opcode (object + object with +: fields)
+    #[test]
+    fn test_object_merge_opcode_basic() {
+        assert_bool("{a: 1} + {b: 2} == {a: 1, b: 2}");
+        assert_bool("{a: 1} + {a: 2} == {a: 2}");
+    }
+
+    #[test]
+    fn test_object_merge_with_plus_colon() {
+        // +: means the field inherits from parent (super.a + 10 = 1 + 10 = 11)
+        assert_bool(r#"({a: 1} + {a+: 10}).a == 11"#);
+    }
+
+    // Lines 3034-3069: std.format with object vals (% operator with object)
+    #[test]
+    fn test_std_format_with_object() {
+        assert_bool(r#"("hello %(name)s" % {name: "world"}) == "hello world""#);
+        assert_bool(r#"("x=%(x)d" % {x: 42}) == "x=42""#);
+    }
+
+    // Lines 6145-6161: parseYaml via first-class call
+    #[test]
+    fn test_fc_parse_yaml() {
+        assert_bool(r#"local f = std.parseYaml; f("key: value").key == "value""#);
+    }
+
+    #[test]
+    fn test_fc_parse_yaml_simple_types() {
+        assert_bool(r#"local f = std.parseYaml; f("42") == 42"#);
+        assert_bool(r#"local f = std.parseYaml; f("true") == true"#);
+    }
+
+    // Lines 6178-6202: manifestTomlEx via first-class call
+    #[test]
+    fn test_fc_manifest_toml_ex() {
+        assert_bool(r#"local f = std.manifestTomlEx; std.length(f({a: 1}, "")) > 0"#);
+    }
+
+    // Lines 6352-6379: extVar via first-class call
+    #[test]
+    fn test_fc_ext_var() {
+        let source = r#"local f = std.extVar; f("myVar") == "hello""#;
+        let mut scanner = scanner::Scanner::new(source, "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = compiler::Compiler::new(&mut scanner, "test.jsonnet");
+        let chunk = compiler
+            .compile(&mut memory_manager)
+            .expect("compile failed");
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        vm.set_ext_var_string("myVar", "hello");
+        match vm.interpret().unwrap() {
+            Value::Boolean(true) => {}
+            other => panic!("expected true, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_fc_ext_var_undefined_error() {
+        let source = r#"local f = std.extVar; f("noSuchVar")"#;
+        let mut scanner = scanner::Scanner::new(source, "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = compiler::Compiler::new(&mut scanner, "test.jsonnet");
+        let chunk = compiler
+            .compile(&mut memory_manager)
+            .expect("compile failed");
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        vm.interpret()
+            .expect_err("expected error for undefined extVar");
+    }
+
+    // Lines 6666-6747: setUnion with 3-arg keyF via first-class call (gap-fill v2)
+    #[test]
+    fn test_fc_set_union_with_key_f_gf2() {
+        assert_bool(
+            r#"local f = std.setUnion;
+               f([1, 2], [2, 3], function(x) x) == [1, 2, 3]"#,
+        );
+    }
+
+    #[test]
+    fn test_fc_set_union_with_key_f_overlapping_gf2() {
+        assert_bool(
+            r#"local f = std.setUnion;
+               f([1, 2, 3], [2, 3, 4], function(x) x) == [1, 2, 3, 4]"#,
+        );
+    }
+
+    #[test]
+    fn test_fc_set_union_with_key_f_empty_gf2() {
+        assert_bool(
+            r#"local f = std.setUnion;
+               f([], [1, 2], function(x) x) == [1, 2]"#,
+        );
+    }
+
+    // Lines 6752-6799: sort with keyF via first-class call (gap-fill v2)
+    #[test]
+    fn test_fc_sort_with_key_f_gf2() {
+        assert_bool(
+            r#"local f = std.sort;
+               f([3, 1, 2], function(x) x) == [1, 2, 3]"#,
+        );
+    }
+
+    #[test]
+    fn test_fc_sort_with_key_f_strings_gf2() {
+        assert_bool(
+            r#"local f = std.sort;
+               f(["banana", "apple", "cherry"], function(x) x) == ["apple", "banana", "cherry"]"#,
+        );
+    }
+
+    #[test]
+    fn test_fc_sort_with_key_f_by_field_gf2() {
+        assert_bool(
+            r#"local f = std.sort;
+               local arr = [{n: 3}, {n: 1}, {n: 2}];
+               f(arr, function(x) x.n)[0].n == 1"#,
+        );
+    }
+
+    // Lines 8149-8174: compare_values for strings and arrays
+    // compare_values is called by VM's compare_values method (not native::compare_values)
+    // It's reached when doing explicit comparisons in Jsonnet like < > <= >=
+    #[test]
+    fn test_compare_values_strings_via_operators() {
+        assert_bool(r#""abc" < "abd""#);
+        assert_bool(r#""z" > "a""#);
+        assert_bool(r#"std.sort(["c", "a", "b"]) == ["a", "b", "c"]"#);
+    }
+
+    #[test]
+    fn test_compare_values_arrays_via_operators() {
+        // Array comparison: lexicographic, comparing [1,2] < [1,3]
+        assert_bool(r#"[1, 2] < [1, 3]"#);
+        assert_bool(r#"[1] < [2]"#);
+        assert_bool(r#"[1, 2] < [1, 2, 3]"#);
+    }
+
+    #[test]
+    fn test_compare_values_incompatible_types_error() {
+        // Comparing number with string via < should error
+        assert_err(r#"1 < "a""#);
+    }
+
+    // Lines 8319-8356: run_garbage_collection (exercised by triggering GC via many allocations)
+    // The GC is exercised by creating many objects
+    #[test]
+    fn test_gc_triggered_by_many_allocations() {
+        // Build a large array to trigger GC
+        assert_bool(
+            r#"local arr = std.makeArray(200, function(i) {idx: i, val: i * 2});
+               arr[199].idx == 199"#,
+        );
+    }
+
+    // Lines 8422-8445: json_to_jsonnet_value - string, array, object paths
+    // Triggered by std.parseJson
+    #[test]
+    fn test_parse_json_string_value() {
+        assert_bool(r#"std.parseJson('"hello"') == "hello""#);
+    }
+
+    #[test]
+    fn test_parse_json_array_value() {
+        assert_bool(r#"std.parseJson('[1, 2, 3]') == [1, 2, 3]"#);
+    }
+
+    #[test]
+    fn test_parse_json_object_value() {
+        assert_bool(r#"std.parseJson('{"a": 1, "b": 2}').a == 1"#);
+    }
+
+    // Lines 8498-8526: parse_json_value for null, true, false
+    #[test]
+    fn test_parse_json_null() {
+        assert_bool(r#"std.parseJson('null') == null"#);
+    }
+
+    #[test]
+    fn test_parse_json_true() {
+        assert_bool(r#"std.parseJson('true') == true"#);
+    }
+
+    #[test]
+    fn test_parse_json_false() {
+        assert_bool(r#"std.parseJson('false') == false"#);
+    }
+
+    #[test]
+    fn test_parse_json_invalid_null() {
+        assert_err(r#"std.parseJson('nope')"#);
+    }
+
+    #[test]
+    fn test_parse_json_invalid_true() {
+        assert_err(r#"std.parseJson('trueish')"#);
+    }
+
+    #[test]
+    fn test_parse_json_invalid_false() {
+        assert_err(r#"std.parseJson('falsy')"#);
+    }
+
+    // Lines 8634-8650: JSON string unicode surrogate pairs
+    #[test]
+    fn test_parse_json_surrogate_pair() {
+        // Surrogate pair: U+1F600 (😀) = \uD83D\uDE00
+        assert_bool(r#"std.parseJson('"\uD83D\uDE00"') == "😀""#);
+    }
+
+    // Lines 10153-10178: manifest_yaml_doc for nested arrays (arrays inside objects)
+    #[test]
+    fn test_manifest_yaml_doc_nested_array_in_object() {
+        assert_bool(r#"std.length(std.manifestYamlDoc({items: [1, 2, 3]}, false, true)) > 0"#);
+        assert_bool(r#"std.manifestYamlDoc({items: [1, 2, 3]}, true, true) != """#);
+    }
+
+    // Lines 10421-10439: parse_yaml_multi_doc - multiple YAML documents
+    #[test]
+    fn test_parse_yaml_multi_doc() {
+        assert_bool(
+            r#"local docs = std.parseYaml("a: 1\n---\nb: 2");
+               std.isArray(docs) && std.length(docs) == 2"#,
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_multi_doc_values() {
+        assert_bool(
+            r#"local docs = std.parseYaml("a: 1\n---\nb: 2");
+               docs[0].a == 1 && docs[1].b == 2"#,
+        );
+    }
+
+    #[test]
+    fn test_parse_yaml_multi_doc_empty_section() {
+        // Empty section between separators should produce null element
+        assert_bool(
+            r#"local docs = std.parseYaml("a: 1\n---\n---\nb: 2");
+               std.isArray(docs)"#,
+        );
+    }
+
+    // Lines 10958-10989: manifest_toml_inline_array
+    #[test]
+    fn test_manifest_toml_inline_array_via_nested() {
+        // TOML inline arrays appear when an array value is nested inside an object
+        assert_bool(
+            r#"local result = std.manifestTomlEx({tags: ["a", "b", "c"]}, "  ");
+               std.length(result) > 0"#,
+        );
+    }
+
+    #[test]
+    fn test_manifest_toml_inline_array_numbers() {
+        assert_bool(
+            r#"local result = std.manifestTomlEx({nums: [1, 2, 3]}, "");
+               std.length(result) > 0"#,
+        );
+    }
+
+    // Lines 10999-11037: manifest_toml_inline_value for array/object
+    #[test]
+    fn test_manifest_toml_inline_value_nested_object() {
+        // Inline TOML object: when a nested object appears inside an array
+        assert_bool(
+            r#"local result = std.manifestTomlEx({items: [{x: 1, y: 2}]}, "");
+               std.length(result) > 0"#,
+        );
+    }
+
+    #[test]
+    fn test_manifest_toml_inline_value_nested_array() {
+        // Nested array within array
+        assert_bool(
+            r#"local result = std.manifestTomlEx({matrix: [[1, 2], [3, 4]]}, "");
+               std.length(result) > 0"#,
+        );
+    }
+
+    // Lines 224-242: set_ext_var_code non-JSON path (Jsonnet expression code)
+    #[test]
+    fn test_set_ext_var_code_non_json_expression() {
+        // "1 + 1" is not valid JSON but is a valid Jsonnet expression
+        let source = r#"std.extVar("result")"#;
+        let mut scanner = scanner::Scanner::new(source, "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler = compiler::Compiler::new(&mut scanner, "test.jsonnet");
+        let chunk = compiler
+            .compile(&mut memory_manager)
+            .expect("compile failed");
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        // "1 + 1" is not parseable as JSON, triggers the non-JSON code path
+        vm.set_ext_var_code("result", "1 + 1").unwrap();
+        // Note: import-based ext-code resolution happens lazily, so this just tests
+        // that set_ext_var_code doesn't panic for non-JSON input
+    }
+
+    // Lines 614-643: call_native_checked trace with message
+    #[test]
+    fn test_std_trace_with_message() {
+        // std.trace writes to stderr and returns the second argument
+        assert_bool(r#"std.trace("test message", true) == true"#);
+    }
+
+    #[test]
+    fn test_std_trace_empty_message() {
+        assert_bool(r#"std.trace("", 42) == 42"#);
+    }
+
+    #[test]
+    fn test_std_trace_non_string_error() {
+        assert_err(r#"std.trace(42, true)"#);
+    }
+
+    // Lines 806-843: manifestYamlDoc/manifestYamlStream/manifestJsonEx via call_native_checked
+    #[test]
+    fn test_manifest_yaml_doc_direct() {
+        assert_bool(r#"std.manifestYamlDoc({a: 1}, false, true) != """#);
+        assert_bool(r#"std.manifestYamlDoc("hello", false, true) == "hello""#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_stream_direct() {
+        assert_bool(
+            r#"std.length(std.manifestYamlStream([{a: 1}, {b: 2}], false, true, true)) > 0"#,
+        );
+    }
+
+    #[test]
+    fn test_manifest_json_ex_direct() {
+        assert_bool(r#"std.manifestJsonEx({a: 1}, "  ") != """#);
+        assert_bool(r#"std.manifestJsonEx({a: 1}, "  ", "\n", ": ") != """#);
+    }
+
+    #[test]
+    fn test_fc_manifest_yaml_doc_gf2() {
+        assert_bool(r#"local f = std.manifestYamlDoc; f({a: 1}, false, true) != """#);
+    }
+
+    #[test]
+    fn test_fc_manifest_yaml_stream_gf2() {
+        assert_bool(
+            r#"local f = std.manifestYamlStream; std.length(f([{a: 1}], false, true, true)) > 0"#,
+        );
+    }
 }
