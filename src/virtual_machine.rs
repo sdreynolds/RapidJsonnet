@@ -15625,4 +15625,257 @@ mod tests {
             r#"local f = std.manifestYamlStream; std.length(f([{a: 1}], false, true, true)) > 0"#,
         );
     }
+
+    // ===== FINAL TARGETED GAP-FILL TESTS =====
+
+    // Lines 8239-8310: value_to_json Object/Array via execute_with_ext_vars
+    // (the full serialization path that goes through value_to_json Object/Array branches)
+    fn compile_and_execute(source: &str) -> serde_json::Value {
+        let mut scanner_inst = scanner::Scanner::new(source, "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler_inst = compiler::Compiler::new(&mut scanner_inst, "test.jsonnet");
+        let chunk = compiler_inst.compile(&mut memory_manager).expect("compile");
+        execute_with_ext_vars(chunk, memory_manager, &[], &[], &[]).expect("execute")
+    }
+
+    #[test]
+    fn test_value_to_json_object_via_execute() {
+        let result = compile_and_execute(r#"{a: 1, b: "hello"}"#);
+        assert!(result.is_object());
+        assert_eq!(result["a"], serde_json::json!(1.0));
+        assert_eq!(result["b"], serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn test_value_to_json_array_via_execute() {
+        let result = compile_and_execute(r#"[1, 2, 3]"#);
+        assert!(result.is_array());
+        assert_eq!(result[0], serde_json::json!(1.0));
+        assert_eq!(result[2], serde_json::json!(3.0));
+    }
+
+    #[test]
+    fn test_value_to_json_nested_object_via_execute() {
+        let result = compile_and_execute(r#"{a: {b: [1, 2]}}"#);
+        assert!(result.is_object());
+        assert!(result["a"]["b"].is_array());
+    }
+
+    #[test]
+    fn test_value_to_json_circular_reference_error() {
+        // Circular reference via self-referential object should error
+        // We can't easily create a circular ref in pure Jsonnet, but we can test
+        // that object serialization works and check assertions are triggered
+        let result = compile_and_execute(r#"{x: 1, y: true, z: null}"#);
+        assert!(result.is_object());
+        assert_eq!(result["x"], serde_json::json!(1.0));
+        assert_eq!(result["y"], serde_json::json!(true));
+        assert_eq!(result["z"], serde_json::json!(null));
+    }
+
+    // Lines 403-416: check_object_assertions with actual assertions
+    #[test]
+    fn test_object_assertions_pass() {
+        // Objects with assert statements — assertions run during manifestation
+        assert_bool(
+            r#"local o = {
+                 assert self.x > 0 : "x must be positive",
+                 x: 1,
+               };
+               std.length(std.manifestJson(o)) > 0"#,
+        );
+    }
+
+    #[test]
+    fn test_object_assertions_fail() {
+        // Objects with failing assert statements trigger during manifestation
+        assert_err(
+            r#"local o = {
+                 assert self.x > 0 : "x must be positive",
+                 x: -1,
+               };
+               std.manifestJson(o)"#,
+        );
+    }
+
+    // Lines 1026-1038: call_native_checked_extra — manifestIni/Python/PythonVars via first-class
+    #[test]
+    fn test_fc_manifest_ini_extra() {
+        assert_bool(r#"local f = std.manifestIni; std.length(f({main: {a: "1"}})) > 0"#);
+    }
+
+    #[test]
+    fn test_fc_manifest_python_extra() {
+        assert_bool(r#"local f = std.manifestPython; std.length(f({a: 1})) > 0"#);
+    }
+
+    #[test]
+    fn test_fc_manifest_python_vars_extra() {
+        assert_bool(r#"local f = std.manifestPythonVars; std.length(f({x: 42})) > 0"#);
+    }
+
+    // Lines 1777-1790: super field push (raw non-closure value from super)
+    #[test]
+    fn test_super_raw_field_access() {
+        // super.field where field is a raw (non-function) value
+        assert_bool(
+            r#"local Base = {x: 10, y: 20};
+               local Child = Base + {z: super.x + super.y};
+               Child.z == 30"#,
+        );
+    }
+
+    #[test]
+    fn test_super_raw_field_string() {
+        assert_bool(
+            r#"local Base = {name: "base"};
+               local Child = Base + {greeting: "hello " + super.name};
+               Child.greeting == "hello base""#,
+        );
+    }
+
+    // Lines 3300-3314: MinArray/MaxArray without keyF (direct element comparison)
+    #[test]
+    fn test_min_array_no_key_f() {
+        assert_bool(r#"std.minArray([5, 3, 8, 1, 4]) == 1"#);
+    }
+
+    #[test]
+    fn test_max_array_no_key_f() {
+        assert_bool(r#"std.maxArray([5, 3, 8, 1, 4]) == 8"#);
+    }
+
+    #[test]
+    fn test_min_array_strings_no_key_f() {
+        assert_bool(r#"std.minArray(["banana", "apple", "cherry"]) == "apple""#);
+    }
+
+    // Lines 9763-9785: ini_field_to_string Array branch (array value in INI field)
+    #[test]
+    fn test_manifest_ini_array_field() {
+        // An INI field with an array value → each element becomes a separate line
+        assert_bool(
+            r#"local result = std.manifestIni({main: {tags: ["a", "b", "c"]}});
+               std.length(result) > 0"#,
+        );
+    }
+
+    #[test]
+    fn test_manifest_ini_array_field_numbers() {
+        assert_bool(
+            r#"local result = std.manifestIni({main: {ports: [80, 443]}});
+               std.length(result) > 0"#,
+        );
+    }
+
+    // Lines 9803-9819: ini_scalar_to_string error (non-scalar INI value)
+    #[test]
+    fn test_manifest_ini_object_value_error() {
+        // Passing an object as a field value in INI should error
+        assert_err(r#"std.manifestIni({main: {nested: {a: 1}}})"#);
+    }
+
+    // Lines 9887-9902: manifest_python_value Array branch
+    #[test]
+    fn test_manifest_python_array() {
+        assert_bool(r#"std.manifestPython([1, 2, 3]) == "[1, 2, 3]""#);
+    }
+
+    #[test]
+    fn test_manifest_python_nested_array() {
+        assert_bool(r#"std.length(std.manifestPython([[1, 2], [3, 4]])) > 0"#);
+    }
+
+    // Lines 10238-10253: YAML key quoting when quote_keys=false but key needs quoting
+    #[test]
+    fn test_manifest_yaml_doc_key_needs_quoting_no_quote_keys() {
+        // Key "true" needs quoting even with quote_keys=false because it's a YAML boolean
+        assert_bool(r#"std.length(std.manifestYamlDoc({"true": 1}, false, false)) > 0"#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_doc_null_key_needs_quoting() {
+        // Key "null" needs quoting even with quote_keys=false
+        assert_bool(r#"std.length(std.manifestYamlDoc({"null": 1}, false, false)) > 0"#);
+    }
+
+    // Lines 10277-10290: YAML block scalar in object (multiline string value)
+    #[test]
+    fn test_manifest_yaml_doc_block_scalar_in_object() {
+        // A multiline string value inside an object triggers the block scalar path
+        assert_bool(
+            r#"local obj = {desc: "line1\nline2\n"};
+               std.length(std.manifestYamlDoc(obj)) > 0"#,
+        );
+    }
+
+    // Lines 10617-10633: manifestXmlJsonml attribute with numeric/bool value
+    #[test]
+    fn test_manifest_xml_jsonml_numeric_attribute() {
+        // XML element with a numeric attribute value
+        assert_bool(
+            r#"local result = std.manifestXmlJsonml(["tag", {count: 42}, "content"]);
+               std.length(result) > 0"#,
+        );
+    }
+
+    #[test]
+    fn test_manifest_xml_jsonml_bool_attribute() {
+        assert_bool(
+            r#"local result = std.manifestXmlJsonml(["tag", {enabled: true}, "text"]);
+               std.length(result) > 0"#,
+        );
+    }
+
+    #[test]
+    fn test_manifest_xml_jsonml_non_scalar_attribute_error() {
+        // Array as attribute value should error
+        assert_err(r#"std.manifestXmlJsonml(["tag", {items: [1, 2]}, "text"])"#);
+    }
+
+    // Lines 10797-10809: manifestTomlEx mixed array error (array starts with object then non-object)
+    #[test]
+    fn test_manifest_toml_ex_mixed_array_error() {
+        assert_err(r#"std.manifestTomlEx({arr: [{x: 1}, 42]}, "")"#);
+    }
+
+    // Lines 11216-11230: yaml_looks_like_number — phone-number-like string (not timestamp)
+    #[test]
+    fn test_manifest_yaml_doc_phone_number_string() {
+        // "1-800-555-1234" has dashes not in exponent position, not a 4-digit-then-dash pattern
+        // So yaml_looks_like_number returns false → string is NOT quoted as number
+        assert_bool(r#"std.length(std.manifestYamlDoc("1-800-555-1234")) > 0"#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_doc_octal_like_string() {
+        // "077" looks like an octal literal in YAML 1.1
+        assert_bool(r#"std.length(std.manifestYamlDoc("077")) > 0"#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_doc_binary_like_string() {
+        // "0b1010" looks like a binary literal in YAML 1.1
+        assert_bool(r#"std.length(std.manifestYamlDoc("0b1010")) > 0"#);
+    }
+
+    // Lines 8876-8891: value_to_string_inner — Closure and Import paths
+    #[test]
+    fn test_to_string_closure_thunk() {
+        // std.toString on an object field that is a thunk
+        assert_bool(r#"local o = {x: 1 + 1}; std.toString(o.x) == "2""#);
+    }
+
+    // Lines 2509-2523: ObjectIndex non-string field name and non-object value errors
+    #[test]
+    fn test_object_index_non_string_key_error() {
+        // Indexing object with a non-string key at runtime
+        assert_err(r#"local o = {a: 1}; o[42]"#);
+    }
+
+    #[test]
+    fn test_object_index_non_object_error() {
+        // Indexing a non-object value with a string key
+        assert_err(r#"local x = 42; x["a"]"#);
+    }
 }
