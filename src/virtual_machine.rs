@@ -14923,4 +14923,287 @@ mod tests {
             serde_json::Value::Number(serde_json::Number::from_f64(42.0).unwrap())
         );
     }
+
+    // ─── First-class NativeFunction dispatch (Call opcode path) ───
+
+    // Lines 687-725: call_native_checked — std.makeArray via first-class ref
+    #[test]
+    fn test_fc_make_array() {
+        assert_bool("local f = std.makeArray; f(3, function(i) i * 2) == [0, 2, 4]");
+    }
+
+    #[test]
+    fn test_fc_make_array_zero() {
+        assert_bool("local f = std.makeArray; f(0, function(i) i) == []");
+    }
+
+    // Lines 761-804: manifestYamlDoc via call_native_checked (first-class)
+    #[test]
+    fn test_fc_manifest_yaml_doc() {
+        assert_bool("local f = std.manifestYamlDoc; std.length(f({a: 1}, false, true)) > 0");
+    }
+
+    // Lines 761-804: manifestYamlStream via call_native_checked (first-class)
+    #[test]
+    fn test_fc_manifest_yaml_stream_call_native() {
+        assert_bool(
+            "local f = std.manifestYamlStream; std.length(f([{a: 1}], false, true, true)) > 0",
+        );
+    }
+
+    // Lines 948-996: minArray/maxArray with keyF via call_native_checked
+    #[test]
+    fn test_fc_min_array_with_key_f() {
+        assert_bool("local f = std.minArray; f([3, 1, 2], function(x) x, null) == 1");
+    }
+
+    #[test]
+    fn test_fc_max_array_with_key_f() {
+        assert_bool("local f = std.maxArray; f([3, 1, 2], function(x) x, null) == 3");
+    }
+
+    // Lines 2092-2134: string concatenation fallback in Multiply (Add opcode, non-typed path)
+    // Triggered when compiler doesn't track types statically — use runtime values
+    #[test]
+    fn test_add_fallback_string_concat() {
+        // Force the non-typed add path by using an object field
+        assert_bool(r#"local obj = {a: "hello"}; obj.a + " world" == "hello world""#);
+    }
+
+    // Lines 2581-2637: Binary indexing via Index opcode (first-class not needed, just Index)
+    #[test]
+    fn test_binary_index_success() {
+        assert_bool("local b = std.encodeUTF8('hi'); b[0] == 104");
+    }
+
+    #[test]
+    fn test_binary_index_negative_error() {
+        assert_err("local b = std.encodeUTF8('hi'); b[-1]");
+    }
+
+    #[test]
+    fn test_binary_index_out_of_bounds_error() {
+        assert_err("local b = std.encodeUTF8('hi'); b[99]");
+    }
+
+    #[test]
+    fn test_binary_index_non_integer_error() {
+        assert_err("local b = std.encodeUTF8('hi'); b[0.5]");
+    }
+
+    #[test]
+    fn test_binary_index_non_number_error() {
+        assert_err("local b = std.encodeUTF8('hi'); b['x']");
+    }
+
+    // Lines 2843-2898: ObjectMerge opcode
+    #[test]
+    fn test_object_merge_opcode() {
+        assert_bool("{a: 1} + {b: 2} == {a: 1, b: 2}");
+    }
+
+    #[test]
+    fn test_object_merge_opcode_override() {
+        assert_bool("{a: 1, b: 2} + {b: 3} == {a: 1, b: 3}");
+    }
+
+    // Lines 5924-6006: MergePatch/Prune/Uniq/Sort/Set/SetUnion via first-class ref
+    #[test]
+    fn test_fc_merge_patch() {
+        assert_bool("local f = std.mergePatch; f({a: 1}, {b: 2}) == {a: 1, b: 2}");
+    }
+
+    #[test]
+    fn test_fc_prune() {
+        assert_bool("local f = std.prune; f({a: null, b: 1}) == {b: 1}");
+    }
+
+    #[test]
+    fn test_fc_uniq() {
+        assert_bool("local f = std.uniq; f([1, 1, 2, 3, 3]) == [1, 2, 3]");
+    }
+
+    #[test]
+    fn test_fc_sort() {
+        assert_bool("local f = std.sort; f([3, 1, 2]) == [1, 2, 3]");
+    }
+
+    #[test]
+    fn test_fc_set() {
+        assert_bool("local f = std.set; f([3, 1, 2, 1]) == [1, 2, 3]");
+    }
+
+    #[test]
+    fn test_fc_set_union_no_key_f() {
+        assert_bool("local f = std.setUnion; f([1, 2], [2, 3]) == [1, 2, 3]");
+    }
+
+    // Lines 6090-6140: manifestYamlStream via first-class ref in Call opcode handler
+    #[test]
+    fn test_fc_manifest_yaml_stream_call_opcode() {
+        assert_bool("local f = std.manifestYamlStream; std.length(f([{a: 1}])) > 0");
+    }
+
+    // Lines 6209-6346: minArray/maxArray with keyF in Call opcode handler
+    #[test]
+    fn test_fc_min_array_with_key_f_call_opcode() {
+        assert_bool("local f = std.minArray; f([3, 1, 2], function(x) x) == 1");
+    }
+
+    #[test]
+    fn test_fc_max_array_with_key_f_call_opcode() {
+        assert_bool("local f = std.maxArray; f([3, 1, 2], function(x) x) == 3");
+    }
+
+    #[test]
+    fn test_fc_min_array_on_empty_with_default() {
+        assert_bool("local f = std.minArray; f([], null, 99) == 99");
+    }
+
+    #[test]
+    fn test_fc_max_array_on_empty_error() {
+        assert_err("local f = std.maxArray; f([], null)");
+    }
+
+    #[test]
+    fn test_fc_min_array_no_key_f_call_opcode() {
+        assert_bool("local f = std.minArray; f([5, 2, 8], null) == 2");
+    }
+
+    // Lines 6386-6478: setInter with 3-arg keyF form
+    #[test]
+    fn test_fc_set_inter_with_key_f() {
+        assert_bool("local f = std.setInter; f([1, 2, 3], [2, 3, 4], function(x) x) == [2, 3]");
+    }
+
+    // Lines 6482-6583: setDiff with 3-arg keyF form
+    #[test]
+    fn test_fc_set_diff_with_key_f() {
+        assert_bool("local f = std.setDiff; f([1, 2, 3], [2, 3, 4], function(x) x) == [1]");
+    }
+
+    // Lines 6587-6662: setMember with 3-arg keyF form
+    #[test]
+    fn test_fc_set_member_with_key_f_found() {
+        assert_bool("local f = std.setMember; f(2, [1, 2, 3], function(x) x) == true");
+    }
+
+    #[test]
+    fn test_fc_set_member_with_key_f_not_found() {
+        assert_bool("local f = std.setMember; f(5, [1, 2, 3], function(x) x) == false");
+    }
+
+    // Lines 6666-6747: setUnion with 3-arg keyF form
+    #[test]
+    fn test_fc_set_union_with_key_f() {
+        assert_bool("local f = std.setUnion; f([1, 2], [2, 3], function(x) x) == [1, 2, 3]");
+    }
+
+    // Lines 6752-6799: sort with keyF via first-class ref
+    #[test]
+    fn test_fc_sort_with_key_f() {
+        assert_bool("local f = std.sort; f([3, 1, 2], function(x) x) == [1, 2, 3]");
+    }
+
+    // Lines 6804-6885: groupBy via first-class ref
+    #[test]
+    fn test_fc_group_by() {
+        assert_bool(
+            r#"local f = std.groupBy;
+               local result = f(["apple", "ant", "banana"], function(s) s[0:1]);
+               std.objectHas(result, "a") && std.objectHas(result, "b")"#,
+        );
+    }
+
+    // Lines 6890-6936: sortBy via first-class ref
+    #[test]
+    fn test_fc_sort_by() {
+        assert_bool("local f = std.sortBy; f([3, 1, 2], function(x) x) == [1, 2, 3]");
+    }
+
+    // Lines 6941-7015: countBy via first-class ref (keyF must return string)
+    #[test]
+    fn test_fc_count_by() {
+        assert_bool(
+            r#"local f = std.countBy;
+               local result = f(["a", "b", "a"], function(x) x);
+               result.a == 2 && result.b == 1"#,
+        );
+    }
+
+    // Lines 7020-7077: uniqBy via first-class ref (keyF must return string)
+    #[test]
+    fn test_fc_uniq_by() {
+        assert_bool(
+            r#"local f = std.uniqBy;
+               f(["apple", "ant", "banana"], function(x) x[0:1]) == ["apple", "banana"]"#,
+        );
+    }
+
+    // Lines 7084-7165: minBy/maxBy via first-class ref
+    #[test]
+    fn test_fc_min_by() {
+        assert_bool("local f = std.minBy; f([3, 1, 2], function(x) x) == 1");
+    }
+
+    #[test]
+    fn test_fc_max_by() {
+        assert_bool("local f = std.maxBy; f([3, 1, 2], function(x) x) == 3");
+    }
+
+    #[test]
+    fn test_fc_min_by_empty_error() {
+        assert_err("local f = std.minBy; f([], function(x) x)");
+    }
+
+    // Lines 7170-7215: toPairs via first-class ref
+    #[test]
+    fn test_fc_to_pairs() {
+        assert_bool("local f = std.toPairs; std.length(f({a: 1})) == 1");
+    }
+
+    #[test]
+    fn test_fc_to_pairs_multiple() {
+        assert_bool("local f = std.toPairs; std.length(f({a: 1, b: 2})) == 2");
+    }
+
+    // Lines 7220-7314: mapKeys via first-class ref
+    #[test]
+    fn test_fc_map_keys() {
+        assert_bool("local f = std.mapKeys; std.objectHas(f(std.asciiUpper, {hello: 1}), 'HELLO')");
+    }
+
+    // Lines 7319-7413: filterObject via first-class ref
+    #[test]
+    fn test_fc_filter_object() {
+        assert_bool(
+            r#"local f = std.filterObject;
+               f(function(k, v) v > 1, {a: 1, b: 2, c: 3}) == {b: 2, c: 3}"#,
+        );
+    }
+
+    // Lines 7418-7481: objectFlatten via first-class ref
+    #[test]
+    fn test_fc_object_flatten() {
+        assert_bool(
+            r#"local f = std.objectFlatten;
+               std.objectHas(f({a: {b: 1}}, "."), "a.b")"#,
+        );
+    }
+
+    // Lines 8239-8310: value_to_json with object and binary
+    #[test]
+    fn test_value_to_json_object() {
+        assert_bool(r#"std.manifestJson({a: 1, b: 2}) != """#);
+    }
+
+    #[test]
+    fn test_value_to_json_binary_as_array() {
+        // Binary gets serialized as a JSON array of numbers
+        assert_bool(
+            r#"local b = std.encodeUTF8("hi");
+               local j = std.parseJson(std.manifestJson(b));
+               j[0] == 104"#,
+        );
+    }
 }
