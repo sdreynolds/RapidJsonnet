@@ -945,7 +945,12 @@ mod tests {
 
     fn scan_all_ok(input: &str) -> Vec<Token> {
         let mut scanner = Scanner::new(input, "test");
-        scanner.scan_all().unwrap().into_iter().map(|t| t.token).collect()
+        scanner
+            .scan_all()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.token)
+            .collect()
     }
 
     fn scan_all_err(input: &str) -> Vec<ScanError> {
@@ -1037,7 +1042,11 @@ mod tests {
 
     #[test]
     fn test_is_incomplete_input_true() {
-        let err = ScanError::new(0..1, "Unexpected end of input".to_string(), "test".to_string());
+        let err = ScanError::new(
+            0..1,
+            "Unexpected end of input".to_string(),
+            "test".to_string(),
+        );
         assert!(err.is_incomplete_input());
 
         let err2 = ScanError::new(0..1, "Unterminated string".to_string(), "test".to_string());
@@ -1046,7 +1055,11 @@ mod tests {
 
     #[test]
     fn test_is_incomplete_input_false() {
-        let err = ScanError::new(0..1, "Unexpected character 'x'".to_string(), "test".to_string());
+        let err = ScanError::new(
+            0..1,
+            "Unexpected character 'x'".to_string(),
+            "test".to_string(),
+        );
         assert!(!err.is_incomplete_input());
     }
 

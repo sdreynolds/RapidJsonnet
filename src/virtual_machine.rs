@@ -15878,4 +15878,1026 @@ mod tests {
         // Indexing a non-object value with a string key
         assert_err(r#"local x = 42; x["a"]"#);
     }
+
+    // Group 1: First-class manifest calls via call_native_checked_inner
+    #[test]
+    fn test_fc_manifest_json_via_local() {
+        assert_bool(r#"local f = std.manifestJson; f(42) == "42""#);
+        assert_bool(r#"local f = std.manifestJson; f(null) == "null""#);
+    }
+
+    #[test]
+    fn test_fc_manifest_json_minified_via_local() {
+        assert_bool(r#"local f = std.manifestJsonMinified; f({a: 1}) != """#);
+        assert_bool(r#"local f = std.manifestJsonMinified; f([1,2]) != """#);
+    }
+
+    #[test]
+    fn test_fc_manifest_json_ex_via_local_2arg() {
+        assert_bool(r#"local f = std.manifestJsonEx; f({a: 1}, "  ") != """#);
+    }
+
+    #[test]
+    fn test_fc_manifest_json_ex_via_local_3arg() {
+        assert_bool(r#"local f = std.manifestJsonEx; f({a: 1}, "  ", "\n") != """#);
+    }
+
+    #[test]
+    fn test_fc_manifest_json_ex_via_local_4arg() {
+        assert_bool(r#"local f = std.manifestJsonEx; f({a: 1}, "  ", "\n", ": ") != """#);
+    }
+
+    #[test]
+    fn test_fc_manifest_json_ex_indent_not_string_error() {
+        assert_err(r#"local f = std.manifestJsonEx; f({a: 1}, 42)"#);
+    }
+
+    // Group 2: std.format with Object argument (named placeholder format)
+    #[test]
+    fn test_format_with_object_named_placeholders() {
+        assert_bool(
+            r#"std.format("%(name)s is %(age)d", {name: "Alice", age: 30}) == "Alice is 30""#,
+        );
+    }
+
+    #[test]
+    fn test_format_with_object_single_key() {
+        assert_bool(r#"std.format("hello %(who)s", {who: "world"}) == "hello world""#);
+    }
+
+    // Group 3: TOML inline object in array
+    #[test]
+    fn test_manifest_toml_inline_object_in_array() {
+        // Object inside array renders as inline TOML table
+        assert_bool(r#"std.length(std.manifestTomlEx({items: [{x: 1, y: 2}]}, "")) > 0"#);
+    }
+
+    // Group 4: json_to_jsonnet_value branches via ext_codes
+    #[test]
+    fn test_ext_var_code_json_null() {
+        let mut scanner_inst = scanner::Scanner::new("std.extVar(\"x\")", "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler_inst = compiler::Compiler::new(&mut scanner_inst, "test.jsonnet");
+        let chunk = compiler_inst.compile(&mut memory_manager).expect("compile");
+        let ext_codes = vec![("x".to_string(), "null".to_string())];
+        let result =
+            execute_with_ext_vars(chunk, memory_manager, &[], &ext_codes, &[]).expect("run");
+        assert_eq!(result, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_ext_var_code_json_bool() {
+        let mut scanner_inst = scanner::Scanner::new("std.extVar(\"x\")", "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler_inst = compiler::Compiler::new(&mut scanner_inst, "test.jsonnet");
+        let chunk = compiler_inst.compile(&mut memory_manager).expect("compile");
+        let ext_codes = vec![("x".to_string(), "true".to_string())];
+        let result =
+            execute_with_ext_vars(chunk, memory_manager, &[], &ext_codes, &[]).expect("run");
+        assert_eq!(result, serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn test_ext_var_code_json_string() {
+        let mut scanner_inst = scanner::Scanner::new("std.extVar(\"x\")", "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler_inst = compiler::Compiler::new(&mut scanner_inst, "test.jsonnet");
+        let chunk = compiler_inst.compile(&mut memory_manager).expect("compile");
+        let ext_codes = vec![("x".to_string(), r#""hello""#.to_string())];
+        let result =
+            execute_with_ext_vars(chunk, memory_manager, &[], &ext_codes, &[]).expect("run");
+        assert_eq!(result, serde_json::Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn test_ext_var_code_json_array() {
+        let mut scanner_inst = scanner::Scanner::new("std.extVar(\"x\")", "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler_inst = compiler::Compiler::new(&mut scanner_inst, "test.jsonnet");
+        let chunk = compiler_inst.compile(&mut memory_manager).expect("compile");
+        let ext_codes = vec![("x".to_string(), "[1, 2, 3]".to_string())];
+        let result =
+            execute_with_ext_vars(chunk, memory_manager, &[], &ext_codes, &[]).expect("run");
+        assert!(result.is_array());
+    }
+
+    #[test]
+    fn test_ext_var_code_json_object() {
+        let mut scanner_inst = scanner::Scanner::new("std.extVar(\"x\")", "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler_inst = compiler::Compiler::new(&mut scanner_inst, "test.jsonnet");
+        let chunk = compiler_inst.compile(&mut memory_manager).expect("compile");
+        let ext_codes = vec![("x".to_string(), r#"{"a": 1, "b": 2}"#.to_string())];
+        let result =
+            execute_with_ext_vars(chunk, memory_manager, &[], &ext_codes, &[]).expect("run");
+        assert!(result.is_object());
+    }
+
+    // Group 5: GC triggered by large makeArray
+    #[test]
+    fn test_gc_triggered_by_large_make_array() {
+        // Creates 20000 NativeThunk objects, exceeding the 1MB GC threshold
+        let result =
+            run_jsonnet(r#"std.length(std.makeArray(20000, function(i) i))"#).expect("run failed");
+        assert_eq!(result, Value::Number(20000.0));
+    }
+
+    // Group 6: is_truthy with non-boolean types
+    #[test]
+    fn test_is_truthy_string() {
+        assert_bool(r#"if "hello" then true else false"#);
+    }
+
+    #[test]
+    fn test_is_truthy_empty_string_falsy() {
+        assert_bool(r#"if "" then false else true"#);
+    }
+
+    #[test]
+    fn test_is_truthy_object() {
+        assert_bool(r#"if {a: 1} then true else false"#);
+    }
+
+    #[test]
+    fn test_is_truthy_array() {
+        assert_bool(r#"if [1, 2] then true else false"#);
+    }
+
+    #[test]
+    fn test_is_truthy_closure() {
+        assert_bool(r#"local f = function(x) x; if f then true else false"#);
+    }
+
+    #[test]
+    fn test_is_truthy_native_function() {
+        assert_bool(r#"local f = std.length; if f then true else false"#);
+    }
+
+    // Group 7: NaN and Infinity serialization errors
+    #[test]
+    fn test_manifest_json_infinity_error() {
+        // std.log(0) produces -Infinity in IEEE 754
+        assert_err(r#"std.manifestJson(std.log(0))"#);
+    }
+
+    #[test]
+    fn test_manifest_python_infinity_error() {
+        assert_err(r#"std.manifestPython(std.log(0))"#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_doc_infinity_error() {
+        assert_err(r#"std.manifestYamlDoc(std.log(0))"#);
+    }
+
+    // Group 8: parseJson surrogate pairs (raw escape sequences)
+    #[test]
+    fn test_parse_json_surrogate_pair_raw() {
+        // Pass literal \uD83D\uDE00 (double-escaped) to parseJson
+        assert_bool(r#"std.parseJson("\"\\uD83D\\uDE00\"") == "😀""#);
+    }
+
+    // Group 9: parseJson escape errors
+    #[test]
+    fn test_parse_json_unterminated_escape_error() {
+        assert_err(r#"std.parseJson("\"abc\\")"#);
+    }
+
+    #[test]
+    fn test_parse_json_incomplete_unicode_error() {
+        assert_err(r#"std.parseJson("\"\\u00\"")"#);
+    }
+
+    // Group 10: parseJson floating point numbers
+    #[test]
+    fn test_parse_json_float_number() {
+        assert_bool(r#"std.parseJson("3.14") == 3.14"#);
+    }
+
+    #[test]
+    fn test_parse_json_exponential_number() {
+        assert_bool(r#"std.parseJson("1.5e10") == 1.5e10"#);
+    }
+
+    #[test]
+    fn test_parse_json_negative_exponent() {
+        assert_bool(r#"std.parseJson("1.5e-3") > 0"#);
+    }
+
+    // Group 11: YAML multiline array elements
+    #[test]
+    fn test_manifest_yaml_doc_array_of_objects() {
+        assert_bool(r#"std.length(std.manifestYamlDoc([{a: 1, b: 2}, {c: 3}])) > 0"#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_doc_nested_array_with_object() {
+        assert_bool(r#"std.length(std.manifestYamlDoc({items: [{x: 1}, {y: 2}]})) > 0"#);
+    }
+
+    // Group 12: groupBy/sortBy/countBy/uniqBy error paths
+    #[test]
+    fn test_group_by_non_array_error() {
+        assert_err(r#"std.groupBy("not_an_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_count_by_non_array_error() {
+        assert_err(r#"std.countBy("not_an_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_uniq_by_non_array_error() {
+        assert_err(r#"std.uniqBy("not_an_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_group_by_non_array_error() {
+        assert_err(r#"local f = std.groupBy; f("not_an_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_group_by_key_not_string_error() {
+        assert_err(r#"local f = std.groupBy; f(["a", "b"], function(x) 1)"#);
+    }
+
+    #[test]
+    fn test_fc_sort_by_non_array_error() {
+        assert_err(r#"local f = std.sortBy; f("not_an_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_count_by_non_array_error() {
+        assert_err(r#"local f = std.countBy; f("not_an_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_count_by_key_not_string_error() {
+        assert_err(r#"local f = std.countBy; f(["a", "b"], function(x) 1)"#);
+    }
+
+    #[test]
+    fn test_fc_uniq_by_non_array_error() {
+        assert_err(r#"local f = std.uniqBy; f("not_an_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_uniq_by_key_not_string_error() {
+        assert_err(r#"local f = std.uniqBy; f(["a", "b"], function(x) 1)"#);
+    }
+
+    #[test]
+    fn test_fc_set_inter_non_array_first_arg_error() {
+        assert_err(r#"local f = std.setInter; f("not_array", [1,2], function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_set_inter_non_array_second_arg_error() {
+        assert_err(r#"local f = std.setInter; f([1,2], "not_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_set_diff_non_array_first_arg_error() {
+        assert_err(r#"local f = std.setDiff; f("not_array", [1,2], function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_set_diff_non_array_second_arg_error() {
+        assert_err(r#"local f = std.setDiff; f([1,2], "not_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_set_member_non_array_error() {
+        assert_err(r#"local f = std.setMember; f(1, "not_array", function(x) x)"#);
+    }
+
+    // Group 13: manifestIni error paths
+    #[test]
+    fn test_manifest_ini_non_object_error() {
+        assert_err(r#"std.manifestIni("not_an_object")"#);
+    }
+
+    #[test]
+    fn test_manifest_ini_main_not_object_error() {
+        assert_err(r#"std.manifestIni({main: "not_object", sections: {}})"#);
+    }
+
+    #[test]
+    fn test_manifest_ini_section_not_object_error() {
+        assert_err(r#"std.manifestIni({main: {}, sections: {mysec: "not_object"}})"#);
+    }
+
+    #[test]
+    fn test_manifest_ini_sections_not_object_error() {
+        assert_err(r#"std.manifestIni({main: {}, sections: "not_object"})"#);
+    }
+
+    // Group 14: manifestPythonVars non-object error
+    #[test]
+    fn test_manifest_python_vars_non_object_error() {
+        assert_err(r#"std.manifestPythonVars("not_an_object")"#);
+    }
+
+    // Group 15: extVar with non-string key errors
+    #[test]
+    fn test_ext_var_non_string_key_error() {
+        assert_err(r#"std.extVar(42)"#);
+    }
+
+    #[test]
+    fn test_fc_ext_var_non_string_key_error() {
+        assert_err(r#"local f = std.extVar; f(42)"#);
+    }
+
+    // Group 16: String index out of bounds
+    #[test]
+    fn test_string_index_out_of_bounds_error() {
+        assert_err(r#""hello"[10]"#);
+    }
+
+    // Group 17: manifestYamlDoc argument type errors (first-class)
+    #[test]
+    fn test_fc_manifest_yaml_doc_indent_not_bool_error() {
+        assert_err(r#"local f = std.manifestYamlDoc; f({a: 1}, "notbool", true)"#);
+    }
+
+    #[test]
+    fn test_fc_manifest_yaml_doc_quote_keys_not_bool_error() {
+        assert_err(r#"local f = std.manifestYamlDoc; f({a: 1}, false, "notbool")"#);
+    }
+
+    // Group 18: makeArray non-integer/negative size via first-class call
+    #[test]
+    fn test_fc_make_array_non_integer_size_error() {
+        assert_err(r#"local f = std.makeArray; f("notnum", function(i) i)"#);
+    }
+
+    #[test]
+    fn test_fc_make_array_negative_size_error() {
+        assert_err(r#"local f = std.makeArray; f(-1, function(i) i)"#);
+    }
+
+    // Group 19: call_value_with_two_args NativeFunction path
+    // The NativeFunction branch in call_value_with_two_args is reached when a std function
+    // is passed as a 2-arg callback. The native receives raw (possibly unforced) values.
+    #[test]
+    fn test_foldl_native_fn_as_callback_error() {
+        // std.max is a 2-arg NativeFunction; using it as foldl callback
+        // triggers the NativeFunction branch in call_value_with_two_args.
+        // Array elements are lazy thunks, not forced numbers, so std.max errors.
+        assert_err(r#"std.foldl(std.max, [1, 5, 3, 2], 0)"#);
+    }
+
+    // Group 20: NaN serialization errors (use std.log(-1) for NaN)
+    #[test]
+    fn test_manifest_json_nan_error() {
+        // std.log of negative number gives NaN
+        assert_err(r#"std.manifestJson(std.log(-1))"#);
+    }
+
+    #[test]
+    fn test_manifest_python_nan_error() {
+        assert_err(r#"std.manifestPython(std.log(-1))"#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_doc_nan_error() {
+        assert_err(r#"std.manifestYamlDoc(std.log(-1))"#);
+    }
+
+    // Additional: flatMap function returning non-array error
+    #[test]
+    fn test_flat_map_non_array_return_error() {
+        // flatMap callback must return an array for array input
+        assert_err(r#"std.flatMap(function(x) x, [1, 2, 3])"#);
+    }
+
+    // Additional: filterMap filter function returning non-boolean error
+    #[test]
+    fn test_filter_map_non_bool_filter_error() {
+        assert_err(r#"std.filterMap(function(x) x, function(x) x * 2, [1, 2, 3])"#);
+    }
+
+    // Additional: manifestXmlJsonml empty array error
+    #[test]
+    fn test_manifest_xml_jsonml_empty_array_error() {
+        assert_err(r#"std.manifestXmlJsonml([])"#);
+    }
+
+    // Additional: std.prune with array containing null elements
+    #[test]
+    fn test_prune_array_with_nulls() {
+        assert_bool(r#"std.prune([1, null, 2, null]) == [1, 2]"#);
+    }
+
+    // Additional: manifestIni sections value not object
+    #[test]
+    fn test_manifest_ini_sections_field_not_object_error() {
+        assert_err(r#"std.manifestIni({sections: {s1: {a: 1}, s2: "bad"}})"#);
+    }
+
+    // StdCall path: manifestYamlDoc with bad indent arg
+    #[test]
+    fn test_manifest_yaml_doc_bad_indent_arg() {
+        assert_err(r#"std.manifestYamlDoc({a: 1}, "notbool", true)"#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_doc_bad_quote_keys_arg() {
+        assert_err(r#"std.manifestYamlDoc({a: 1}, false, "notbool")"#);
+    }
+
+    // StdCall path: manifestYamlStream with bad args
+    #[test]
+    fn test_manifest_yaml_stream_bad_indent_arg() {
+        assert_err(r#"std.manifestYamlStream([{a: 1}], "notbool", true, true)"#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_stream_bad_c_document_end_arg() {
+        assert_err(r#"std.manifestYamlStream([{a: 1}], false, "notbool", true)"#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_stream_bad_quote_keys_arg() {
+        assert_err(r#"std.manifestYamlStream([{a: 1}], false, true, "notbool")"#);
+    }
+
+    // StdCall path: manifestTomlEx with non-string indent
+    #[test]
+    fn test_manifest_toml_ex_bad_indent_arg() {
+        assert_err(r#"std.manifestTomlEx({a: 1}, 42)"#);
+    }
+
+    // StdCall path: setInter 3-arg non-array errors
+    #[test]
+    fn test_set_inter_3arg_non_array_first() {
+        assert_err(r#"std.setInter("not_array", [1,2], function(x) x)"#);
+    }
+
+    #[test]
+    fn test_set_inter_3arg_non_array_second() {
+        assert_err(r#"std.setInter([1,2], "not_array", function(x) x)"#);
+    }
+
+    // StdCall path: setDiff 3-arg non-array errors
+    #[test]
+    fn test_set_diff_3arg_non_array_first() {
+        assert_err(r#"std.setDiff("not_array", [1,2], function(x) x)"#);
+    }
+
+    #[test]
+    fn test_set_diff_3arg_non_array_second() {
+        assert_err(r#"std.setDiff([1,2], "not_array", function(x) x)"#);
+    }
+
+    // StdCall path: setMember 3-arg non-array
+    #[test]
+    fn test_set_member_3arg_non_array() {
+        assert_err(r#"std.setMember(1, "not_array", function(x) x)"#);
+    }
+
+    // StdCall path: setUnion 3-arg non-array errors
+    #[test]
+    fn test_set_union_3arg_non_array_first() {
+        assert_err(r#"std.setUnion("not_array", [1,2], function(x) x)"#);
+    }
+
+    #[test]
+    fn test_set_union_3arg_non_array_second() {
+        assert_err(r#"std.setUnion([1,2], "not_array", function(x) x)"#);
+    }
+
+    // StdCall path: std.map non-array error
+    #[test]
+    fn test_map_non_array_error() {
+        assert_err(r#"std.map(function(x) x, "not_an_array")"#);
+    }
+
+    // StdCall path: std.filter non-array error
+    #[test]
+    fn test_filter_non_array_error() {
+        assert_err(r#"std.filter(function(x) true, "not_an_array")"#);
+    }
+
+    // StdCall path: std.filter predicate returning non-boolean
+    #[test]
+    fn test_filter_non_bool_predicate_error() {
+        assert_err(r#"std.filter(function(x) x, [1, 2, 3])"#);
+    }
+
+    // StdCall path: std.minArray/maxArray with non-array
+    #[test]
+    fn test_min_array_non_array_error() {
+        assert_err(r#"std.minArray("not_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_max_array_non_array_error() {
+        assert_err(r#"std.maxArray("not_array", function(x) x)"#);
+    }
+
+    // StdCall path: std.foldl non-array error
+    #[test]
+    fn test_foldl_non_array_error() {
+        assert_err(r#"std.foldl(function(acc, x) acc + x, "not_array", 0)"#);
+    }
+
+    // StdCall path: std.foldr non-array error
+    #[test]
+    fn test_foldr_non_array_error() {
+        assert_err(r#"std.foldr(function(x, acc) x + acc, "not_array", 0)"#);
+    }
+
+    // StdCall path: std.mapWithIndex non-array error
+    #[test]
+    fn test_map_with_index_non_array_error() {
+        assert_err(r#"std.mapWithIndex(function(i, x) x, "not_array")"#);
+    }
+
+    // StdCall path: std.flatMap with non-array/non-string
+    #[test]
+    fn test_flat_map_non_array_non_string_error() {
+        assert_err(r#"std.flatMap(function(x) [x], 42)"#);
+    }
+
+    // StdCall path: filterMap non-array error
+    #[test]
+    fn test_filter_map_non_array_error() {
+        assert_err(r#"std.filterMap(function(x) true, function(x) x, "not_array")"#);
+    }
+
+    // StdCall path: mapWithKey non-object error
+    #[test]
+    fn test_map_with_key_non_object_error() {
+        assert_err(r#"std.mapWithKey(function(k, v) v, "not_object")"#);
+    }
+
+    // StdCall path: std.parseJson non-string error
+    #[test]
+    fn test_parse_json_non_string_error() {
+        assert_err(r#"std.parseJson(42)"#);
+    }
+
+    // StdCall path: std.parseYaml non-string error
+    #[test]
+    fn test_parse_yaml_non_string_error() {
+        assert_err(r#"std.parseYaml(42)"#);
+    }
+
+    // StdCall path: std.manifestJsonEx with non-string newline
+    #[test]
+    fn test_manifest_json_ex_non_string_newline_error() {
+        assert_err(r#"std.manifestJsonEx({a: 1}, "  ", 42)"#);
+    }
+
+    #[test]
+    fn test_manifest_json_ex_non_string_kvs_error() {
+        assert_err(r#"std.manifestJsonEx({a: 1}, "  ", "\n", 42)"#);
+    }
+
+    // Call opcode path: manifestYamlStream bad args
+    #[test]
+    fn test_fc_manifest_yaml_stream_bad_indent_arg() {
+        assert_err(r#"local f = std.manifestYamlStream; f([{a: 1}], "notbool", true, true)"#);
+    }
+
+    #[test]
+    fn test_fc_manifest_yaml_stream_bad_c_document_end_arg() {
+        assert_err(r#"local f = std.manifestYamlStream; f([{a: 1}], false, "notbool", true)"#);
+    }
+
+    #[test]
+    fn test_fc_manifest_yaml_stream_bad_quote_keys_arg() {
+        assert_err(r#"local f = std.manifestYamlStream; f([{a: 1}], false, true, "notbool")"#);
+    }
+
+    // Call opcode path: manifestTomlEx with non-string indent
+    #[test]
+    fn test_fc_manifest_toml_ex_bad_indent_arg() {
+        assert_err(r#"local f = std.manifestTomlEx; f({a: 1}, 42)"#);
+    }
+
+    // Call opcode path: manifestXmlJsonml
+    #[test]
+    fn test_fc_manifest_xml_jsonml_call() {
+        assert_bool(r#"local f = std.manifestXmlJsonml; std.length(f(["div", "hello"])) > 0"#);
+    }
+
+    // Object key = null (should be silently omitted per Jsonnet spec)
+    #[test]
+    fn test_object_with_null_key_omitted() {
+        assert_bool(r#"{["a"]: 1, [null]: 2}.a == 1"#);
+    }
+
+    // Function argument count mismatch (range)
+    #[test]
+    fn test_call_too_many_args_error() {
+        assert_err(r#"local f = function(x) x; f(1, 2)"#);
+    }
+
+    // Function optional args count mismatch message
+    #[test]
+    fn test_call_optional_args_range_error() {
+        // std.substr has optional maxLen arg; calling with 4 args should error
+        assert_err(r#"std.substr("hello", 0, 3, "extra")"#);
+    }
+
+    // mapWithKey with valid callback
+    #[test]
+    fn test_map_with_key_basic() {
+        assert_bool(r#"std.mapWithKey(function(k, v) v * 2, {a: 1, b: 2}).a == 2"#);
+    }
+
+    // std.flatMap callback returns non-array for array input
+    #[test]
+    fn test_flat_map_non_array_return_for_array_error() {
+        assert_err(r#"std.flatMap(function(x) "not_array", ["a", "b"])"#);
+    }
+
+    // std.filterMap filter fn returns non-bool
+    #[test]
+    fn test_filter_map_filter_non_bool_error() {
+        assert_err(r#"std.filterMap(function(x) "notbool", function(x) x, [1, 2])"#);
+    }
+
+    // groupBy/sortBy/countBy/uniqBy StdCall non-array paths
+    #[test]
+    fn test_sort_by_non_array_error() {
+        assert_err(r#"std.sortBy("not_array", function(x) x)"#);
+    }
+
+    // std.setUnion with no keyF (2-arg path) non-array errors
+    #[test]
+    fn test_set_union_2arg_non_array_first() {
+        assert_err(r#"std.setUnion("not_array", [1,2])"#);
+    }
+
+    #[test]
+    fn test_set_union_2arg_non_array_second() {
+        assert_err(r#"std.setUnion([1,2], "not_array")"#);
+    }
+
+    // Call opcode path: minBy/maxBy non-array error
+    #[test]
+    fn test_fc_min_by_non_array_error() {
+        assert_err(r#"local f = std.minBy; f("not_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_max_by_non_array_error() {
+        assert_err(r#"local f = std.maxBy; f("not_array", function(x) x)"#);
+    }
+
+    // Call opcode path: toPairs non-object error
+    #[test]
+    fn test_fc_to_pairs_non_object_error() {
+        assert_err(r#"local f = std.toPairs; f("not_object")"#);
+    }
+
+    // Call opcode path: mapKeys non-object error
+    #[test]
+    fn test_fc_map_keys_non_object_error() {
+        assert_err(r#"local f = std.mapKeys; f(function(k) k, "not_object")"#);
+    }
+
+    // Call opcode path: mapKeys func returns non-string
+    #[test]
+    fn test_fc_map_keys_non_string_return_error() {
+        assert_err(r#"local f = std.mapKeys; f(function(k) 42, {a: 1})"#);
+    }
+
+    // Call opcode path: filterObject non-object error
+    #[test]
+    fn test_fc_filter_object_non_object_error() {
+        assert_err(r#"local f = std.filterObject; f(function(k, v) true, "not_object")"#);
+    }
+
+    // Call opcode path: filterObject func returns non-bool
+    #[test]
+    fn test_fc_filter_object_non_bool_return_error() {
+        assert_err(r#"local f = std.filterObject; f(function(k, v) "notbool", {a: 1})"#);
+    }
+
+    // Call opcode path: objectFlatten non-string sep error
+    #[test]
+    fn test_fc_object_flatten_non_string_sep_error() {
+        assert_err(r#"local f = std.objectFlatten; f({a: {b: 1}}, 42)"#);
+    }
+
+    // manifestYamlStream non-array error
+    #[test]
+    fn test_manifest_yaml_stream_non_array_error() {
+        assert_err(r#"std.manifestYamlStream("not_an_array")"#);
+    }
+
+    // manifestXmlJsonml first element not string (number tag)
+    #[test]
+    fn test_manifest_xml_jsonml_numeric_tag_error() {
+        assert_err(r#"std.manifestXmlJsonml([42, "content"])"#);
+    }
+
+    // manifestXmlJsonml non-string/non-array value
+    #[test]
+    fn test_manifest_xml_jsonml_number_value_error() {
+        assert_err(r#"std.manifestXmlJsonml(42)"#);
+    }
+
+    // std.prune with object containing all-null fields
+    #[test]
+    fn test_prune_object_all_null_fields() {
+        // Object where all fields are null should be pruned to empty object
+        assert_bool(r#"std.prune({a: null, b: null}) == {}"#);
+    }
+
+    // TOML inline value as Object (via nested array of arrays)
+    #[test]
+    fn test_manifest_toml_inline_object_in_nested_array() {
+        // Outer array → not array-of-objects, so renders inline
+        // Inner array contains an object → triggers Object branch in manifest_toml_inline_value
+        assert_bool(r#"std.length(std.manifestTomlEx({data: [[{x: 1, y: 2}]]}, "")) > 0"#);
+    }
+
+    // TOML unexpected value type
+    #[test]
+    fn test_manifest_toml_ex_function_value_error() {
+        assert_err(r#"std.manifestTomlEx({f: function(x) x}, "")"#);
+    }
+
+    // minArray/maxArray non-array error in call_native_checked_inner
+    #[test]
+    fn test_fc_min_array_non_array_error() {
+        assert_err(r#"local f = std.minArray; f("not_array", function(x) x)"#);
+    }
+
+    #[test]
+    fn test_fc_max_array_non_array_error() {
+        assert_err(r#"local f = std.maxArray; f("not_array", function(x) x)"#);
+    }
+
+    // Stack overflow (deep recursion)
+    #[test]
+    fn test_stack_overflow_error() {
+        assert_err(r#"local f(x) = f(x + 1); f(0)"#);
+    }
+
+    // 'self' used outside object scope
+    #[test]
+    fn test_self_outside_object_error() {
+        assert_err(r#"self.x"#);
+    }
+
+    // 'super' used outside object scope
+    #[test]
+    fn test_super_outside_object_error() {
+        assert_err(r#"super.x"#);
+    }
+
+    // Modulo by zero
+    #[test]
+    fn test_modulo_by_zero_error() {
+        assert_err(r#"5 % 0"#);
+    }
+
+    // Comparison operators (Le, Ge)
+    #[test]
+    fn test_less_or_equal() {
+        assert_bool(r#"1 <= 2"#);
+        assert_bool(r#"2 <= 2"#);
+    }
+
+    #[test]
+    fn test_greater_or_equal() {
+        assert_bool(r#"2 >= 1"#);
+        assert_bool(r#"2 >= 2"#);
+    }
+
+    // Negative string index
+    #[test]
+    fn test_negative_string_index_error() {
+        assert_err(r#""hello"[-1]"#);
+    }
+
+    // StdCall minArray/maxArray empty array with keyF (no onEmpty)
+    #[test]
+    fn test_min_array_empty_with_key_f_error() {
+        assert_err(r#"std.minArray([], function(x) x)"#);
+    }
+
+    #[test]
+    fn test_max_array_empty_with_key_f_error() {
+        assert_err(r#"std.maxArray([], function(x) x)"#);
+    }
+
+    // StdCall uniq 2-arg non-array error
+    #[test]
+    fn test_uniq_2arg_non_array_error() {
+        assert_err(r#"std.uniq("not_array", function(x) x)"#);
+    }
+
+    // StdCall manifestJsonEx with non-string indent
+    #[test]
+    fn test_manifest_json_ex_non_string_indent_direct() {
+        assert_err(r#"std.manifestJsonEx({a: 1}, 42)"#);
+    }
+
+    // Call opcode path: setUnion non-array errors (named arg path)
+    #[test]
+    fn test_fc_set_union_non_array_first_arg_error() {
+        assert_err(r#"local f = std.setUnion; f("not_array", [1,2])"#);
+    }
+
+    #[test]
+    fn test_fc_set_union_non_array_second_arg_error() {
+        assert_err(r#"local f = std.setUnion; f([1,2], "not_array")"#);
+    }
+
+    // Call opcode path: parseYaml non-string error
+    #[test]
+    fn test_fc_parse_yaml_non_string_error() {
+        assert_err(r#"local f = std.parseYaml; f(42)"#);
+    }
+
+    // Named arg not found in native function
+    #[test]
+    fn test_native_fn_unknown_named_arg_error() {
+        assert_err(r#"std.length(x=5)"#);
+    }
+
+    // Named args on non-function
+    #[test]
+    fn test_named_args_on_non_function_error() {
+        assert_err(r#"42(a=1)"#);
+    }
+
+    // std.prune with object containing thunk fields (lazy evaluation)
+    #[test]
+    fn test_prune_object_with_thunk_fields() {
+        // Object field that evaluates to null should be pruned
+        assert_bool(r#"std.prune({a: 1 + 1, b: null}).a == 2"#);
+    }
+
+    // manifestYamlDoc with YAML array-in-array (multiline)
+    #[test]
+    fn test_manifest_yaml_doc_array_in_array() {
+        // Array containing another array - triggers the "nonempty array" branch
+        assert_bool(r#"std.length(std.manifestYamlDoc([[1, 2], [3, 4]])) > 0"#);
+    }
+
+    // std.sort no keyF (2-arg path) non-array
+    #[test]
+    fn test_fc_sort_no_key_f_non_array_error() {
+        // This tests the "Sort" 1-arg path in the Call opcode
+        assert_err(r#"local f = std.sort; f("not_array")"#);
+    }
+
+    // std.set no keyF (1-arg path) non-array
+    #[test]
+    fn test_fc_set_non_array_error() {
+        assert_err(r#"local f = std.set; f("not_array")"#);
+    }
+
+    // std.uniq no keyF (1-arg path) non-array
+    #[test]
+    fn test_fc_uniq_no_key_f_non_array_error() {
+        assert_err(r#"local f = std.uniq; f("not_array")"#);
+    }
+
+    // minArray/maxArray with keyF in the StdCall 2-arg path
+    #[test]
+    fn test_min_array_with_key_f_basic() {
+        assert_bool(r#"std.minArray([3, 1, 2], function(x) x) == 1"#);
+    }
+
+    #[test]
+    fn test_max_array_with_key_f_basic() {
+        assert_bool(r#"std.maxArray([3, 1, 2], function(x) x) == 3"#);
+    }
+
+    // uniq with keyF
+    #[test]
+    fn test_uniq_with_key_f_basic() {
+        assert_bool(r#"std.length(std.uniq([1, 1, 2, 2, 3], function(x) x)) == 3"#);
+    }
+
+    // std.foldl non-array in StdCall path
+    #[test]
+    fn test_foldl_non_array_stdcall_error() {
+        assert_err(r#"std.foldl(function(a, b) a + b, "not_array", 0)"#);
+    }
+
+    // std.foldr non-array in StdCall path
+    #[test]
+    fn test_foldr_non_array_stdcall_error() {
+        assert_err(r#"std.foldr(function(a, b) a + b, "not_array", 0)"#);
+    }
+
+    // Lines 8947-8959: fix_manifest_json_empties — empty array/object with newlines
+    // manifest_json_value for empty [] produces "[\n\n]" which fix_manifest_json_empties converts to "[ ]"
+    #[test]
+    fn test_manifest_json_empty_array_fixup() {
+        assert_bool(r#"std.manifestJson([]) == "[ ]""#);
+    }
+
+    #[test]
+    fn test_manifest_json_empty_object_fixup() {
+        assert_bool(r#"std.manifestJson({}) == "{ }""#);
+    }
+
+    // Lines 1026-1038: handle_manifest_native — ManifestIni/Python/PythonVars via call_value_with_one_arg
+    // When these NativeFunctions are used as callbacks (e.g. in std.map), they route through
+    // call_native_checked_inner → handle_manifest_native instead of the inline Call-opcode handlers
+    #[test]
+    fn test_manifest_ini_as_map_callback() {
+        assert_bool(
+            r#"std.length(std.map(std.manifestIni, [{main: {k: "v"}, sections: {}}])) == 1"#,
+        );
+    }
+
+    #[test]
+    fn test_manifest_python_as_map_callback() {
+        assert_bool(r#"std.length(std.map(std.manifestPython, [42, "hello"])) == 2"#);
+    }
+
+    #[test]
+    fn test_manifest_python_vars_as_map_callback() {
+        assert_bool(r#"std.length(std.map(std.manifestPythonVars, [{x: 1, y: 2}])) == 1"#);
+    }
+
+    // Lines 3300-3314: MinArray/MaxArray StdCall non-array error
+    #[test]
+    fn test_min_array_stdcall_non_array_error() {
+        assert_err(r#"std.minArray("not_an_array")"#);
+    }
+
+    #[test]
+    fn test_max_array_stdcall_non_array_error() {
+        assert_err(r#"std.maxArray("not_an_array")"#);
+    }
+
+    // Lines 899-908: MinArray/MaxArray non-array error in call_native_checked_inner
+    // Reached when minArray/maxArray is used as a callback via call_value_with_one_arg
+    #[test]
+    fn test_min_array_as_callback_non_array_error() {
+        assert_err(r#"std.map(std.minArray, ["not_an_array"])"#);
+    }
+
+    // Lines 11219-11230: yaml_looks_like_number — YAML number character set check
+    // Strings with only digits, dots, e/E, +/-, underscores look like YAML numbers
+    #[test]
+    fn test_manifest_yaml_doc_float_string_quoting() {
+        // "1.5" contains only YAML number chars → yaml_looks_like_number returns true → quoted
+        assert_bool(r#"std.length(std.manifestYamlDoc("1.5")) > 0"#);
+    }
+
+    #[test]
+    fn test_manifest_yaml_doc_exp_string_quoting() {
+        // "1e10" contains only YAML number chars → yaml_looks_like_number returns true → quoted
+        assert_bool(r#"std.length(std.manifestYamlDoc("1e10")) > 0"#);
+    }
+
+    // Lines 9423-9434: is_prunable — object field that is a Closure
+    // prune_value calls is_prunable on each field; if the field is a Closure it forces it first
+    #[test]
+    fn test_prune_object_with_closure_field() {
+        // Object with a lazy closure field: is_prunable executes the closure to check if result is prunable
+        assert_bool(r#"local o = {x:: null, y: 1}; std.objectHas(std.prune(o), "y")"#);
+    }
+
+    #[test]
+    fn test_prune_object_with_closure_field_null_result() {
+        // Field value is a closure returning null → prunable → removed
+        assert_bool(
+            r#"local f = function() null; local o = {x: f(), y: 1}; !std.objectHas(std.prune(o), "x")"#,
+        );
+    }
+
+    // Lines 820, 828: manifestJsonEx non-string newline/kvs args → fallback defaults
+    // Only reachable via call_native_checked_inner (first-class call or callback)
+    #[test]
+    fn test_fc_manifest_json_ex_non_string_newline_fallback() {
+        // null as 3rd arg (newline) → falls back to "\n" default (line 820)
+        assert_bool(r#"local f = std.manifestJsonEx; f({a: 1}, "  ", null) != """#);
+    }
+
+    #[test]
+    fn test_fc_manifest_json_ex_non_string_kvs_fallback() {
+        // null as 4th arg (key_val_sep) → falls back to ": " default (line 828)
+        assert_bool(r#"local f = std.manifestJsonEx; f({a: 1}, "  ", "\n", null) != """#);
+    }
+
+    // Lines 2670, 2674: ArrayIndex on Object with raw (non-closure) field value or missing field
+    // JSON ext_var objects have raw values (not thunks), so dynamic index uses this path
+    #[test]
+    fn test_array_index_on_json_ext_var_object_raw_value() {
+        let src = r#"std.extVar("obj")["b"]"#;
+        let mut scanner_inst = scanner::Scanner::new(src, "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler_inst = compiler::Compiler::new(&mut scanner_inst, "test.jsonnet");
+        let chunk = compiler_inst.compile(&mut memory_manager).expect("compile");
+        let ext_codes = vec![("obj".to_string(), r#"{"a": 1, "b": 2}"#.to_string())];
+        let result =
+            execute_with_ext_vars(chunk, memory_manager, &[], &ext_codes, &[]).expect("run");
+        assert_eq!(result, serde_json::json!(2.0));
+    }
 }

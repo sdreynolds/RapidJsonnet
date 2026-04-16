@@ -7356,4 +7356,1146 @@ mod tests {
         .unwrap();
         assert!(matches!(result, Value::Array(_)));
     }
+
+    // Gap-fill: values_equal for Boolean, Array, Object
+
+    #[test]
+    fn test_values_equal_booleans() {
+        let mm = MemoryManager::new();
+        assert!(values_equal(
+            Value::Boolean(true),
+            Value::Boolean(true),
+            &mm
+        ));
+        assert!(!values_equal(
+            Value::Boolean(true),
+            Value::Boolean(false),
+            &mm
+        ));
+    }
+
+    #[test]
+    fn test_values_equal_strings() {
+        let mut mm = MemoryManager::new();
+        let s1 = mm.allocate_string("hello").index;
+        let s2 = mm.allocate_string("hello").index;
+        let s3 = mm.allocate_string("world").index;
+        assert!(values_equal(Value::String(s1), Value::String(s2), &mm));
+        assert!(!values_equal(Value::String(s1), Value::String(s3), &mm));
+    }
+
+    #[test]
+    fn test_values_equal_arrays() {
+        let mut mm = MemoryManager::new();
+        let a1 = mm
+            .allocate_array(vec![Value::Number(1.0), Value::Number(2.0)])
+            .index;
+        let a2 = mm
+            .allocate_array(vec![Value::Number(1.0), Value::Number(2.0)])
+            .index;
+        let a3 = mm
+            .allocate_array(vec![Value::Number(1.0), Value::Number(3.0)])
+            .index;
+        let a4 = mm.allocate_array(vec![Value::Number(1.0)]).index;
+        assert!(values_equal(Value::Array(a1), Value::Array(a2), &mm));
+        assert!(!values_equal(Value::Array(a1), Value::Array(a3), &mm));
+        assert!(!values_equal(Value::Array(a1), Value::Array(a4), &mm));
+    }
+
+    #[test]
+    fn test_values_equal_objects() {
+        use chunk::FieldVisibility;
+        use memory_manager::ObjectField;
+        use std::collections::HashMap;
+        let mut mm = MemoryManager::new();
+        let k = mm.allocate_string("x").index;
+        let mut props1 = HashMap::new();
+        props1.insert(
+            k,
+            ObjectField::new(Value::Number(1.0), FieldVisibility::Visible),
+        );
+        let o1 = mm.allocate_object_with_properties(props1).index;
+        let mut props2 = HashMap::new();
+        props2.insert(
+            k,
+            ObjectField::new(Value::Number(1.0), FieldVisibility::Visible),
+        );
+        let o2 = mm.allocate_object_with_properties(props2).index;
+        let mut props3 = HashMap::new();
+        props3.insert(
+            k,
+            ObjectField::new(Value::Number(2.0), FieldVisibility::Visible),
+        );
+        let o3 = mm.allocate_object_with_properties(props3).index;
+        assert!(values_equal(Value::Object(o1), Value::Object(o2), &mm));
+        assert!(!values_equal(Value::Object(o1), Value::Object(o3), &mm));
+    }
+
+    #[test]
+    fn test_values_equal_cross_type() {
+        let mm = MemoryManager::new();
+        assert!(!values_equal(Value::Null, Value::Boolean(false), &mm));
+        assert!(!values_equal(
+            Value::Number(0.0),
+            Value::Boolean(false),
+            &mm
+        ));
+    }
+
+    // Gap-fill: value_to_format_string for non-string types via std_format
+
+    #[test]
+    fn test_format_null_value() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%s");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Null],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_boolean_value() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%s");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Boolean(true)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_number_as_string() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%s");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(42.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_float_as_string() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%s");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(3.14)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_array_as_string() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%s");
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0)]);
+        let result =
+            call_native(NativeFuncId::Format, &[fmt, arr], &mut mm, span(), sid()).unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_array_element_as_string() {
+        // value_to_format_string is called when formatting a non-string value via %s.
+        // When an array is the second arg, each element is used positionally.
+        // Use %s %s to consume two elements, showing array value formatting.
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%s %s");
+        let e1 = mk_array(&mut mm, vec![Value::Number(1.0)]); // inner array as first arg
+        let e2 = mk_string(&mut mm, "x");
+        let outer = mk_array(&mut mm, vec![e1, e2]);
+        // args: outer array with [inner_array, "x"] — first %s formats inner_array via value_to_format_string
+        let result =
+            call_native(NativeFuncId::Format, &[fmt, outer], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result {
+            let s = mm.load_string(idx).to_string();
+            // inner_array [1] formats as "[1]", then "x"
+            assert!(s.contains("1") && s.contains("x"), "got: {}", s);
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    #[test]
+    fn test_format_object_as_named_string() {
+        // value_to_format_string for Object: use named key %(key)s format
+        use chunk::FieldVisibility;
+        use memory_manager::ObjectField;
+        use std::collections::HashMap;
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%(a)s");
+        let k = mm.allocate_string("a").index;
+        let mut props = HashMap::new();
+        props.insert(
+            k,
+            ObjectField::new(Value::Number(1.0), FieldVisibility::Visible),
+        );
+        let obj = mm.allocate_object_with_properties(props).index;
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Object(obj)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_object_empty_string_repr() {
+        // value_to_format_string for empty Object uses "{ }"
+        // trigger via %s with an object that has a sub-object value
+        let mut mm = MemoryManager::new();
+        // Use %(k)s to get named format — the empty object is the value of field 'k'
+        let fmt = mk_string(&mut mm, "%(k)s");
+        let outer_key = mm.allocate_string("k").index;
+        let inner_obj = mm
+            .allocate_object_full_with_base(None, std::collections::HashMap::new(), Vec::new())
+            .index;
+        let mut outer_props = std::collections::HashMap::new();
+        outer_props.insert(
+            outer_key,
+            memory_manager::ObjectField::new(
+                Value::Object(inner_obj),
+                chunk::FieldVisibility::Visible,
+            ),
+        );
+        let outer_obj = mm.allocate_object_with_properties(outer_props).index;
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Object(outer_obj)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        if let Value::String(idx) = result {
+            assert_eq!(mm.load_string(idx), "{ }");
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    // Gap-fill: format specifier precision/width
+
+    #[test]
+    fn test_format_precision_f() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%.2f");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(3.14159)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        if let Value::String(idx) = result {
+            let s = mm.load_string(idx).to_string();
+            assert!(s.contains("3.14"), "got: {}", s);
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    #[test]
+    fn test_format_width_right_align() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%10s");
+        let val = mk_string(&mut mm, "hi");
+        let result =
+            call_native(NativeFuncId::Format, &[fmt, val], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result {
+            let s = mm.load_string(idx).to_string();
+            assert_eq!(s.len(), 10, "got: {:?}", s);
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    #[test]
+    fn test_format_left_align() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%-10s");
+        let val = mk_string(&mut mm, "hi");
+        let result =
+            call_native(NativeFuncId::Format, &[fmt, val], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result {
+            let s = mm.load_string(idx).to_string();
+            assert_eq!(s.len(), 10, "got: {:?}", s);
+            assert!(s.starts_with("hi"), "got: {:?}", s);
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    #[test]
+    fn test_format_d_specifier() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%d");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(42.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        if let Value::String(idx) = result {
+            assert_eq!(mm.load_string(idx), "42");
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    #[test]
+    fn test_format_e_specifier() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%e");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(12345.678)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_g_specifier() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%g");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(12345.678)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_g_alt_zero() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%#g");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(0.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_g_alt_large_exp() {
+        let mut mm = MemoryManager::new();
+        // exponent >= prec triggers exponential notation branch in format_g_alt
+        let fmt = mk_string(&mut mm, "%#g");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(1e10)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_g_alt_small_exp() {
+        let mut mm = MemoryManager::new();
+        // exponent in [-4, prec) triggers decimal notation branch in format_g_alt
+        let fmt = mk_string(&mut mm, "%#g");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(12.34)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_G_specifier() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%G");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(12345.678)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_E_specifier() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%E");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(0.000123)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_format_o_specifier() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%o");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(8.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        if let Value::String(idx) = result {
+            assert_eq!(mm.load_string(idx), "10");
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    #[test]
+    fn test_format_x_specifier() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%x");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(255.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        if let Value::String(idx) = result {
+            assert_eq!(mm.load_string(idx), "ff");
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    #[test]
+    fn test_format_c_specifier() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%c");
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Number(65.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        if let Value::String(idx) = result {
+            assert_eq!(mm.load_string(idx), "A");
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    // Gap-fill: std_min_array / std_max_array
+
+    #[test]
+    fn test_min_array_basic() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(
+            &mut mm,
+            vec![Value::Number(3.0), Value::Number(1.0), Value::Number(2.0)],
+        );
+        // MinArray has arity 3: (arr, keyF, onEmpty) — pass Null for optional args
+        let result = call_native(
+            NativeFuncId::MinArray,
+            &[arr, Value::Null, Value::Null],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Number(1.0));
+    }
+
+    #[test]
+    fn test_max_array_basic() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(
+            &mut mm,
+            vec![Value::Number(3.0), Value::Number(1.0), Value::Number(2.0)],
+        );
+        let result = call_native(
+            NativeFuncId::MaxArray,
+            &[arr, Value::Null, Value::Null],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Number(3.0));
+    }
+
+    #[test]
+    fn test_min_array_empty_err() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![]);
+        let err = call_native(
+            NativeFuncId::MinArray,
+            &[arr, Value::Null, Value::Null],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_max_array_empty_err() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![]);
+        let err = call_native(
+            NativeFuncId::MaxArray,
+            &[arr, Value::Null, Value::Null],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_min_array_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(
+            NativeFuncId::MinArray,
+            &[Value::Number(1.0), Value::Null, Value::Null],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_max_array_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(
+            NativeFuncId::MaxArray,
+            &[Value::Number(1.0), Value::Null, Value::Null],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Gap-fill: std_object_from_pairs
+
+    #[test]
+    fn test_object_from_pairs_basic() {
+        let mut mm = MemoryManager::new();
+        let k = mk_string(&mut mm, "x");
+        let pair = mk_array(&mut mm, vec![k, Value::Number(42.0)]);
+        let arr = mk_array(&mut mm, vec![pair]);
+        let result = call_native(
+            NativeFuncId::ObjectFromPairs,
+            &[arr],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Object(_)));
+    }
+
+    #[test]
+    fn test_object_from_pairs_wrong_outer_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(
+            NativeFuncId::ObjectFromPairs,
+            &[Value::Number(1.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_object_from_pairs_non_array_elem() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0)]);
+        let err = call_native(
+            NativeFuncId::ObjectFromPairs,
+            &[arr],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_object_from_pairs_wrong_pair_length() {
+        let mut mm = MemoryManager::new();
+        // Pair with 3 elements instead of 2
+        let k = mk_string(&mut mm, "x");
+        let triple = mk_array(&mut mm, vec![k, Value::Number(1.0), Value::Number(2.0)]);
+        let arr = mk_array(&mut mm, vec![triple]);
+        let err = call_native(
+            NativeFuncId::ObjectFromPairs,
+            &[arr],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_object_from_pairs_non_string_key() {
+        let mut mm = MemoryManager::new();
+        // Pair where key is not a string
+        let pair = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0)]);
+        let arr = mk_array(&mut mm, vec![pair]);
+        let err = call_native(
+            NativeFuncId::ObjectFromPairs,
+            &[arr],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Gap-fill: std_product
+
+    #[test]
+    fn test_product_basic() {
+        let mut mm = MemoryManager::new();
+        let a = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0)]);
+        let b = mk_array(&mut mm, vec![Value::Number(3.0), Value::Number(4.0)]);
+        let arr = mk_array(&mut mm, vec![a, b]);
+        let result = call_native(NativeFuncId::Product, &[arr], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result {
+            assert_eq!(mm.load_array(idx).len(), 4); // 2 * 2 = 4 tuples
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    #[test]
+    fn test_product_empty_input() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![]);
+        let result = call_native(NativeFuncId::Product, &[arr], &mut mm, span(), sid()).unwrap();
+        // Product of no arrays = one empty tuple
+        if let Value::Array(idx) = result {
+            assert_eq!(mm.load_array(idx).len(), 1);
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    #[test]
+    fn test_product_wrong_outer_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(
+            NativeFuncId::Product,
+            &[Value::Number(1.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_product_non_array_element() {
+        let mut mm = MemoryManager::new();
+        // Outer array contains a non-array element
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0)]);
+        let err = call_native(NativeFuncId::Product, &[arr], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Gap-fill: format_with_object_args (named format %(key)s)
+
+    #[test]
+    fn test_format_named_key() {
+        use chunk::FieldVisibility;
+        use memory_manager::ObjectField;
+        use std::collections::HashMap;
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "%(x)s");
+        let k = mm.allocate_string("x").index;
+        let v = mm.allocate_string("hello").index;
+        let mut props = HashMap::new();
+        props.insert(
+            k,
+            ObjectField::new(Value::String(v), FieldVisibility::Visible),
+        );
+        let obj = mm.allocate_object_with_properties(props).index;
+        let result = call_native(
+            NativeFuncId::Format,
+            &[fmt, Value::Object(obj)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        if let Value::String(idx) = result {
+            assert_eq!(mm.load_string(idx), "hello");
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    // Gap-fill: join with array separator (lines 1395-1418)
+
+    #[test]
+    fn test_join_array_separator_basic() {
+        let mut mm = MemoryManager::new();
+        // join([sep_arr], [[a, b], [c, d]]) → [a, b, sep..., c, d]
+        let sep = mk_array(&mut mm, vec![Value::Number(0.0)]);
+        let sub1 = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0)]);
+        let sub2 = mk_array(&mut mm, vec![Value::Number(3.0), Value::Number(4.0)]);
+        let outer = mk_array(&mut mm, vec![sub1, sub2]);
+        let result =
+            call_native(NativeFuncId::Join, &[sep, outer], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result {
+            // [1, 2, 0, 3, 4]
+            assert_eq!(mm.load_array(idx).len(), 5);
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    #[test]
+    fn test_join_array_separator_with_nulls() {
+        let mut mm = MemoryManager::new();
+        // join([sep_arr], [null, [a], null, [b]]) → nulls are skipped
+        let sep = mk_array(&mut mm, vec![]);
+        let sub = mk_array(&mut mm, vec![Value::Number(1.0)]);
+        let outer = mk_array(&mut mm, vec![Value::Null, sub, Value::Null]);
+        let result =
+            call_native(NativeFuncId::Join, &[sep, outer], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result {
+            assert_eq!(mm.load_array(idx).len(), 1);
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    #[test]
+    fn test_join_array_separator_non_array_elem_err() {
+        let mut mm = MemoryManager::new();
+        let sep = mk_array(&mut mm, vec![]);
+        // outer contains a non-null, non-array element
+        let outer = mk_array(&mut mm, vec![Value::Number(1.0)]);
+        let err =
+            call_native(NativeFuncId::Join, &[sep, outer], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Gap-fill: std.lines (lines 1443-1467)
+
+    #[test]
+    fn test_lines_basic() {
+        let mut mm = MemoryManager::new();
+        let s1 = mk_string(&mut mm, "foo");
+        let s2 = mk_string(&mut mm, "bar");
+        let arr = mk_array(&mut mm, vec![s1, s2]);
+        let result = call_native(NativeFuncId::Lines, &[arr], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result {
+            let out = mm.load_string(idx).to_string();
+            assert!(out.contains("foo") && out.contains("bar"), "got: {}", out);
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    #[test]
+    fn test_lines_with_nulls() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let arr = mk_array(&mut mm, vec![Value::Null, s, Value::Null]);
+        let result = call_native(NativeFuncId::Lines, &[arr], &mut mm, span(), sid()).unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+
+    #[test]
+    fn test_lines_wrong_type_err() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(
+            NativeFuncId::Lines,
+            &[Value::Number(1.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_lines_non_string_elem_err() {
+        let mut mm = MemoryManager::new();
+        let arr = mk_array(&mut mm, vec![Value::Number(1.0)]);
+        let err = call_native(NativeFuncId::Lines, &[arr], &mut mm, span(), sid()).unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Gap-fill: std.stringChars (lines ~1472-1500)
+
+    #[test]
+    fn test_string_chars_basic() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "abc");
+        let result = call_native(NativeFuncId::StringChars, &[s], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result {
+            assert_eq!(mm.load_array(idx).len(), 3);
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    #[test]
+    fn test_string_chars_wrong_type_err() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(
+            NativeFuncId::StringChars,
+            &[Value::Number(1.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Gap-fill: std.flattenArrays non-array element error (line 1528)
+
+    #[test]
+    fn test_flatten_arrays_non_array_elem_err() {
+        let mut mm = MemoryManager::new();
+        // outer array has a non-null, non-array element
+        let outer = mk_array(&mut mm, vec![Value::Number(1.0)]);
+        let err = call_native(
+            NativeFuncId::FlattenArrays,
+            &[outer],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Gap-fill: std.member with string haystack (lines 1579-1592)
+
+    #[test]
+    fn test_member_string_haystack_found() {
+        let mut mm = MemoryManager::new();
+        let haystack = mk_string(&mut mm, "hello world");
+        let needle = mk_string(&mut mm, "world");
+        let result = call_native(
+            NativeFuncId::Member,
+            &[haystack, needle],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_member_string_haystack_not_found() {
+        let mut mm = MemoryManager::new();
+        let haystack = mk_string(&mut mm, "hello");
+        let needle = mk_string(&mut mm, "xyz");
+        let result = call_native(
+            NativeFuncId::Member,
+            &[haystack, needle],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_member_string_haystack_non_string_needle_err() {
+        let mut mm = MemoryManager::new();
+        let haystack = mk_string(&mut mm, "hello");
+        let err = call_native(
+            NativeFuncId::Member,
+            &[haystack, Value::Number(1.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Gap-fill: std.get function (lines 155-163)
+
+    #[test]
+    fn test_std_get_existing() {
+        use chunk::FieldVisibility;
+        use memory_manager::ObjectField;
+        use std::collections::HashMap;
+        let mut mm = MemoryManager::new();
+        let k = mm.allocate_string("a").index;
+        let mut props = HashMap::new();
+        props.insert(
+            k,
+            ObjectField::new(Value::Number(42.0), FieldVisibility::Visible),
+        );
+        let obj = mm.allocate_object_with_properties(props).index;
+        let key = mk_string(&mut mm, "a");
+        let result = call_native(
+            NativeFuncId::Get,
+            &[Value::Object(obj), key, Value::Null, Value::Boolean(true)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Number(42.0));
+    }
+
+    #[test]
+    fn test_std_get_missing_with_default() {
+        use chunk::FieldVisibility;
+        use memory_manager::ObjectField;
+        use std::collections::HashMap;
+        let mut mm = MemoryManager::new();
+        let k = mm.allocate_string("a").index;
+        let mut props = HashMap::new();
+        props.insert(
+            k,
+            ObjectField::new(Value::Number(1.0), FieldVisibility::Visible),
+        );
+        let obj = mm.allocate_object_with_properties(props).index;
+        let key = mk_string(&mut mm, "z");
+        let default_val = Value::Number(99.0);
+        let result = call_native(
+            NativeFuncId::Get,
+            &[Value::Object(obj), key, default_val, Value::Boolean(true)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Number(99.0));
+    }
+
+    // Gap-fill: std.objectHasAll (lines 164-165)
+
+    #[test]
+    fn test_object_has_all_visible() {
+        use chunk::FieldVisibility;
+        use memory_manager::ObjectField;
+        use std::collections::HashMap;
+        let mut mm = MemoryManager::new();
+        let k = mm.allocate_string("x").index;
+        let mut props = HashMap::new();
+        props.insert(
+            k,
+            ObjectField::new(Value::Number(1.0), FieldVisibility::Hidden),
+        );
+        let obj = mm.allocate_object_with_properties(props).index;
+        let key = mk_string(&mut mm, "x");
+        let result = call_native(
+            NativeFuncId::ObjectHasAll,
+            &[Value::Object(obj), key],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        // ObjectHasAll should find hidden fields too
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    // Gap-fill: std.asciiLower wrong type
+
+    #[test]
+    fn test_ascii_lower_wrong_type() {
+        let mut mm = MemoryManager::new();
+        let err = call_native(
+            NativeFuncId::AsciiLower,
+            &[Value::Number(1.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Gap-fill: SetDiff elements where a > b (line 544)
+
+    #[test]
+    fn test_set_diff_b_before_a() {
+        // Tests the Greater branch in SetDiff (b_elem key > a_elem key → advance j)
+        let mut mm = MemoryManager::new();
+        let a = mk_array(&mut mm, vec![Value::Number(3.0), Value::Number(5.0)]);
+        let b = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(2.0)]);
+        let result = call_native(NativeFuncId::SetDiff, &[a, b], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result {
+            // 3 and 5 are not in b, so all remain
+            assert_eq!(mm.load_array(idx).len(), 2);
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    // Gap-fill: SetInter Greater branch (line 500)
+
+    #[test]
+    fn test_set_inter_b_greater() {
+        // Tests the Greater (j + 1) branch in SetInter
+        let mut mm = MemoryManager::new();
+        let a = mk_array(&mut mm, vec![Value::Number(1.0), Value::Number(3.0)]);
+        let b = mk_array(
+            &mut mm,
+            vec![Value::Number(2.0), Value::Number(3.0), Value::Number(4.0)],
+        );
+        let result = call_native(NativeFuncId::SetInter, &[a, b], &mut mm, span(), sid()).unwrap();
+        if let Value::Array(idx) = result {
+            assert_eq!(mm.load_array(idx).len(), 1);
+            assert_eq!(mm.load_array(idx).elements[0], Value::Number(3.0));
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    // Gap-fill: format %% escape
+
+    #[test]
+    fn test_format_percent_escape() {
+        let mut mm = MemoryManager::new();
+        let fmt = mk_string(&mut mm, "100%%");
+        let arr = mk_array(&mut mm, vec![]);
+        let result =
+            call_native(NativeFuncId::Format, &[fmt, arr], &mut mm, span(), sid()).unwrap();
+        if let Value::String(idx) = result {
+            assert_eq!(mm.load_string(idx), "100%");
+        } else {
+            panic!("expected string");
+        }
+    }
+
+    // Gap-fill: substr error paths (lines 1271-1288)
+
+    #[test]
+    fn test_substr_negative_from_err() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let err = call_native(
+            NativeFuncId::Substr,
+            &[s, Value::Number(-1.0), Value::Number(3.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn test_substr_negative_len_err() {
+        let mut mm = MemoryManager::new();
+        let s = mk_string(&mut mm, "hello");
+        let err = call_native(
+            NativeFuncId::Substr,
+            &[s, Value::Number(0.0), Value::Number(-1.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    // Gap-fill: std.isFunction
+
+    #[test]
+    fn test_is_function_native() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(
+            NativeFuncId::IsFunction,
+            &[Value::NativeFunction(NativeFuncId::Abs)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_is_function_false_native() {
+        let mut mm = MemoryManager::new();
+        let result = call_native(
+            NativeFuncId::IsFunction,
+            &[Value::Number(1.0)],
+            &mut mm,
+            span(),
+            sid(),
+        )
+        .unwrap();
+        assert_eq!(result, Value::Boolean(false));
+    }
 }
