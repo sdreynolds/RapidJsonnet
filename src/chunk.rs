@@ -1260,7 +1260,11 @@ impl NativeFuncId {
     }
 
     /// Returns all (name, id) pairs for the standard (non-extended) std object.
-    /// Delegates to [`all_std_with_names`]; no longer includes the 21 stdExtended functions.
+    /// Delegates to [`all_std_with_names`]; no longer includes the stdExtended functions.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use all_std_with_names() for std entries or all_extended_with_names() for stdExtended."
+    )]
     pub fn all_with_names() -> &'static [(&'static str, NativeFuncId)] {
         // For backward compat we keep this as an alias.
         // NOTE: This only returns the std entries; callers that need all entries
@@ -2912,6 +2916,7 @@ mod tests {
 
     // Gap-fill: NativeFuncId::all_with_names() — lines 1068-1237
 
+    #[allow(deprecated)]
     #[test]
     fn test_native_func_id_all_with_names() {
         let pairs = NativeFuncId::all_with_names();

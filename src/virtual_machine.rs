@@ -8047,7 +8047,7 @@ impl VirtualMachine {
         obj
     }
 
-    /// Get or create the `stdExtended` object with the 21 extension functions as hidden fields.
+    /// Get or create the `stdExtended` object with the extension functions as hidden fields.
     fn get_or_create_std_extended_object(&mut self) -> Value {
         if let Some(obj) = self.std_extended_object {
             return obj;
@@ -8368,6 +8368,11 @@ impl VirtualMachine {
         // Root the cached std object so GC doesn't collect it
         if let Some(std_obj) = self.std_object {
             roots.push(std_obj);
+        }
+
+        // Root the cached stdExtended object so GC doesn't collect it
+        if let Some(std_extended_obj) = self.std_extended_object {
+            roots.push(std_extended_obj);
         }
 
         // Root all cached field values so GC doesn't collect them
