@@ -1259,7 +1259,8 @@ impl NativeFuncId {
         ]
     }
 
-    /// Returns all (name, id) pairs for both std and stdExtended (backward compat).
+    /// Returns all (name, id) pairs for the standard (non-extended) std object.
+    /// Delegates to [`all_std_with_names`]; no longer includes the 21 stdExtended functions.
     pub fn all_with_names() -> &'static [(&'static str, NativeFuncId)] {
         // For backward compat we keep this as an alias.
         // NOTE: This only returns the std entries; callers that need all entries
@@ -2857,7 +2858,7 @@ mod tests {
             0u8, 1, 2, 3, 4, 5, 6, 10, 11, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 30, 31, 32,
             33, 34, 40, 41, 42, 43, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65,
             67, 70, 71, 72, 73, 80, 81, 82, 83, 84, 90, 91, 92, 93, 100, 101, 102, 103, 104, 105,
-            106, 107, 108,
+            106, 107, 108, 109,
         ];
         for &op in &known_opcodes {
             assert!(
