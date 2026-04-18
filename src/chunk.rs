@@ -1073,7 +1073,7 @@ impl NativeFuncId {
     }
 
     /// Lookup a native function by name (searches both std and stdExtended).
-    /// Kept for backward compatibility — the compiler will be updated to call
+    /// Kept for backward compatibility — the compiler has been updated to call
     /// `from_std_name` and `from_extended_name` separately.
     pub fn from_name(name: &str) -> Option<Self> {
         Self::from_std_name(name).or_else(|| Self::from_extended_name(name))

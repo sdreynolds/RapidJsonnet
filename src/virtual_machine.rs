@@ -5178,7 +5178,7 @@ impl VirtualMachine {
                                 return Err(RuntimeError::new(
                                     self.get_current_span(),
                                     format!(
-                                        "std.{}: expected array, got {}",
+                                        "stdExtended.{}: expected array, got {}",
                                         func_id.name(),
                                         other.type_name()
                                     ),
@@ -5197,7 +5197,7 @@ impl VirtualMachine {
                             self.memory_manager.external_roots.pop();
                             return Err(RuntimeError::new(
                                 self.get_current_span(),
-                                format!("std.{}: array must not be empty", func_id.name()),
+                                format!("stdExtended.{}: array must not be empty", func_id.name()),
                                 self.current_chunk().source_id.to_string(),
                             ));
                         }
@@ -7092,7 +7092,7 @@ impl VirtualMachine {
                                             return Err(RuntimeError::new(
                                                 self.get_current_span(),
                                                 format!(
-                                                    "std.{}: expected array, got {}",
+                                                    "stdExtended.{}: expected array, got {}",
                                                     id.name(),
                                                     other.type_name()
                                                 ),
@@ -7111,7 +7111,10 @@ impl VirtualMachine {
                                         self.memory_manager.external_roots.pop();
                                         return Err(RuntimeError::new(
                                             self.get_current_span(),
-                                            format!("std.{}: array must not be empty", id.name()),
+                                            format!(
+                                                "stdExtended.{}: array must not be empty",
+                                                id.name()
+                                            ),
                                             self.current_chunk().source_id.to_string(),
                                         ));
                                     }
