@@ -67,6 +67,7 @@ enum ExpressionType {
     Array,
     Unknown,
     StdNamespace,
+    StdExtendedNamespace, // new
     NativeFunction(chunk::NativeFuncId),
 }
 
@@ -776,6 +777,9 @@ impl<'a> Compiler<'a> {
                     // If followed by `.func`, the dot handler will pop it.
                     self.emit_opcode(Opcode::LoadStd, span);
                     self.push_type(ExpressionType::StdNamespace);
+                } else if name_clone == "stdExtended" {
+                    self.emit_opcode(Opcode::LoadStdExtended, span);
+                    self.push_type(ExpressionType::StdExtendedNamespace);
                 } else {
                     // Variable not found
                     return Err(
@@ -1368,6 +1372,29 @@ impl<'a> Compiler<'a> {
                                 return Err(self.make_error(
                                     property_token.span,
                                     format!("Native function 'std.{}' not found", name),
+                                ));
+                            }
+                        } else if let Some(ExpressionType::StdExtendedNamespace) =
+                            self.type_stack.last()
+                        {
+                            self.type_stack.pop();
+                            self.emit_opcode(Opcode::Pop, property_token.span.clone());
+
+                            if let Some(id) = chunk::NativeFuncId::from_extended_name(name) {
+                                let const_idx = self
+                                    .compiling_chunk
+                                    .add_constant(chunk::Value::NativeFunction(id));
+                                self.compiling_chunk.write_opcode_u16(
+                                    Opcode::LoadConst,
+                                    const_idx as u16,
+                                    property_token.span.clone(),
+                                );
+                                self.push_type(ExpressionType::NativeFunction(id));
+                                return Ok(());
+                            } else {
+                                return Err(self.make_error(
+                                    property_token.span,
+                                    format!("Native function 'stdExtended.{}' not found", name),
                                 ));
                             }
                         }
