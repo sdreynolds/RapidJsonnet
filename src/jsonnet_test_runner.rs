@@ -76,6 +76,11 @@ fn main() {
         }
     }
 
+    // Auto-enable coverage when Bazel coverage mode is active.
+    if std::env::var("COVERAGE_OUTPUT_FILE").is_ok() {
+        collect_coverage = true;
+    }
+
     let filename = match args_iter.next() {
         Some(f) => f,
         None => {
@@ -138,7 +143,8 @@ fn main() {
             if let Some(coverage) = &maybe_coverage {
                 let needs_lcov = lcov_output.is_some()
                     || std::env::var("TEST_UNDECLARED_OUTPUTS_DIR").is_ok()
-                    || std::env::var("COVERAGE_DIR").is_ok();
+                    || std::env::var("COVERAGE_DIR").is_ok()
+                    || std::env::var("COVERAGE_OUTPUT_FILE").is_ok();
                 if needs_lcov {
                     let tn = suite_name.as_deref().unwrap_or("");
                     let lcov_content = generate_lcov(coverage, tn);
@@ -166,6 +172,12 @@ fn main() {
                         let dat = std::path::Path::new(&coverage_dir).join("coverage.dat");
                         if let Err(e) = fs::write(&dat, &lcov_content) {
                             eprintln!("Warning: failed to write coverage.dat: {}", e);
+                        }
+                    }
+                    // bazel coverage: write LCOV to the file Bazel's lcov_merger expects.
+                    if let Ok(cov_file) = std::env::var("COVERAGE_OUTPUT_FILE") {
+                        if let Err(e) = fs::write(&cov_file, &lcov_content) {
+                            eprintln!("Warning: failed to write coverage to {}: {}", cov_file, e);
                         }
                     }
                 }
