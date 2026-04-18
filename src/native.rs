@@ -369,7 +369,7 @@ pub fn call_native(
                 _ => {
                     return Err(RuntimeError::new(
                         span,
-                        "std.gcd: expected non-negative integer".to_string(),
+                        "stdExtended.gcd: expected non-negative integer".to_string(),
                         source_id,
                     ));
                 }
@@ -379,7 +379,7 @@ pub fn call_native(
                 _ => {
                     return Err(RuntimeError::new(
                         span,
-                        "std.gcd: expected non-negative integer".to_string(),
+                        "stdExtended.gcd: expected non-negative integer".to_string(),
                         source_id,
                     ));
                 }
@@ -400,7 +400,7 @@ pub fn call_native(
                 _ => {
                     return Err(RuntimeError::new(
                         span,
-                        "std.lcm: expected non-negative integer".to_string(),
+                        "stdExtended.lcm: expected non-negative integer".to_string(),
                         source_id,
                     ));
                 }
@@ -410,7 +410,7 @@ pub fn call_native(
                 _ => {
                     return Err(RuntimeError::new(
                         span,
-                        "std.lcm: expected non-negative integer".to_string(),
+                        "stdExtended.lcm: expected non-negative integer".to_string(),
                         source_id,
                     ));
                 }
@@ -433,7 +433,7 @@ pub fn call_native(
                 _ => {
                     return Err(RuntimeError::new(
                         span,
-                        "std.indent: first argument must be a string".to_string(),
+                        "stdExtended.indent: first argument must be a string".to_string(),
                         source_id,
                     ));
                 }
@@ -443,7 +443,7 @@ pub fn call_native(
                 _ => {
                     return Err(RuntimeError::new(
                         span,
-                        "std.indent: second argument must be a string".to_string(),
+                        "stdExtended.indent: second argument must be a string".to_string(),
                         source_id,
                     ));
                 }
@@ -3732,7 +3732,7 @@ fn std_escape_string_bash(
     }
 }
 
-/// std.parseFloat(str): parse string to float
+/// stdExtended.parseFloat(str): parse string to float
 fn std_parse_float(
     val: Value,
     memory_manager: &mut MemoryManager,
@@ -3746,14 +3746,14 @@ fn std_parse_float(
                 Ok(n) => Ok(Value::Number(n)),
                 Err(_) => Err(RuntimeError::new(
                     span,
-                    format!("std.parseFloat: could not parse {:?}", s),
+                    format!("stdExtended.parseFloat: could not parse {:?}", s),
                     source_id,
                 )),
             }
         }
         _ => Err(RuntimeError::new(
             span,
-            "std.parseFloat: argument must be a string".to_string(),
+            "stdExtended.parseFloat: argument must be a string".to_string(),
             source_id,
         )),
     }
@@ -4563,9 +4563,9 @@ fn frexp(x: f64) -> (f64, i32) {
     (mantissa, exp)
 }
 
-// ─── std.chunk ────────────────────────────────────────────────────────────────
+// ─── stdExtended.chunk ────────────────────────────────────────────────────────────────
 
-/// std.chunk(arr, size): Split arr into consecutive sub-arrays of length size
+/// stdExtended.chunk(arr, size): Split arr into consecutive sub-arrays of length size
 /// (the last chunk may be shorter if the array length is not a multiple of size).
 fn std_chunk(
     arr_val: Value,
@@ -4579,7 +4579,7 @@ fn std_chunk(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.chunk: first argument must be an array".to_string(),
+                "stdExtended.chunk: first argument must be an array".to_string(),
                 source_id,
             ));
         }
@@ -4589,7 +4589,7 @@ fn std_chunk(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.chunk: second argument must be a positive integer".to_string(),
+                "stdExtended.chunk: second argument must be a positive integer".to_string(),
                 source_id,
             ));
         }
@@ -4604,9 +4604,9 @@ fn std_chunk(
     Ok(Value::Array(alloc.index))
 }
 
-// ─── std.zip ──────────────────────────────────────────────────────────────────
+// ─── stdExtended.zip ──────────────────────────────────────────────────────────────────
 
-/// std.zip(arr1, arr2): Pair up elements from two arrays into an array of 2-element arrays,
+/// stdExtended.zip(arr1, arr2): Pair up elements from two arrays into an array of 2-element arrays,
 /// truncating to the length of the shorter array.
 fn std_zip(
     arr1_val: Value,
@@ -4620,7 +4620,7 @@ fn std_zip(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.zip: first argument must be an array".to_string(),
+                "stdExtended.zip: first argument must be an array".to_string(),
                 source_id,
             ));
         }
@@ -4630,7 +4630,7 @@ fn std_zip(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.zip: second argument must be an array".to_string(),
+                "stdExtended.zip: second argument must be an array".to_string(),
                 source_id,
             ));
         }
@@ -4647,9 +4647,9 @@ fn std_zip(
     Ok(Value::Array(alloc.index))
 }
 
-// ─── std.unzip ────────────────────────────────────────────────────────────────
+// ─── stdExtended.unzip ────────────────────────────────────────────────────────────────
 
-/// std.unzip(arr): Convert an array of 2-element arrays into a pair of arrays
+/// stdExtended.unzip(arr): Convert an array of 2-element arrays into a pair of arrays
 /// [firsts, seconds].
 fn std_unzip(
     arr_val: Value,
@@ -4662,7 +4662,7 @@ fn std_unzip(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.unzip: argument must be an array".to_string(),
+                "stdExtended.unzip: argument must be an array".to_string(),
                 source_id,
             ));
         }
@@ -4678,7 +4678,7 @@ fn std_unzip(
                     return Err(RuntimeError::new(
                         span,
                         format!(
-                            "std.unzip: each element must be a 2-element array, got length {}",
+                            "stdExtended.unzip: each element must be a 2-element array, got length {}",
                             pair.len()
                         ),
                         source_id,
@@ -4690,7 +4690,7 @@ fn std_unzip(
             _ => {
                 return Err(RuntimeError::new(
                     span,
-                    "std.unzip: each element must be an array".to_string(),
+                    "stdExtended.unzip: each element must be an array".to_string(),
                     source_id,
                 ));
             }
@@ -4703,9 +4703,9 @@ fn std_unzip(
     Ok(Value::Array(result.index))
 }
 
-// ─── std.objectFromPairs ──────────────────────────────────────────────────────
+// ─── stdExtended.objectFromPairs ──────────────────────────────────────────────────────
 
-/// std.objectFromPairs(arr): Convert an array of [key, value] pairs into an object.
+/// stdExtended.objectFromPairs(arr): Convert an array of [key, value] pairs into an object.
 fn std_object_from_pairs(
     arr_val: Value,
     memory_manager: &mut MemoryManager,
@@ -4717,7 +4717,7 @@ fn std_object_from_pairs(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.objectFromPairs: argument must be an array".to_string(),
+                "stdExtended.objectFromPairs: argument must be an array".to_string(),
                 source_id,
             ));
         }
@@ -4733,7 +4733,7 @@ fn std_object_from_pairs(
                     return Err(RuntimeError::new(
                         span,
                         format!(
-                            "std.objectFromPairs: each element must be a 2-element array, got length {}",
+                            "stdExtended.objectFromPairs: each element must be a 2-element array, got length {}",
                             pair.len()
                         ),
                         source_id,
@@ -4744,7 +4744,7 @@ fn std_object_from_pairs(
                     _ => {
                         return Err(RuntimeError::new(
                             span,
-                            "std.objectFromPairs: keys must be strings".to_string(),
+                            "stdExtended.objectFromPairs: keys must be strings".to_string(),
                             source_id,
                         ));
                     }
@@ -4754,7 +4754,7 @@ fn std_object_from_pairs(
             _ => {
                 return Err(RuntimeError::new(
                     span,
-                    "std.objectFromPairs: elements must be 2-element arrays".to_string(),
+                    "stdExtended.objectFromPairs: elements must be 2-element arrays".to_string(),
                     source_id,
                 ));
             }
@@ -4769,9 +4769,9 @@ fn std_object_from_pairs(
     Ok(Value::Object(obj_alloc.index))
 }
 
-// ─── std.pick ─────────────────────────────────────────────────────────────────
+// ─── stdExtended.pick ─────────────────────────────────────────────────────────────────
 
-/// std.pick(obj, keys): Return a new object containing only the fields whose names
+/// stdExtended.pick(obj, keys): Return a new object containing only the fields whose names
 /// appear in the array keys (missing keys are silently ignored).
 fn std_pick(
     obj_val: Value,
@@ -4785,7 +4785,7 @@ fn std_pick(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.pick: first argument must be an object".to_string(),
+                "stdExtended.pick: first argument must be an object".to_string(),
                 source_id,
             ));
         }
@@ -4795,7 +4795,7 @@ fn std_pick(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.pick: second argument must be an array".to_string(),
+                "stdExtended.pick: second argument must be an array".to_string(),
                 source_id,
             ));
         }
@@ -4811,7 +4811,7 @@ fn std_pick(
             _ => {
                 return Err(RuntimeError::new(
                     span,
-                    "std.pick: keys must be strings".to_string(),
+                    "stdExtended.pick: keys must be strings".to_string(),
                     source_id,
                 ));
             }
@@ -4832,9 +4832,9 @@ fn std_pick(
     Ok(Value::Object(obj_alloc.index))
 }
 
-// ─── std.omit ─────────────────────────────────────────────────────────────────
+// ─── stdExtended.omit ─────────────────────────────────────────────────────────────────
 
-/// std.omit(obj, keys): Return a new object with all fields except those whose names
+/// stdExtended.omit(obj, keys): Return a new object with all fields except those whose names
 /// appear in the array keys.
 fn std_omit(
     obj_val: Value,
@@ -4848,7 +4848,7 @@ fn std_omit(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.omit: first argument must be an object".to_string(),
+                "stdExtended.omit: first argument must be an object".to_string(),
                 source_id,
             ));
         }
@@ -4858,7 +4858,7 @@ fn std_omit(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.omit: second argument must be an array".to_string(),
+                "stdExtended.omit: second argument must be an array".to_string(),
                 source_id,
             ));
         }
@@ -4874,7 +4874,7 @@ fn std_omit(
             _ => {
                 return Err(RuntimeError::new(
                     span,
-                    "std.omit: keys must be strings".to_string(),
+                    "stdExtended.omit: keys must be strings".to_string(),
                     source_id,
                 ));
             }
@@ -4895,9 +4895,9 @@ fn std_omit(
     Ok(Value::Object(obj_alloc.index))
 }
 
-// ─── std.product ──────────────────────────────────────────────────────────────
+// ─── stdExtended.product ──────────────────────────────────────────────────────────────
 
-/// std.product(arrs): Cartesian product of an array of arrays.
+/// stdExtended.product(arrs): Cartesian product of an array of arrays.
 fn std_product(
     arr_val: Value,
     memory_manager: &mut MemoryManager,
@@ -4909,7 +4909,7 @@ fn std_product(
         _ => {
             return Err(RuntimeError::new(
                 span,
-                "std.product: argument must be an array of arrays".to_string(),
+                "stdExtended.product: argument must be an array of arrays".to_string(),
                 source_id,
             ));
         }
@@ -4925,7 +4925,7 @@ fn std_product(
             _ => {
                 return Err(RuntimeError::new(
                     span,
-                    "std.product: each element must be an array".to_string(),
+                    "stdExtended.product: each element must be an array".to_string(),
                     source_id,
                 ));
             }

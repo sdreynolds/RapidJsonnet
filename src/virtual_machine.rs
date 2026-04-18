@@ -4831,7 +4831,7 @@ impl VirtualMachine {
                         continue;
                     }
 
-                    // Handle std.groupBy
+                    // Handle stdExtended.groupBy
                     if func_id == chunk::NativeFuncId::GroupBy {
                         let arr_val = args[0];
                         let key_f = args[1];
@@ -4841,7 +4841,7 @@ impl VirtualMachine {
                                 return Err(RuntimeError::new(
                                     self.get_current_span(),
                                     format!(
-                                        "std.groupBy: expected array, got {}",
+                                        "stdExtended.groupBy: expected array, got {}",
                                         other.type_name()
                                     ),
                                     self.current_chunk().source_id.to_string(),
@@ -4881,7 +4881,7 @@ impl VirtualMachine {
                                     return Err(RuntimeError::new(
                                         self.get_current_span(),
                                         format!(
-                                            "std.groupBy: keyF must return string, got {}",
+                                            "stdExtended.groupBy: keyF must return string, got {}",
                                             other.type_name()
                                         ),
                                         self.current_chunk().source_id.to_string(),
@@ -4931,7 +4931,7 @@ impl VirtualMachine {
                         continue;
                     }
 
-                    // Handle std.sortBy
+                    // Handle stdExtended.sortBy
                     if func_id == chunk::NativeFuncId::SortBy {
                         let arr_val = args[0];
                         let key_f = args[1];
@@ -4941,7 +4941,7 @@ impl VirtualMachine {
                                 return Err(RuntimeError::new(
                                     self.get_current_span(),
                                     format!(
-                                        "std.sortBy: expected array, got {}",
+                                        "stdExtended.sortBy: expected array, got {}",
                                         other.type_name()
                                     ),
                                     self.current_chunk().source_id.to_string(),
@@ -5000,7 +5000,7 @@ impl VirtualMachine {
                         continue;
                     }
 
-                    // Handle std.countBy
+                    // Handle stdExtended.countBy
                     if func_id == chunk::NativeFuncId::CountBy {
                         let arr_val = args[0];
                         let key_f = args[1];
@@ -5010,7 +5010,7 @@ impl VirtualMachine {
                                 return Err(RuntimeError::new(
                                     self.get_current_span(),
                                     format!(
-                                        "std.countBy: expected array, got {}",
+                                        "stdExtended.countBy: expected array, got {}",
                                         other.type_name()
                                     ),
                                     self.current_chunk().source_id.to_string(),
@@ -5050,7 +5050,7 @@ impl VirtualMachine {
                                     return Err(RuntimeError::new(
                                         self.get_current_span(),
                                         format!(
-                                            "std.countBy: keyF must return string, got {}",
+                                            "stdExtended.countBy: keyF must return string, got {}",
                                             other.type_name()
                                         ),
                                         self.current_chunk().source_id.to_string(),
@@ -5085,7 +5085,7 @@ impl VirtualMachine {
                         continue;
                     }
 
-                    // Handle std.uniqBy
+                    // Handle stdExtended.uniqBy
                     if func_id == chunk::NativeFuncId::UniqBy {
                         let arr_val = args[0];
                         let key_f = args[1];
@@ -5095,7 +5095,7 @@ impl VirtualMachine {
                                 return Err(RuntimeError::new(
                                     self.get_current_span(),
                                     format!(
-                                        "std.uniqBy: expected array, got {}",
+                                        "stdExtended.uniqBy: expected array, got {}",
                                         other.type_name()
                                     ),
                                     self.current_chunk().source_id.to_string(),
@@ -5146,7 +5146,7 @@ impl VirtualMachine {
                                     return Err(RuntimeError::new(
                                         self.get_current_span(),
                                         format!(
-                                            "std.uniqBy: keyF must return string, got {}",
+                                            "stdExtended.uniqBy: keyF must return string, got {}",
                                             other.type_name()
                                         ),
                                         self.current_chunk().source_id.to_string(),
@@ -5166,7 +5166,7 @@ impl VirtualMachine {
                         continue;
                     }
 
-                    // Handle std.minBy and std.maxBy
+                    // Handle stdExtended.minBy and stdExtended.maxBy
                     if func_id == chunk::NativeFuncId::MinBy
                         || func_id == chunk::NativeFuncId::MaxBy
                     {
@@ -5257,7 +5257,7 @@ impl VirtualMachine {
                         continue;
                     }
 
-                    // Handle std.toPairs
+                    // Handle stdExtended.toPairs
                     if func_id == chunk::NativeFuncId::ToPairs {
                         let obj_val = args[0];
                         let o_idx = match obj_val {
@@ -5266,7 +5266,7 @@ impl VirtualMachine {
                                 return Err(RuntimeError::new(
                                     self.get_current_span(),
                                     format!(
-                                        "std.toPairs: expected object, got {}",
+                                        "stdExtended.toPairs: expected object, got {}",
                                         other.type_name()
                                     ),
                                     self.current_chunk().source_id.to_string(),
@@ -5301,7 +5301,7 @@ impl VirtualMachine {
                         continue;
                     }
 
-                    // Handle std.mapKeys
+                    // Handle stdExtended.mapKeys
                     if func_id == chunk::NativeFuncId::MapKeys {
                         let func_val = args[0];
                         let obj_val = args[1];
@@ -5311,7 +5311,7 @@ impl VirtualMachine {
                                 return Err(RuntimeError::new(
                                     self.get_current_span(),
                                     format!(
-                                        "std.mapKeys: expected object, got {}",
+                                        "stdExtended.mapKeys: expected object, got {}",
                                         other.type_name()
                                     ),
                                     self.current_chunk().source_id.to_string(),
@@ -5369,7 +5369,7 @@ impl VirtualMachine {
                                     return Err(RuntimeError::new(
                                         self.get_current_span(),
                                         format!(
-                                            "std.mapKeys: func must return string, got {}",
+                                            "stdExtended.mapKeys: func must return string, got {}",
                                             other.type_name()
                                         ),
                                         self.current_chunk().source_id.to_string(),
@@ -5389,7 +5389,7 @@ impl VirtualMachine {
                         continue;
                     }
 
-                    // Handle std.filterObject
+                    // Handle stdExtended.filterObject
                     if func_id == chunk::NativeFuncId::FilterObject {
                         let func_val = args[0];
                         let obj_val = args[1];
@@ -5399,7 +5399,7 @@ impl VirtualMachine {
                                 return Err(RuntimeError::new(
                                     self.get_current_span(),
                                     format!(
-                                        "std.filterObject: expected object, got {}",
+                                        "stdExtended.filterObject: expected object, got {}",
                                         other.type_name()
                                     ),
                                     self.current_chunk().source_id.to_string(),
@@ -5460,7 +5460,7 @@ impl VirtualMachine {
                                     return Err(RuntimeError::new(
                                         self.get_current_span(),
                                         format!(
-                                            "std.filterObject: func must return bool, got {}",
+                                            "stdExtended.filterObject: func must return bool, got {}",
                                             other.type_name()
                                         ),
                                         self.current_chunk().source_id.to_string(),
@@ -5475,7 +5475,7 @@ impl VirtualMachine {
                         continue;
                     }
 
-                    // Handle std.objectFlatten
+                    // Handle stdExtended.objectFlatten
                     if func_id == chunk::NativeFuncId::ObjectFlatten {
                         let obj_val = args[0];
                         let sep_val = args[1];
@@ -5485,7 +5485,7 @@ impl VirtualMachine {
                                 return Err(RuntimeError::new(
                                     self.get_current_span(),
                                     format!(
-                                        "std.objectFlatten: sep must be string, got {}",
+                                        "stdExtended.objectFlatten: sep must be string, got {}",
                                         other.type_name()
                                     ),
                                     self.current_chunk().source_id.to_string(),
@@ -6802,7 +6802,7 @@ impl VirtualMachine {
                                     continue;
                                 }
 
-                                // Handle std.groupBy
+                                // Handle stdExtended.groupBy
                                 if id == chunk::NativeFuncId::GroupBy {
                                     let arr_val = args[0];
                                     let key_f = args[1];
@@ -6812,7 +6812,7 @@ impl VirtualMachine {
                                             return Err(RuntimeError::new(
                                                 self.get_current_span(),
                                                 format!(
-                                                    "std.groupBy: expected array, got {}",
+                                                    "stdExtended.groupBy: expected array, got {}",
                                                     other.type_name()
                                                 ),
                                                 self.current_chunk().source_id.to_string(),
@@ -6850,7 +6850,7 @@ impl VirtualMachine {
                                                 return Err(RuntimeError::new(
                                                     self.get_current_span(),
                                                     format!(
-                                                        "std.groupBy: keyF must return string, got {}",
+                                                        "stdExtended.groupBy: keyF must return string, got {}",
                                                         other.type_name()
                                                     ),
                                                     self.current_chunk().source_id.to_string(),
@@ -6888,7 +6888,7 @@ impl VirtualMachine {
                                     continue;
                                 }
 
-                                // Handle std.sortBy
+                                // Handle stdExtended.sortBy
                                 if id == chunk::NativeFuncId::SortBy {
                                     let arr_val = args[0];
                                     let key_f = args[1];
@@ -6898,7 +6898,7 @@ impl VirtualMachine {
                                             return Err(RuntimeError::new(
                                                 self.get_current_span(),
                                                 format!(
-                                                    "std.sortBy: expected array, got {}",
+                                                    "stdExtended.sortBy: expected array, got {}",
                                                     other.type_name()
                                                 ),
                                                 self.current_chunk().source_id.to_string(),
@@ -6939,7 +6939,7 @@ impl VirtualMachine {
                                     continue;
                                 }
 
-                                // Handle std.countBy
+                                // Handle stdExtended.countBy
                                 if id == chunk::NativeFuncId::CountBy {
                                     let arr_val = args[0];
                                     let key_f = args[1];
@@ -6949,7 +6949,7 @@ impl VirtualMachine {
                                             return Err(RuntimeError::new(
                                                 self.get_current_span(),
                                                 format!(
-                                                    "std.countBy: expected array, got {}",
+                                                    "stdExtended.countBy: expected array, got {}",
                                                     other.type_name()
                                                 ),
                                                 self.current_chunk().source_id.to_string(),
@@ -6984,7 +6984,7 @@ impl VirtualMachine {
                                                 return Err(RuntimeError::new(
                                                     self.get_current_span(),
                                                     format!(
-                                                        "std.countBy: keyF must return string, got {}",
+                                                        "stdExtended.countBy: keyF must return string, got {}",
                                                         other.type_name()
                                                     ),
                                                     self.current_chunk().source_id.to_string(),
@@ -7018,7 +7018,7 @@ impl VirtualMachine {
                                     continue;
                                 }
 
-                                // Handle std.uniqBy
+                                // Handle stdExtended.uniqBy
                                 if id == chunk::NativeFuncId::UniqBy {
                                     let arr_val = args[0];
                                     let key_f = args[1];
@@ -7028,7 +7028,7 @@ impl VirtualMachine {
                                             return Err(RuntimeError::new(
                                                 self.get_current_span(),
                                                 format!(
-                                                    "std.uniqBy: expected array, got {}",
+                                                    "stdExtended.uniqBy: expected array, got {}",
                                                     other.type_name()
                                                 ),
                                                 self.current_chunk().source_id.to_string(),
@@ -7064,7 +7064,7 @@ impl VirtualMachine {
                                                 return Err(RuntimeError::new(
                                                     self.get_current_span(),
                                                     format!(
-                                                        "std.uniqBy: keyF must return string, got {}",
+                                                        "stdExtended.uniqBy: keyF must return string, got {}",
                                                         other.type_name()
                                                     ),
                                                     self.current_chunk().source_id.to_string(),
@@ -7080,7 +7080,7 @@ impl VirtualMachine {
                                     continue;
                                 }
 
-                                // Handle std.minBy and std.maxBy
+                                // Handle stdExtended.minBy and stdExtended.maxBy
                                 if id == chunk::NativeFuncId::MinBy
                                     || id == chunk::NativeFuncId::MaxBy
                                 {
@@ -7168,7 +7168,7 @@ impl VirtualMachine {
                                     continue;
                                 }
 
-                                // Handle std.toPairs
+                                // Handle stdExtended.toPairs
                                 if id == chunk::NativeFuncId::ToPairs {
                                     let obj_val = args[0];
                                     let o_idx = match obj_val {
@@ -7177,7 +7177,7 @@ impl VirtualMachine {
                                             return Err(RuntimeError::new(
                                                 self.get_current_span(),
                                                 format!(
-                                                    "std.toPairs: expected object, got {}",
+                                                    "stdExtended.toPairs: expected object, got {}",
                                                     other.type_name()
                                                 ),
                                                 self.current_chunk().source_id.to_string(),
@@ -7218,7 +7218,7 @@ impl VirtualMachine {
                                     continue;
                                 }
 
-                                // Handle std.mapKeys
+                                // Handle stdExtended.mapKeys
                                 if id == chunk::NativeFuncId::MapKeys {
                                     let func_val = args[0];
                                     let obj_val = args[1];
@@ -7228,7 +7228,7 @@ impl VirtualMachine {
                                             return Err(RuntimeError::new(
                                                 self.get_current_span(),
                                                 format!(
-                                                    "std.mapKeys: expected object, got {}",
+                                                    "stdExtended.mapKeys: expected object, got {}",
                                                     other.type_name()
                                                 ),
                                                 self.current_chunk().source_id.to_string(),
@@ -7296,7 +7296,7 @@ impl VirtualMachine {
                                                 return Err(RuntimeError::new(
                                                     self.get_current_span(),
                                                     format!(
-                                                        "std.mapKeys: func must return string, got {}",
+                                                        "stdExtended.mapKeys: func must return string, got {}",
                                                         other.type_name()
                                                     ),
                                                     self.current_chunk().source_id.to_string(),
@@ -7317,7 +7317,7 @@ impl VirtualMachine {
                                     continue;
                                 }
 
-                                // Handle std.filterObject
+                                // Handle stdExtended.filterObject
                                 if id == chunk::NativeFuncId::FilterObject {
                                     let func_val = args[0];
                                     let obj_val = args[1];
@@ -7327,7 +7327,7 @@ impl VirtualMachine {
                                             return Err(RuntimeError::new(
                                                 self.get_current_span(),
                                                 format!(
-                                                    "std.filterObject: expected object, got {}",
+                                                    "stdExtended.filterObject: expected object, got {}",
                                                     other.type_name()
                                                 ),
                                                 self.current_chunk().source_id.to_string(),
@@ -7401,7 +7401,7 @@ impl VirtualMachine {
                                                 return Err(RuntimeError::new(
                                                     self.get_current_span(),
                                                     format!(
-                                                        "std.filterObject: func must return bool, got {}",
+                                                        "stdExtended.filterObject: func must return bool, got {}",
                                                         other.type_name()
                                                     ),
                                                     self.current_chunk().source_id.to_string(),
@@ -7416,7 +7416,7 @@ impl VirtualMachine {
                                     continue;
                                 }
 
-                                // Handle std.objectFlatten
+                                // Handle stdExtended.objectFlatten
                                 if id == chunk::NativeFuncId::ObjectFlatten {
                                     let obj_val = args[0];
                                     let sep_val = args[1];
@@ -7428,7 +7428,7 @@ impl VirtualMachine {
                                             return Err(RuntimeError::new(
                                                 self.get_current_span(),
                                                 format!(
-                                                    "std.objectFlatten: sep must be string, got {}",
+                                                    "stdExtended.objectFlatten: sep must be string, got {}",
                                                     other.type_name()
                                                 ),
                                                 self.current_chunk().source_id.to_string(),
@@ -12784,14 +12784,16 @@ mod tests {
     #[test]
     fn test_std_filter_object_pipeline() {
         // filterObject(func, obj): func receives (key, value)
-        assert_bool("std.filterObject(function(k, v) v > 1, {a: 1, b: 2, c: 3}) == {b: 2, c: 3}");
+        assert_bool(
+            "stdExtended.filterObject(function(k, v) v > 1, {a: 1, b: 2, c: 3}) == {b: 2, c: 3}",
+        );
     }
 
     #[test]
     fn test_std_group_by_pipeline() {
         // groupBy(arr, keyF): keyF maps each element to a string key
         assert_bool(
-            "std.groupBy([1, 2, 3], function(x) if x < 3 then 'small' else 'big') == {small: [1, 2], big: [3]}",
+            "stdExtended.groupBy([1, 2, 3], function(x) if x < 3 then 'small' else 'big') == {small: [1, 2], big: [3]}",
         );
     }
 
@@ -13030,17 +13032,17 @@ mod tests {
 
     #[test]
     fn test_std_gcd_pipeline() {
-        assert_bool("std.gcd(12, 8) == 4");
+        assert_bool("stdExtended.gcd(12, 8) == 4");
     }
 
     #[test]
     fn test_std_lcm_pipeline() {
-        assert_bool("std.lcm(4, 6) == 12");
+        assert_bool("stdExtended.lcm(4, 6) == 12");
     }
 
     #[test]
     fn test_std_indent_pipeline() {
-        assert_bool(r#"std.indent("line1\nline2", "  ") == "  line1\n  line2""#);
+        assert_bool(r#"stdExtended.indent("line1\nline2", "  ") == "  line1\n  line2""#);
     }
 
     #[test]
@@ -13214,11 +13216,11 @@ mod tests {
         }
     }
 
-    // test_std_object_from_pairs_pipeline omitted — std.objectFromPairs not yet implemented
+    // test_std_object_from_pairs_pipeline omitted — stdExtended.objectFromPairs not yet implemented
 
     #[test]
     fn test_std_to_pairs_pipeline() {
-        let result = run_jsonnet(r#"std.toPairs({a: 1, b: 2})"#).expect("ok");
+        let result = run_jsonnet(r#"stdExtended.toPairs({a: 1, b: 2})"#).expect("ok");
         match result {
             Value::Array(_) => {}
             other => panic!("expected array, got {:?}", other),
@@ -13227,12 +13229,12 @@ mod tests {
 
     #[test]
     fn test_std_zip_pipeline() {
-        assert_bool("std.zip([1, 2], [3, 4]) == [[1, 3], [2, 4]]");
+        assert_bool("stdExtended.zip([1, 2], [3, 4]) == [[1, 3], [2, 4]]");
     }
 
     #[test]
     fn test_std_unzip_pipeline() {
-        let result = run_jsonnet("std.unzip([[1, 3], [2, 4]])").expect("ok");
+        let result = run_jsonnet("stdExtended.unzip([[1, 3], [2, 4]])").expect("ok");
         match result {
             Value::Array(_) => {}
             other => panic!("expected array, got {:?}", other),
@@ -13241,49 +13243,50 @@ mod tests {
 
     #[test]
     fn test_std_chunk_pipeline() {
-        assert_bool("std.chunk([1, 2, 3, 4], 2) == [[1, 2], [3, 4]]");
+        assert_bool("stdExtended.chunk([1, 2, 3, 4], 2) == [[1, 2], [3, 4]]");
     }
 
     #[test]
     fn test_std_pick_pipeline() {
-        assert_bool(r#"std.pick({a: 1, b: 2, c: 3}, ["a", "c"]) == {a: 1, c: 3}"#);
+        assert_bool(r#"stdExtended.pick({a: 1, b: 2, c: 3}, ["a", "c"]) == {a: 1, c: 3}"#);
     }
 
     #[test]
     fn test_std_omit_pipeline() {
-        assert_bool(r#"std.omit({a: 1, b: 2, c: 3}, ["b"]) == {a: 1, c: 3}"#);
+        assert_bool(r#"stdExtended.omit({a: 1, b: 2, c: 3}, ["b"]) == {a: 1, c: 3}"#);
     }
 
     #[test]
     fn test_std_sort_by_pipeline() {
-        assert_bool("std.sortBy([3, 1, 2], function(x) x) == [1, 2, 3]");
+        assert_bool("stdExtended.sortBy([3, 1, 2], function(x) x) == [1, 2, 3]");
     }
 
     #[test]
     fn test_std_count_by_pipeline() {
         let result =
-            run_jsonnet("std.countBy([1, 2, 3, 2, 1], function(x) std.toString(x))").expect("ok");
+            run_jsonnet("stdExtended.countBy([1, 2, 3, 2, 1], function(x) std.toString(x))")
+                .expect("ok");
         match result {
             Value::Object(_) => {}
             other => panic!("expected object, got {:?}", other),
         }
     }
 
-    // test_std_uniq_by_pipeline omitted — std.uniqBy not yet implemented
+    // test_std_uniq_by_pipeline omitted — stdExtended.uniqBy not yet implemented
 
     #[test]
     fn test_std_min_by_pipeline() {
-        assert_bool("std.minBy([{v:3}, {v:1}, {v:2}], function(x) x.v) == {v:1}");
+        assert_bool("stdExtended.minBy([{v:3}, {v:1}, {v:2}], function(x) x.v) == {v:1}");
     }
 
     #[test]
     fn test_std_max_by_pipeline() {
-        assert_bool("std.maxBy([{v:3}, {v:1}, {v:2}], function(x) x.v) == {v:3}");
+        assert_bool("stdExtended.maxBy([{v:3}, {v:1}, {v:2}], function(x) x.v) == {v:3}");
     }
 
-    // test_std_product_pipeline omitted — std.product not yet implemented
+    // test_std_product_pipeline omitted — stdExtended.product not yet implemented
 
-    // test_std_object_flatten_pipeline omitted — std.objectFlatten not yet implemented
+    // test_std_object_flatten_pipeline omitted — stdExtended.objectFlatten not yet implemented
 
     #[test]
     fn test_std_map_with_key_pipeline() {
@@ -13299,7 +13302,7 @@ mod tests {
 
     #[test]
     fn test_std_map_keys_pipeline() {
-        assert_bool(r#"std.mapKeys(function(k) "prefix_" + k, {a: 1}) == {prefix_a: 1}"#);
+        assert_bool(r#"stdExtended.mapKeys(function(k) "prefix_" + k, {a: 1}) == {prefix_a: 1}"#);
     }
 
     #[test]
@@ -13455,7 +13458,7 @@ mod tests {
         assert_bool(r#"local b = {x:: 1}; (b + {x::: 2}).x == 2"#);
     }
 
-    // test_std_object_flatten_deep omitted — std.objectFlatten not yet implemented
+    // test_std_object_flatten_deep omitted — stdExtended.objectFlatten not yet implemented
 
     #[test]
     fn test_std_parse_json_array() {
@@ -13609,32 +13612,32 @@ mod tests {
 
     #[test]
     fn test_min_by_basic() {
-        assert_bool("std.minBy([{v: 3}, {v: 1}, {v: 2}], function(x) x.v).v == 1");
+        assert_bool("stdExtended.minBy([{v: 3}, {v: 1}, {v: 2}], function(x) x.v).v == 1");
     }
 
     #[test]
     fn test_max_by_basic() {
-        assert_bool("std.maxBy([{v: 3}, {v: 1}, {v: 2}], function(x) x.v).v == 3");
+        assert_bool("stdExtended.maxBy([{v: 3}, {v: 1}, {v: 2}], function(x) x.v).v == 3");
     }
 
     #[test]
     fn test_min_by_single_element() {
-        assert_bool("std.minBy([{v: 5}], function(x) x.v).v == 5");
+        assert_bool("stdExtended.minBy([{v: 5}], function(x) x.v).v == 5");
     }
 
     #[test]
     fn test_max_by_single_element() {
-        assert_bool("std.maxBy([{v: 5}], function(x) x.v).v == 5");
+        assert_bool("stdExtended.maxBy([{v: 5}], function(x) x.v).v == 5");
     }
 
     #[test]
     fn test_min_by_empty_error() {
-        assert_err("std.minBy([], function(x) x)");
+        assert_err("stdExtended.minBy([], function(x) x)");
     }
 
     #[test]
     fn test_max_by_empty_error() {
-        assert_err("std.maxBy([], function(x) x)");
+        assert_err("stdExtended.maxBy([], function(x) x)");
     }
 
     // ─── Gap-fill: minArray / maxArray with keyF via StdCall ───
@@ -13662,7 +13665,7 @@ mod tests {
     #[test]
     fn test_uniq_by_basic() {
         assert_bool(
-            "std.length(std.uniqBy([{k: \"a\"}, {k: \"b\"}, {k: \"a\"}], function(x) x.k)) == 2",
+            "std.length(stdExtended.uniqBy([{k: \"a\"}, {k: \"b\"}, {k: \"a\"}], function(x) x.k)) == 2",
         );
     }
 
@@ -13767,18 +13770,18 @@ mod tests {
         }
     }
 
-    // ─── Gap-fill: std.objectFromPairs ───
+    // ─── Gap-fill: stdExtended.objectFromPairs ───
 
     #[test]
     fn test_object_from_pairs_vm() {
-        assert_bool(r#"std.objectFromPairs([["a", 1], ["b", 2]]).a == 1"#);
+        assert_bool(r#"stdExtended.objectFromPairs([["a", 1], ["b", 2]]).a == 1"#);
     }
 
-    // ─── Gap-fill: std.product ───
+    // ─── Gap-fill: stdExtended.product ───
 
     #[test]
     fn test_product_vm() {
-        assert_bool("std.length(std.product([[1, 2], [3, 4]])) == 4");
+        assert_bool("std.length(stdExtended.product([[1, 2], [3, 4]])) == 4");
     }
 
     // ─── Gap-fill: std.manifestIni ───
@@ -13795,11 +13798,11 @@ mod tests {
         }
     }
 
-    // ─── Gap-fill: std.pick ───
+    // ─── Gap-fill: stdExtended.pick ───
 
     #[test]
     fn test_pick_basic() {
-        assert_bool(r#"std.pick({a: 1, b: 2, c: 3}, ["a", "c"]) == {a: 1, c: 3}"#);
+        assert_bool(r#"stdExtended.pick({a: 1, b: 2, c: 3}, ["a", "c"]) == {a: 1, c: 3}"#);
     }
 
     // ─── Gap-fill: NativeThunk forcing via makeArray indexing ───
@@ -13839,11 +13842,11 @@ mod tests {
         assert_bool("std.set([3, 1, 2, 1]) == [1, 2, 3]");
     }
 
-    // ─── Gap-fill: std.objectFromPairs empty ───
+    // ─── Gap-fill: stdExtended.objectFromPairs empty ───
 
     #[test]
     fn test_object_from_pairs_empty() {
-        assert_bool("std.objectFromPairs([]) == {}");
+        assert_bool("stdExtended.objectFromPairs([]) == {}");
     }
 
     // ─── Gap-fill: std.manifestTomlEx ───
@@ -13870,12 +13873,12 @@ mod tests {
         }
     }
 
-    // ─── Gap-fill: std.groupBy ───
+    // ─── Gap-fill: stdExtended.groupBy ───
 
     #[test]
     fn test_group_by_basic() {
         let result =
-            run_jsonnet(r#"std.groupBy(["a", "b", "a", "c"], function(x) x)"#).expect("ok");
+            run_jsonnet(r#"stdExtended.groupBy(["a", "b", "a", "c"], function(x) x)"#).expect("ok");
         match result {
             Value::Object(_) => {}
             other => panic!("expected object, got {:?}", other),
@@ -13885,69 +13888,71 @@ mod tests {
     #[test]
     fn test_group_by_numbers() {
         let result = run_jsonnet(
-            r#"std.objectHas(std.groupBy([1, 2, 1, 3], function(x) std.toString(x)), "1")"#,
+            r#"std.objectHas(stdExtended.groupBy([1, 2, 1, 3], function(x) std.toString(x)), "1")"#,
         )
         .expect("ok");
         assert!(matches!(result, Value::Boolean(true)));
     }
 
-    // ─── Gap-fill: std.countBy ───
+    // ─── Gap-fill: stdExtended.countBy ───
 
     #[test]
     fn test_count_by_basic() {
         let result =
-            run_jsonnet(r#"std.countBy(["a", "b", "a", "c"], function(x) x)"#).expect("ok");
+            run_jsonnet(r#"stdExtended.countBy(["a", "b", "a", "c"], function(x) x)"#).expect("ok");
         match result {
             Value::Object(_) => {}
             other => panic!("expected object, got {:?}", other),
         }
     }
 
-    // ─── Gap-fill: std.sortBy ───
+    // ─── Gap-fill: stdExtended.sortBy ───
 
     #[test]
     fn test_sort_by_basic() {
-        assert_bool("std.sortBy([{v: 3}, {v: 1}, {v: 2}], function(x) x.v)[0].v == 1");
+        assert_bool("stdExtended.sortBy([{v: 3}, {v: 1}, {v: 2}], function(x) x.v)[0].v == 1");
     }
 
-    // ─── Gap-fill: std.filterObject (arg order: func, obj) ───
+    // ─── Gap-fill: stdExtended.filterObject (arg order: func, obj) ───
 
     #[test]
     fn test_filter_object_basic() {
         // filterObject(func, obj): func receives (key, value)
         assert_bool(
-            r#"std.filterObject(function(k, v) v > 1, {a: 1, b: 2, c: 3}) == {b: 2, c: 3}"#,
+            r#"stdExtended.filterObject(function(k, v) v > 1, {a: 1, b: 2, c: 3}) == {b: 2, c: 3}"#,
         );
     }
 
     #[test]
     fn test_filter_object_all_removed() {
-        assert_bool(r#"std.filterObject(function(k, v) v > 10, {a: 1, b: 2}) == {}"#);
+        assert_bool(r#"stdExtended.filterObject(function(k, v) v > 10, {a: 1, b: 2}) == {}"#);
     }
 
     #[test]
     fn test_filter_object_all_kept() {
-        assert_bool(r#"std.objectHas(std.filterObject(function(k, v) true, {a: 1, b: 2}), "a")"#);
+        assert_bool(
+            r#"std.objectHas(stdExtended.filterObject(function(k, v) true, {a: 1, b: 2}), "a")"#,
+        );
     }
 
-    // ─── Gap-fill: std.mapKeys (arg order: func, obj) ───
+    // ─── Gap-fill: stdExtended.mapKeys (arg order: func, obj) ───
 
     #[test]
     fn test_map_keys_basic() {
         // mapKeys(func, obj): func receives the key name
-        let result =
-            run_jsonnet(r#"std.mapKeys(function(k) k + "_new", {a: 1, b: 2})"#).expect("ok");
+        let result = run_jsonnet(r#"stdExtended.mapKeys(function(k) k + "_new", {a: 1, b: 2})"#)
+            .expect("ok");
         match result {
             Value::Object(_) => {}
             other => panic!("expected object, got {:?}", other),
         }
     }
 
-    // ─── Gap-fill: std.toPairs ───
+    // ─── Gap-fill: stdExtended.toPairs ───
 
     #[test]
     fn test_to_pairs_basic() {
-        let result = run_jsonnet(r#"std.toPairs({a: 1, b: 2})"#).expect("ok");
+        let result = run_jsonnet(r#"stdExtended.toPairs({a: 1, b: 2})"#).expect("ok");
         match result {
             Value::Array(_) => {}
             other => panic!("expected array, got {:?}", other),
@@ -14032,11 +14037,13 @@ mod tests {
         assert_bool(r#""%(x)s" % {x: "hi"} == "hi""#);
     }
 
-    // ─── Gap-fill: std.objectFromPairs with multiple pairs ───
+    // ─── Gap-fill: stdExtended.objectFromPairs with multiple pairs ───
 
     #[test]
     fn test_object_from_pairs_multiple() {
-        assert_bool(r#"local o = std.objectFromPairs([["a", 1], ["b", 2], ["c", 3]]); o.b == 2"#);
+        assert_bool(
+            r#"local o = stdExtended.objectFromPairs([["a", 1], ["b", 2], ["c", 3]]); o.b == 2"#,
+        );
     }
 
     // ─── Gap-fill: std.get ───
@@ -14089,25 +14096,25 @@ mod tests {
         assert_bool(r#"std.deepJoin(["a", ["b", ["c"]]]) == "abc""#);
     }
 
-    // ─── Gap-fill: std.chunk ───
+    // ─── Gap-fill: stdExtended.chunk ───
 
     #[test]
     fn test_chunk_basic() {
-        assert_bool("std.chunk([1, 2, 3, 4], 2) == [[1, 2], [3, 4]]");
+        assert_bool("stdExtended.chunk([1, 2, 3, 4], 2) == [[1, 2], [3, 4]]");
     }
 
-    // ─── Gap-fill: std.zip ───
+    // ─── Gap-fill: stdExtended.zip ───
 
     #[test]
     fn test_zip_basic() {
-        assert_bool("std.zip([1, 2], [3, 4]) == [[1, 3], [2, 4]]");
+        assert_bool("stdExtended.zip([1, 2], [3, 4]) == [[1, 3], [2, 4]]");
     }
 
-    // ─── Gap-fill: std.unzip ───
+    // ─── Gap-fill: stdExtended.unzip ───
 
     #[test]
     fn test_unzip_basic() {
-        let result = run_jsonnet(r#"std.unzip([[1, "a"], [2, "b"]])"#).expect("ok");
+        let result = run_jsonnet(r#"stdExtended.unzip([[1, "a"], [2, "b"]])"#).expect("ok");
         match result {
             Value::Array(_) => {}
             other => panic!("expected array, got {:?}", other),
@@ -14177,7 +14184,7 @@ mod tests {
     fn test_group_by_two_keys() {
         // groupBy returning an object with two groups
         let result = run_jsonnet(
-            r#"std.groupBy([1, 2, 3, 4], function(x) if x % 2 == 0 then "even" else "odd")"#,
+            r#"stdExtended.groupBy([1, 2, 3, 4], function(x) if x % 2 == 0 then "even" else "odd")"#,
         )
         .expect("ok");
         match result {
@@ -14191,7 +14198,7 @@ mod tests {
     #[test]
     fn test_count_by_two_keys() {
         let result = run_jsonnet(
-            r#"std.countBy([1, 2, 3, 4, 5], function(x) if x % 2 == 0 then "even" else "odd")"#,
+            r#"stdExtended.countBy([1, 2, 3, 4, 5], function(x) if x % 2 == 0 then "even" else "odd")"#,
         )
         .expect("ok");
         match result {
@@ -14205,12 +14212,16 @@ mod tests {
     #[test]
     fn test_min_by_via_tailcall() {
         // Call minBy in a way that goes through the TailCall handler
-        assert_bool(r#"local f(arr, kf) = std.minBy(arr, kf); f([3, 1, 2], function(x) x) == 1"#);
+        assert_bool(
+            r#"local f(arr, kf) = stdExtended.minBy(arr, kf); f([3, 1, 2], function(x) x) == 1"#,
+        );
     }
 
     #[test]
     fn test_max_by_via_tailcall() {
-        assert_bool(r#"local f(arr, kf) = std.maxBy(arr, kf); f([3, 1, 2], function(x) x) == 3"#);
+        assert_bool(
+            r#"local f(arr, kf) = stdExtended.maxBy(arr, kf); f([3, 1, 2], function(x) x) == 3"#,
+        );
     }
 
     // ─── Gap-fill: mapKeys via TailCall path (lines 7218-7315) ───
@@ -14218,7 +14229,7 @@ mod tests {
     #[test]
     fn test_map_keys_via_tailcall() {
         let result = run_jsonnet(
-            r#"local f(fn, obj) = std.mapKeys(fn, obj); f(function(k) k + "_x", {a: 1, b: 2})"#,
+            r#"local f(fn, obj) = stdExtended.mapKeys(fn, obj); f(function(k) k + "_x", {a: 1, b: 2})"#,
         )
         .expect("ok");
         match result {
@@ -14232,7 +14243,7 @@ mod tests {
     #[test]
     fn test_filter_object_via_tailcall() {
         let result = run_jsonnet(
-            r#"local f(fn, obj) = std.filterObject(fn, obj); f(function(k, v) v > 1, {a: 1, b: 2, c: 3})"#,
+            r#"local f(fn, obj) = stdExtended.filterObject(fn, obj); f(function(k, v) v > 1, {a: 1, b: 2, c: 3})"#,
         )
         .expect("ok");
         match result {
@@ -14395,7 +14406,8 @@ mod tests {
 
     #[test]
     fn test_object_flatten_basic() {
-        let result = run_jsonnet(r#"std.objectFlatten({a: {b: {c: 1}, d: 2}}, ".")"#).expect("ok");
+        let result =
+            run_jsonnet(r#"stdExtended.objectFlatten({a: {b: {c: 1}, d: 2}}, ".")"#).expect("ok");
         match result {
             Value::Object(_) => {}
             other => panic!("expected object, got {:?}", other),
@@ -14404,7 +14416,7 @@ mod tests {
 
     #[test]
     fn test_object_flatten_empty() {
-        let result = run_jsonnet(r#"std.objectFlatten({}, ".")"#).expect("ok");
+        let result = run_jsonnet(r#"stdExtended.objectFlatten({}, ".")"#).expect("ok");
         match result {
             Value::Object(_) => {}
             other => panic!("expected object, got {:?}", other),
@@ -14464,7 +14476,7 @@ mod tests {
 
     #[test]
     fn test_pick_multiple() {
-        assert_bool(r#"std.pick({a: 1, b: 2, c: 3}, ["a", "c"]) == {a: 1, c: 3}"#);
+        assert_bool(r#"stdExtended.pick({a: 1, b: 2, c: 3}, ["a", "c"]) == {a: 1, c: 3}"#);
     }
 
     #[test]
@@ -14485,7 +14497,9 @@ mod tests {
     #[test]
     fn test_uniq_by_with_key_func() {
         // uniqBy deduplication with a string key function
-        assert_bool(r#"std.uniqBy(["a", "b", "a", "c", "b"], function(x) x) == ["a", "b", "c"]"#);
+        assert_bool(
+            r#"stdExtended.uniqBy(["a", "b", "a", "c", "b"], function(x) x) == ["a", "b", "c"]"#,
+        );
     }
 
     // ─── Gap-fill: sortBy basic ───
@@ -14493,7 +14507,7 @@ mod tests {
     #[test]
     fn test_sort_by_desc() {
         // Sort by negated value (descending)
-        assert_bool(r#"std.sortBy([3, 1, 2], function(x) -x) == [3, 2, 1]"#);
+        assert_bool(r#"stdExtended.sortBy([3, 1, 2], function(x) -x) == [3, 2, 1]"#);
     }
 
     // ─── Gap-fill: binary indexing negative error via VM ───
@@ -14768,151 +14782,155 @@ mod tests {
         assert_bool(r#"std.sort([3, 1, 2], keyF=function(x) -x) == [3, 2, 1]"#);
     }
 
-    // ─── Lines 6804-6885: std.groupBy ───
+    // ─── Lines 6804-6885: stdExtended.groupBy ───
 
     #[test]
     fn test_group_by_basic_gap() {
         assert_bool(
-            r#"local g = std.groupBy(["foo", "bar", "baz"], function(s) std.substr(s, 0, 1));
+            r#"local g = stdExtended.groupBy(["foo", "bar", "baz"], function(s) std.substr(s, 0, 1));
                g.f == ["foo"] && g.b == ["bar", "baz"]"#,
         );
     }
 
     #[test]
     fn test_group_by_non_string_key_err() {
-        assert_err(r#"std.groupBy([1, 2, 3], function(x) x)"#);
+        assert_err(r#"stdExtended.groupBy([1, 2, 3], function(x) x)"#);
     }
 
-    // ─── Lines 6890-6936: std.sortBy ───
+    // ─── Lines 6890-6936: stdExtended.sortBy ───
 
     #[test]
     fn test_sort_by_basic_gap() {
-        assert_bool(r#"std.sortBy([3, 1, 2], function(x) x) == [1, 2, 3]"#);
+        assert_bool(r#"stdExtended.sortBy([3, 1, 2], function(x) x) == [1, 2, 3]"#);
     }
 
     #[test]
     fn test_sort_by_non_array_err() {
-        assert_err(r#"std.sortBy("not_array", function(x) x)"#);
+        assert_err(r#"stdExtended.sortBy("not_array", function(x) x)"#);
     }
 
-    // ─── Lines 6941-7015: std.countBy ───
+    // ─── Lines 6941-7015: stdExtended.countBy ───
 
     #[test]
     fn test_count_by_basic_gap() {
         assert_bool(
-            r#"local c = std.countBy(["a", "b", "a", "c", "b", "b"], function(x) x);
+            r#"local c = stdExtended.countBy(["a", "b", "a", "c", "b", "b"], function(x) x);
                c.a == 2 && c.b == 3 && c.c == 1"#,
         );
     }
 
     #[test]
     fn test_count_by_non_string_key_err() {
-        assert_err(r#"std.countBy([1, 2, 3], function(x) x)"#);
+        assert_err(r#"stdExtended.countBy([1, 2, 3], function(x) x)"#);
     }
 
-    // ─── Lines 7020-7077: std.uniqBy ───
+    // ─── Lines 7020-7077: stdExtended.uniqBy ───
 
     #[test]
     fn test_uniq_by_basic_gap() {
         assert_bool(
-            r#"std.uniqBy(["apple", "ant", "banana", "bat"], function(s) std.substr(s, 0, 1))
+            r#"stdExtended.uniqBy(["apple", "ant", "banana", "bat"], function(s) std.substr(s, 0, 1))
                == ["apple", "banana"]"#,
         );
     }
 
     #[test]
     fn test_uniq_by_non_string_key_err() {
-        assert_err(r#"std.uniqBy([1, 2, 3], function(x) x)"#);
+        assert_err(r#"stdExtended.uniqBy([1, 2, 3], function(x) x)"#);
     }
 
-    // ─── Lines 7084-7165: std.minBy / std.maxBy ───
+    // ─── Lines 7084-7165: stdExtended.minBy / stdExtended.maxBy ───
 
     #[test]
     fn test_min_by_basic_gap() {
-        assert_bool(r#"std.minBy([3, 1, 2], function(x) x) == 1"#);
+        assert_bool(r#"stdExtended.minBy([3, 1, 2], function(x) x) == 1"#);
     }
 
     #[test]
     fn test_max_by_basic_gap() {
-        assert_bool(r#"std.maxBy([3, 1, 2], function(x) x) == 3"#);
+        assert_bool(r#"stdExtended.maxBy([3, 1, 2], function(x) x) == 3"#);
     }
 
     #[test]
     fn test_min_by_empty_err() {
-        assert_err(r#"std.minBy([], function(x) x)"#);
+        assert_err(r#"stdExtended.minBy([], function(x) x)"#);
     }
 
     #[test]
     fn test_max_by_empty_err() {
-        assert_err(r#"std.maxBy([], function(x) x)"#);
+        assert_err(r#"stdExtended.maxBy([], function(x) x)"#);
     }
 
     #[test]
     fn test_min_by_non_array_err() {
-        assert_err(r#"std.minBy("not_array", function(x) x)"#);
+        assert_err(r#"stdExtended.minBy("not_array", function(x) x)"#);
     }
 
-    // ─── Lines 7170-7215: std.toPairs ───
+    // ─── Lines 7170-7215: stdExtended.toPairs ───
 
     #[test]
     fn test_to_pairs_basic_gap() {
         assert_bool(
-            r#"local p = std.toPairs({a: 1, b: 2});
+            r#"local p = stdExtended.toPairs({a: 1, b: 2});
                std.length(p) == 2"#,
         );
     }
 
     #[test]
     fn test_to_pairs_non_object_err() {
-        assert_err(r#"std.toPairs([1, 2, 3])"#);
+        assert_err(r#"stdExtended.toPairs([1, 2, 3])"#);
     }
 
-    // ─── Lines 7220-7314: std.mapKeys ───
+    // ─── Lines 7220-7314: stdExtended.mapKeys ───
 
     #[test]
     fn test_map_keys_basic_gap() {
-        assert_bool(r#"std.mapKeys(std.asciiUpper, {hello: 1, world: 2}) == {HELLO: 1, WORLD: 2}"#);
+        assert_bool(
+            r#"stdExtended.mapKeys(std.asciiUpper, {hello: 1, world: 2}) == {HELLO: 1, WORLD: 2}"#,
+        );
     }
 
     #[test]
     fn test_map_keys_non_object_err() {
-        assert_err(r#"std.mapKeys(function(k) k, [1, 2])"#);
+        assert_err(r#"stdExtended.mapKeys(function(k) k, [1, 2])"#);
     }
 
     #[test]
     fn test_map_keys_non_string_return_err() {
-        assert_err(r#"std.mapKeys(function(k) 42, {a: 1})"#);
+        assert_err(r#"stdExtended.mapKeys(function(k) 42, {a: 1})"#);
     }
 
-    // ─── Lines 7319-7413: std.filterObject ───
+    // ─── Lines 7319-7413: stdExtended.filterObject ───
 
     #[test]
     fn test_filter_object_basic_gap() {
         assert_bool(
-            r#"std.filterObject(function(k, v) v > 1, {a: 1, b: 2, c: 3}) == {b: 2, c: 3}"#,
+            r#"stdExtended.filterObject(function(k, v) v > 1, {a: 1, b: 2, c: 3}) == {b: 2, c: 3}"#,
         );
     }
 
     #[test]
     fn test_filter_object_non_object_err() {
-        assert_err(r#"std.filterObject(function(k, v) true, [1, 2])"#);
+        assert_err(r#"stdExtended.filterObject(function(k, v) true, [1, 2])"#);
     }
 
     #[test]
     fn test_filter_object_non_bool_return_err() {
-        assert_err(r#"std.filterObject(function(k, v) "yes", {a: 1})"#);
+        assert_err(r#"stdExtended.filterObject(function(k, v) "yes", {a: 1})"#);
     }
 
-    // ─── Lines 7418-7481: std.objectFlatten ───
+    // ─── Lines 7418-7481: stdExtended.objectFlatten ───
 
     #[test]
     fn test_object_flatten_basic_gap() {
-        assert_bool(r#"std.objectFlatten({a: {b: {c: 1}}, d: 2}, ".") == {"a.b.c": 1, d: 2}"#);
+        assert_bool(
+            r#"stdExtended.objectFlatten({a: {b: {c: 1}}, d: 2}, ".") == {"a.b.c": 1, d: 2}"#,
+        );
     }
 
     #[test]
     fn test_object_flatten_non_string_sep_err() {
-        assert_err(r#"std.objectFlatten({a: 1}, 42)"#);
+        assert_err(r#"stdExtended.objectFlatten({a: 1}, 42)"#);
     }
 
     // ─── Lines 8239-8310: value_to_json object/array/binary serialization ───
@@ -15150,7 +15168,7 @@ mod tests {
     #[test]
     fn test_fc_group_by() {
         assert_bool(
-            r#"local f = std.groupBy;
+            r#"local f = stdExtended.groupBy;
                local result = f(["apple", "ant", "banana"], function(s) s[0:1]);
                std.objectHas(result, "a") && std.objectHas(result, "b")"#,
         );
@@ -15159,14 +15177,14 @@ mod tests {
     // Lines 6890-6936: sortBy via first-class ref
     #[test]
     fn test_fc_sort_by() {
-        assert_bool("local f = std.sortBy; f([3, 1, 2], function(x) x) == [1, 2, 3]");
+        assert_bool("local f = stdExtended.sortBy; f([3, 1, 2], function(x) x) == [1, 2, 3]");
     }
 
     // Lines 6941-7015: countBy via first-class ref (keyF must return string)
     #[test]
     fn test_fc_count_by() {
         assert_bool(
-            r#"local f = std.countBy;
+            r#"local f = stdExtended.countBy;
                local result = f(["a", "b", "a"], function(x) x);
                result.a == 2 && result.b == 1"#,
         );
@@ -15176,7 +15194,7 @@ mod tests {
     #[test]
     fn test_fc_uniq_by() {
         assert_bool(
-            r#"local f = std.uniqBy;
+            r#"local f = stdExtended.uniqBy;
                f(["apple", "ant", "banana"], function(x) x[0:1]) == ["apple", "banana"]"#,
         );
     }
@@ -15184,41 +15202,43 @@ mod tests {
     // Lines 7084-7165: minBy/maxBy via first-class ref
     #[test]
     fn test_fc_min_by() {
-        assert_bool("local f = std.minBy; f([3, 1, 2], function(x) x) == 1");
+        assert_bool("local f = stdExtended.minBy; f([3, 1, 2], function(x) x) == 1");
     }
 
     #[test]
     fn test_fc_max_by() {
-        assert_bool("local f = std.maxBy; f([3, 1, 2], function(x) x) == 3");
+        assert_bool("local f = stdExtended.maxBy; f([3, 1, 2], function(x) x) == 3");
     }
 
     #[test]
     fn test_fc_min_by_empty_error() {
-        assert_err("local f = std.minBy; f([], function(x) x)");
+        assert_err("local f = stdExtended.minBy; f([], function(x) x)");
     }
 
     // Lines 7170-7215: toPairs via first-class ref
     #[test]
     fn test_fc_to_pairs() {
-        assert_bool("local f = std.toPairs; std.length(f({a: 1})) == 1");
+        assert_bool("local f = stdExtended.toPairs; std.length(f({a: 1})) == 1");
     }
 
     #[test]
     fn test_fc_to_pairs_multiple() {
-        assert_bool("local f = std.toPairs; std.length(f({a: 1, b: 2})) == 2");
+        assert_bool("local f = stdExtended.toPairs; std.length(f({a: 1, b: 2})) == 2");
     }
 
     // Lines 7220-7314: mapKeys via first-class ref
     #[test]
     fn test_fc_map_keys() {
-        assert_bool("local f = std.mapKeys; std.objectHas(f(std.asciiUpper, {hello: 1}), 'HELLO')");
+        assert_bool(
+            "local f = stdExtended.mapKeys; std.objectHas(f(std.asciiUpper, {hello: 1}), 'HELLO')",
+        );
     }
 
     // Lines 7319-7413: filterObject via first-class ref
     #[test]
     fn test_fc_filter_object() {
         assert_bool(
-            r#"local f = std.filterObject;
+            r#"local f = stdExtended.filterObject;
                f(function(k, v) v > 1, {a: 1, b: 2, c: 3}) == {b: 2, c: 3}"#,
         );
     }
@@ -15227,7 +15247,7 @@ mod tests {
     #[test]
     fn test_fc_object_flatten() {
         assert_bool(
-            r#"local f = std.objectFlatten;
+            r#"local f = stdExtended.objectFlatten;
                std.objectHas(f({a: {b: 1}}, "."), "a.b")"#,
         );
     }
@@ -16139,52 +16159,52 @@ mod tests {
     // Group 12: groupBy/sortBy/countBy/uniqBy error paths
     #[test]
     fn test_group_by_non_array_error() {
-        assert_err(r#"std.groupBy("not_an_array", function(x) x)"#);
+        assert_err(r#"stdExtended.groupBy("not_an_array", function(x) x)"#);
     }
 
     #[test]
     fn test_count_by_non_array_error() {
-        assert_err(r#"std.countBy("not_an_array", function(x) x)"#);
+        assert_err(r#"stdExtended.countBy("not_an_array", function(x) x)"#);
     }
 
     #[test]
     fn test_uniq_by_non_array_error() {
-        assert_err(r#"std.uniqBy("not_an_array", function(x) x)"#);
+        assert_err(r#"stdExtended.uniqBy("not_an_array", function(x) x)"#);
     }
 
     #[test]
     fn test_fc_group_by_non_array_error() {
-        assert_err(r#"local f = std.groupBy; f("not_an_array", function(x) x)"#);
+        assert_err(r#"local f = stdExtended.groupBy; f("not_an_array", function(x) x)"#);
     }
 
     #[test]
     fn test_fc_group_by_key_not_string_error() {
-        assert_err(r#"local f = std.groupBy; f(["a", "b"], function(x) 1)"#);
+        assert_err(r#"local f = stdExtended.groupBy; f(["a", "b"], function(x) 1)"#);
     }
 
     #[test]
     fn test_fc_sort_by_non_array_error() {
-        assert_err(r#"local f = std.sortBy; f("not_an_array", function(x) x)"#);
+        assert_err(r#"local f = stdExtended.sortBy; f("not_an_array", function(x) x)"#);
     }
 
     #[test]
     fn test_fc_count_by_non_array_error() {
-        assert_err(r#"local f = std.countBy; f("not_an_array", function(x) x)"#);
+        assert_err(r#"local f = stdExtended.countBy; f("not_an_array", function(x) x)"#);
     }
 
     #[test]
     fn test_fc_count_by_key_not_string_error() {
-        assert_err(r#"local f = std.countBy; f(["a", "b"], function(x) 1)"#);
+        assert_err(r#"local f = stdExtended.countBy; f(["a", "b"], function(x) 1)"#);
     }
 
     #[test]
     fn test_fc_uniq_by_non_array_error() {
-        assert_err(r#"local f = std.uniqBy; f("not_an_array", function(x) x)"#);
+        assert_err(r#"local f = stdExtended.uniqBy; f("not_an_array", function(x) x)"#);
     }
 
     #[test]
     fn test_fc_uniq_by_key_not_string_error() {
-        assert_err(r#"local f = std.uniqBy; f(["a", "b"], function(x) 1)"#);
+        assert_err(r#"local f = stdExtended.uniqBy; f(["a", "b"], function(x) 1)"#);
     }
 
     #[test]
@@ -16565,7 +16585,7 @@ mod tests {
     // groupBy/sortBy/countBy/uniqBy StdCall non-array paths
     #[test]
     fn test_sort_by_non_array_error() {
-        assert_err(r#"std.sortBy("not_array", function(x) x)"#);
+        assert_err(r#"stdExtended.sortBy("not_array", function(x) x)"#);
     }
 
     // std.setUnion with no keyF (2-arg path) non-array errors
@@ -16582,48 +16602,48 @@ mod tests {
     // Call opcode path: minBy/maxBy non-array error
     #[test]
     fn test_fc_min_by_non_array_error() {
-        assert_err(r#"local f = std.minBy; f("not_array", function(x) x)"#);
+        assert_err(r#"local f = stdExtended.minBy; f("not_array", function(x) x)"#);
     }
 
     #[test]
     fn test_fc_max_by_non_array_error() {
-        assert_err(r#"local f = std.maxBy; f("not_array", function(x) x)"#);
+        assert_err(r#"local f = stdExtended.maxBy; f("not_array", function(x) x)"#);
     }
 
     // Call opcode path: toPairs non-object error
     #[test]
     fn test_fc_to_pairs_non_object_error() {
-        assert_err(r#"local f = std.toPairs; f("not_object")"#);
+        assert_err(r#"local f = stdExtended.toPairs; f("not_object")"#);
     }
 
     // Call opcode path: mapKeys non-object error
     #[test]
     fn test_fc_map_keys_non_object_error() {
-        assert_err(r#"local f = std.mapKeys; f(function(k) k, "not_object")"#);
+        assert_err(r#"local f = stdExtended.mapKeys; f(function(k) k, "not_object")"#);
     }
 
     // Call opcode path: mapKeys func returns non-string
     #[test]
     fn test_fc_map_keys_non_string_return_error() {
-        assert_err(r#"local f = std.mapKeys; f(function(k) 42, {a: 1})"#);
+        assert_err(r#"local f = stdExtended.mapKeys; f(function(k) 42, {a: 1})"#);
     }
 
     // Call opcode path: filterObject non-object error
     #[test]
     fn test_fc_filter_object_non_object_error() {
-        assert_err(r#"local f = std.filterObject; f(function(k, v) true, "not_object")"#);
+        assert_err(r#"local f = stdExtended.filterObject; f(function(k, v) true, "not_object")"#);
     }
 
     // Call opcode path: filterObject func returns non-bool
     #[test]
     fn test_fc_filter_object_non_bool_return_error() {
-        assert_err(r#"local f = std.filterObject; f(function(k, v) "notbool", {a: 1})"#);
+        assert_err(r#"local f = stdExtended.filterObject; f(function(k, v) "notbool", {a: 1})"#);
     }
 
     // Call opcode path: objectFlatten non-string sep error
     #[test]
     fn test_fc_object_flatten_non_string_sep_error() {
-        assert_err(r#"local f = std.objectFlatten; f({a: {b: 1}}, 42)"#);
+        assert_err(r#"local f = stdExtended.objectFlatten; f({a: {b: 1}}, 42)"#);
     }
 
     // manifestYamlStream non-array error
