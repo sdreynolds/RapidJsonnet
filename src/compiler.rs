@@ -4935,8 +4935,9 @@ mod tests {
     fn test_std_parse_float_is_compile_error() {
         let msg = compile_source_err(r#"std.parseFloat("1.5")"#);
         assert!(
-            !msg.is_empty(),
-            "expected compile error but got empty message"
+            msg.contains("parseFloat") || msg.contains("not found"),
+            "expected 'not found' error for std.parseFloat, got: {}",
+            msg
         );
     }
 
@@ -4944,8 +4945,9 @@ mod tests {
     fn test_std_map_keys_is_compile_error() {
         let msg = compile_source_err(r#"std.mapKeys(function(k) k, {})"#);
         assert!(
-            !msg.is_empty(),
-            "expected compile error but got empty message"
+            msg.contains("mapKeys") || msg.contains("not found"),
+            "expected 'not found' error for std.mapKeys, got: {}",
+            msg
         );
     }
 
@@ -4953,8 +4955,9 @@ mod tests {
     fn test_std_group_by_is_compile_error() {
         let msg = compile_source_err(r#"std.groupBy([1], function(x) "a")"#);
         assert!(
-            !msg.is_empty(),
-            "expected compile error but got empty message"
+            msg.contains("groupBy") || msg.contains("not found"),
+            "expected 'not found' error for std.groupBy, got: {}",
+            msg
         );
     }
 
@@ -4962,8 +4965,9 @@ mod tests {
     fn test_std_product_is_compile_error() {
         let msg = compile_source_err(r#"std.product([1,2,3])"#);
         assert!(
-            !msg.is_empty(),
-            "expected compile error but got empty message"
+            msg.contains("product") || msg.contains("not found"),
+            "expected 'not found' error for std.product, got: {}",
+            msg
         );
     }
 
@@ -4971,8 +4975,9 @@ mod tests {
     fn test_std_object_flatten_is_compile_error() {
         let msg = compile_source_err(r#"std.objectFlatten({})"#);
         assert!(
-            !msg.is_empty(),
-            "expected compile error but got empty message"
+            msg.contains("objectFlatten") || msg.contains("not found"),
+            "expected 'not found' error for std.objectFlatten, got: {}",
+            msg
         );
     }
 }

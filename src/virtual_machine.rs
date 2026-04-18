@@ -16959,7 +16959,7 @@ mod tests {
 
     #[test]
     fn test_std_extended_map_keys_via_local() {
-        assert_bool(r#"local e = stdExtended; e.mapKeys(function(k) k, {a: 1}) == {a: 1}"#);
+        assert_bool(r#"local e = stdExtended; e.mapKeys(function(k) k + "_x", {a: 1}) == {"a_x": 1}"#);
     }
 
     #[test]
