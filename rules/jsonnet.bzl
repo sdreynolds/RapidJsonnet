@@ -193,6 +193,11 @@ def _jsonnet_test_impl(ctx):
             executable = wrapper,
             runfiles = runfiles,
         ),
+        coverage_common.instrumented_files_info(
+            ctx,
+            source_attributes = ["src"],
+            dependency_attributes = ["deps"],
+        ),
     ]
 
 jsonnet_test = rule(
