@@ -4928,4 +4928,51 @@ mod tests {
             "local f(a) = local g(b) = local h(c) = a + b + c; h; g; f(1)(2)(3)",
         );
     }
+
+    // Compile-error tests: extension functions accessed via std.* must produce a compile error
+
+    #[test]
+    fn test_std_parse_float_is_compile_error() {
+        let msg = compile_source_err(r#"std.parseFloat("1.5")"#);
+        assert!(
+            !msg.is_empty(),
+            "expected compile error but got empty message"
+        );
+    }
+
+    #[test]
+    fn test_std_map_keys_is_compile_error() {
+        let msg = compile_source_err(r#"std.mapKeys(function(k) k, {})"#);
+        assert!(
+            !msg.is_empty(),
+            "expected compile error but got empty message"
+        );
+    }
+
+    #[test]
+    fn test_std_group_by_is_compile_error() {
+        let msg = compile_source_err(r#"std.groupBy([1], function(x) "a")"#);
+        assert!(
+            !msg.is_empty(),
+            "expected compile error but got empty message"
+        );
+    }
+
+    #[test]
+    fn test_std_product_is_compile_error() {
+        let msg = compile_source_err(r#"std.product([1,2,3])"#);
+        assert!(
+            !msg.is_empty(),
+            "expected compile error but got empty message"
+        );
+    }
+
+    #[test]
+    fn test_std_object_flatten_is_compile_error() {
+        let msg = compile_source_err(r#"std.objectFlatten({})"#);
+        assert!(
+            !msg.is_empty(),
+            "expected compile error but got empty message"
+        );
+    }
 }

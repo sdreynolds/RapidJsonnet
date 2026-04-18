@@ -16950,6 +16950,23 @@ mod tests {
         assert_bool(r#"local f = std.manifestJsonEx; f({a: 1}, "  ", "\n", null) != """#);
     }
 
+    // First-class value tests: stdExtended behaves as a first-class object
+
+    #[test]
+    fn test_std_extended_type_is_object() {
+        assert_bool(r#"std.type(stdExtended) == "object""#);
+    }
+
+    #[test]
+    fn test_std_extended_map_keys_via_local() {
+        assert_bool(r#"local e = stdExtended; e.mapKeys(function(k) k, {a: 1}) == {a: 1}"#);
+    }
+
+    #[test]
+    fn test_std_extended_parse_float_via_local() {
+        assert_bool(r#"local e = stdExtended; e.parseFloat("3.14") == 3.14"#);
+    }
+
     // Lines 2670, 2674: ArrayIndex on Object with raw (non-closure) field value or missing field
     // JSON ext_var objects have raw values (not thunks), so dynamic index uses this path
     #[test]
