@@ -141,7 +141,7 @@ rust_library(
 
 rust_library(
     name = "compiler",
-    srcs = ["src/compiler.rs", "src/compiler_integration_test.rs"],
+    srcs = ["src/compiler.rs"],
     deps = [
         ":chunk",
         ":scanner",
@@ -153,7 +153,7 @@ rust_library(
 rust_library(
     name = "compiler_stress",
     crate_name = "compiler",
-    srcs = ["src/compiler.rs", "src/compiler_integration_test.rs"],
+    srcs = ["src/compiler.rs"],
     deps = [
         ":chunk",
         ":scanner",
