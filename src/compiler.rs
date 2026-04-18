@@ -67,7 +67,7 @@ enum ExpressionType {
     Array,
     Unknown,
     StdNamespace,
-    StdExtendedNamespace, // new
+    StdExtendedNamespace,
     NativeFunction(chunk::NativeFuncId),
 }
 
@@ -778,6 +778,9 @@ impl<'a> Compiler<'a> {
                     self.emit_opcode(Opcode::LoadStd, span);
                     self.push_type(ExpressionType::StdNamespace);
                 } else if name_clone == "stdExtended" {
+                    // Special case for stdExtended namespace — RapidJsonnet extension functions.
+                    // Always emit LoadStdExtended so `stdExtended` has a value on the stack.
+                    // If followed by `.func`, the dot handler will pop it.
                     self.emit_opcode(Opcode::LoadStdExtended, span);
                     self.push_type(ExpressionType::StdExtendedNamespace);
                 } else {
@@ -1380,6 +1383,7 @@ impl<'a> Compiler<'a> {
                             self.type_stack.pop();
                             self.emit_opcode(Opcode::Pop, property_token.span.clone());
 
+                            // stdExtended has no value-typed properties (no thisFile or pi equivalent)
                             if let Some(id) = chunk::NativeFuncId::from_extended_name(name) {
                                 let const_idx = self
                                     .compiling_chunk
