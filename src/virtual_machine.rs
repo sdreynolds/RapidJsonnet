@@ -93,6 +93,8 @@ pub struct VirtualMachine {
     pending_cache_target: Option<(ObjectIndex, StringIndex, ObjectIndex)>,
     /// Cached std object (created on first LoadStd, reused after)
     std_object: Option<Value>,
+    /// Cached stdExtended object (created on first LoadStdExtended, reused after)
+    std_extended_object: Option<Value>,
     /// Library search paths for import resolution (like -J / --jpath)
     jpaths: Vec<String>,
     /// Optional coverage collector for span tracking during test runs
@@ -139,6 +141,7 @@ impl VirtualMachine {
             pending_field_name: None,
             pending_cache_target: None,
             std_object: None,
+            std_extended_object: None,
             jpaths: Vec::new(),
             coverage_collector: None,
             field_cache: std::collections::HashMap::new(),
@@ -7997,6 +8000,12 @@ impl VirtualMachine {
                     self.push(std_obj)?;
                 }
 
+                Opcode::LoadStdExtended => {
+                    self.advance_pc();
+                    let obj = self.get_or_create_std_extended_object();
+                    self.push(obj)?;
+                }
+
                 // All other opcodes result in runtime error
                 _ => {
                     return Err(RuntimeError::new(
@@ -8016,7 +8025,7 @@ impl VirtualMachine {
         }
 
         let mut properties = std::collections::HashMap::new();
-        for &(name, id) in chunk::NativeFuncId::all_with_names() {
+        for &(name, id) in chunk::NativeFuncId::all_std_with_names() {
             let key = self.memory_manager.allocate_string(name).index;
             properties.insert(
                 key,
@@ -8033,6 +8042,33 @@ impl VirtualMachine {
         self.std_object = Some(obj);
         // Also register as a persistent external root so the object survives
         // GC runs triggered by the compiler (which doesn't know about VM state).
+        self.memory_manager
+            .push_external_roots(vec![obj], Vec::new());
+        obj
+    }
+
+    /// Get or create the `stdExtended` object with the 21 extension functions as hidden fields.
+    fn get_or_create_std_extended_object(&mut self) -> Value {
+        if let Some(obj) = self.std_extended_object {
+            return obj;
+        }
+
+        let mut properties = std::collections::HashMap::new();
+        for &(name, id) in chunk::NativeFuncId::all_extended_with_names() {
+            let key = self.memory_manager.allocate_string(name).index;
+            properties.insert(
+                key,
+                memory_manager::ObjectField::new(
+                    Value::NativeFunction(id),
+                    FieldVisibility::Hidden,
+                ),
+            );
+        }
+        let alloc = self
+            .memory_manager
+            .allocate_object_with_properties(properties);
+        let obj = Value::Object(alloc.index);
+        self.std_extended_object = Some(obj);
         self.memory_manager
             .push_external_roots(vec![obj], Vec::new());
         obj
