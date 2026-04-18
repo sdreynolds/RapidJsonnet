@@ -891,8 +891,9 @@ impl NativeFuncId {
         }
     }
 
-    /// Lookup a native function by name
-    pub fn from_name(name: &str) -> Option<Self> {
+    /// Lookup a standard (non-extended) native function by name.
+    /// Does NOT include the 21 stdExtended functions.
+    pub fn from_std_name(name: &str) -> Option<Self> {
         match name {
             "type" => Some(NativeFuncId::Type),
             "length" => Some(NativeFuncId::Length),
@@ -967,7 +968,6 @@ impl NativeFuncId {
             "escapeStringJson" => Some(NativeFuncId::EscapeStringJson),
             "escapeStringXml" | "escapeStringXML" => Some(NativeFuncId::EscapeStringXml),
             "escapeStringBash" => Some(NativeFuncId::EscapeStringBash),
-            "parseFloat" => Some(NativeFuncId::ParseFloat),
             "pow" => Some(NativeFuncId::Pow),
             "sqrt" => Some(NativeFuncId::Sqrt),
             "exp" => Some(NativeFuncId::Exp),
@@ -1039,13 +1039,18 @@ impl NativeFuncId {
             "sha512" => Some(NativeFuncId::Sha512),
             "sha3" => Some(NativeFuncId::Sha3),
             "extVar" => Some(NativeFuncId::ExtVar),
-            "groupBy" => Some(NativeFuncId::GroupBy),
-            "mapKeys" => Some(NativeFuncId::MapKeys),
-            "filterObject" => Some(NativeFuncId::FilterObject),
+            _ => None,
+        }
+    }
+
+    /// Lookup a stdExtended native function by name.
+    /// Contains ONLY the 21 extended functions.
+    pub fn from_extended_name(name: &str) -> Option<Self> {
+        match name {
+            "parseFloat" => Some(NativeFuncId::ParseFloat),
             "gcd" => Some(NativeFuncId::Gcd),
             "lcm" => Some(NativeFuncId::Lcm),
             "indent" => Some(NativeFuncId::Indent),
-            "objectFlatten" => Some(NativeFuncId::ObjectFlatten),
             "chunk" => Some(NativeFuncId::Chunk),
             "zip" => Some(NativeFuncId::Zip),
             "unzip" => Some(NativeFuncId::Unzip),
@@ -1059,13 +1064,24 @@ impl NativeFuncId {
             "minBy" => Some(NativeFuncId::MinBy),
             "maxBy" => Some(NativeFuncId::MaxBy),
             "product" => Some(NativeFuncId::Product),
+            "groupBy" => Some(NativeFuncId::GroupBy),
+            "mapKeys" => Some(NativeFuncId::MapKeys),
+            "filterObject" => Some(NativeFuncId::FilterObject),
+            "objectFlatten" => Some(NativeFuncId::ObjectFlatten),
             _ => None,
         }
     }
 
-    /// Returns all (name, id) pairs for populating the std object.
-    /// Names match those used in `from_name` (canonical Jsonnet names).
-    pub fn all_with_names() -> &'static [(&'static str, NativeFuncId)] {
+    /// Lookup a native function by name (searches both std and stdExtended).
+    /// Kept for backward compatibility — the compiler will be updated to call
+    /// `from_std_name` and `from_extended_name` separately.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::from_std_name(name).or_else(|| Self::from_extended_name(name))
+    }
+
+    /// Returns all (name, id) pairs for populating the std object,
+    /// excluding the 21 stdExtended functions.
+    pub fn all_std_with_names() -> &'static [(&'static str, NativeFuncId)] {
         use NativeFuncId::*;
         &[
             ("type", Type),
@@ -1141,7 +1157,6 @@ impl NativeFuncId {
             ("escapeStringJson", EscapeStringJson),
             ("escapeStringXml", EscapeStringXml),
             ("escapeStringBash", EscapeStringBash),
-            ("parseFloat", ParseFloat),
             ("pow", Pow),
             ("sqrt", Sqrt),
             ("exp", Exp),
@@ -1213,13 +1228,17 @@ impl NativeFuncId {
             ("sha512", Sha512),
             ("sha3", Sha3),
             ("extVar", ExtVar),
-            ("groupBy", GroupBy),
-            ("mapKeys", MapKeys),
-            ("filterObject", FilterObject),
+        ]
+    }
+
+    /// Returns all (name, id) pairs for the 21 stdExtended functions.
+    pub fn all_extended_with_names() -> &'static [(&'static str, NativeFuncId)] {
+        use NativeFuncId::*;
+        &[
+            ("parseFloat", ParseFloat),
             ("gcd", Gcd),
             ("lcm", Lcm),
             ("indent", Indent),
-            ("objectFlatten", ObjectFlatten),
             ("chunk", Chunk),
             ("zip", Zip),
             ("unzip", Unzip),
@@ -1233,7 +1252,21 @@ impl NativeFuncId {
             ("minBy", MinBy),
             ("maxBy", MaxBy),
             ("product", Product),
+            ("groupBy", GroupBy),
+            ("mapKeys", MapKeys),
+            ("filterObject", FilterObject),
+            ("objectFlatten", ObjectFlatten),
         ]
+    }
+
+    /// Returns all (name, id) pairs for both std and stdExtended (backward compat).
+    pub fn all_with_names() -> &'static [(&'static str, NativeFuncId)] {
+        // For backward compat we keep this as an alias.
+        // NOTE: This only returns the std entries; callers that need all entries
+        // should use all_std_with_names() and all_extended_with_names() separately.
+        // This shim returns the std entries — the 21 extended ones are intentionally
+        // omitted from the std object now.
+        Self::all_std_with_names()
     }
 }
 
@@ -1463,14 +1496,15 @@ pub enum Opcode {
     Closure = 100, // operand: u16 function_index + variable upvalue descriptors
     // Format: Closure <func_idx:u16> <upvalue_count:u8>
     //         For each upvalue: <is_local:u8> <index:u16>
-    GetUpvalue = 101,    // operand: u16 slot
-    SetUpvalue = 102,    // operand: u16 slot (for future use)
-    CloseUpvalue = 103,  // no operand
-    LoadFieldName = 104, // no operand - pushes the current field's key onto the stack
-    SuperHasField = 105, // no operand - pops field name, checks super, pushes bool
-    InOp = 106,          // membership test: pops object/super, pops key string, pushes bool
-    MakeThunk = 107,     // like Closure but marks result as a lazy thunk
-    LoadStd = 108,       // no operand - pushes the std object onto the stack
+    GetUpvalue = 101,      // operand: u16 slot
+    SetUpvalue = 102,      // operand: u16 slot (for future use)
+    CloseUpvalue = 103,    // no operand
+    LoadFieldName = 104,   // no operand - pushes the current field's key onto the stack
+    SuperHasField = 105,   // no operand - pops field name, checks super, pushes bool
+    InOp = 106,            // membership test: pops object/super, pops key string, pushes bool
+    MakeThunk = 107,       // like Closure but marks result as a lazy thunk
+    LoadStd = 108,         // no operand - pushes the std object onto the stack
+    LoadStdExtended = 109, // no operand - pushes the stdExtended object onto the stack
 }
 
 impl Opcode {
@@ -1545,6 +1579,7 @@ impl Opcode {
             106 => Some(Opcode::InOp),
             107 => Some(Opcode::MakeThunk),
             108 => Some(Opcode::LoadStd),
+            109 => Some(Opcode::LoadStdExtended),
             _ => None,
         }
     }
