@@ -1,5 +1,5 @@
 name: Build and Test
-run-name: ${{ github.actor }} is testing out GitHub Actions 🚀
+run-name: Run Tests
 on: [push]
 jobs:
   Bazel-Test:
@@ -13,7 +13,7 @@ jobs:
       - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
       - run: echo "🖥️ The workflow is now ready to test your code on the runner."
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.18.0
+        uses: bazel-contrib/setup-bazel@0.19.0
         with:
           # Avoid downloading Bazel every time.
           bazelisk-cache: true
