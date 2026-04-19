@@ -1174,8 +1174,8 @@ impl<'a> Compiler<'a> {
         self.declare_local("<closure>".to_string())?;
         self.parse_expr_notail(min_bp, memory_manager)?;
         let return_span = self.current_span();
-        self.emit_opcode(Opcode::Return, return_span);
-        self.end_scope();
+        self.emit_opcode(Opcode::Return, return_span.clone());
+        self.end_scope(return_span);
         let (chunk, upvalues) = self.end_function(saved_state);
         self.emit_thunk(chunk, upvalues, thunk_span, memory_manager)?;
         Ok(())
@@ -1898,9 +1898,9 @@ impl<'a> Compiler<'a> {
 
                     // Return null on success
                     self.emit_opcode(Opcode::LoadNull, full_assert_span.clone());
-                    self.emit_opcode(Opcode::Return, full_assert_span);
+                    self.emit_opcode(Opcode::Return, full_assert_span.clone());
 
-                    self.end_scope();
+                    self.end_scope(full_assert_span);
 
                     let (chunk, upvalues) = self.end_function(saved_state);
 
@@ -2107,8 +2107,8 @@ impl<'a> Compiler<'a> {
                 self.patch_jump(jump_no_super);
             }
 
-            self.emit_opcode(Opcode::Return, 0..0);
-            self.end_scope();
+            self.emit_opcode(Opcode::Return, key_token_span.clone());
+            self.end_scope(key_token_span.clone());
 
             let (field_chunk, field_upvalues) =
                 self.end_function((saved_scope_depth, saved_function_type));
@@ -2132,7 +2132,7 @@ impl<'a> Compiler<'a> {
             self.compiling_chunk.write_opcode_u8(
                 Opcode::ObjectInsert,
                 visibility as u8,
-                start_token.span.clone(),
+                key_token_span.clone(),
             );
 
             // Check for more fields or end of object
@@ -2729,7 +2729,7 @@ impl<'a> Compiler<'a> {
         self.compiling_chunk
             .write_opcode_u16(Opcode::LoadVar, result_slot as u16, span.clone());
 
-        self.end_scope();
+        self.end_scope(span.clone());
         self.parser.restore_checkpoint(source_end_checkpoint);
 
         Ok(())
@@ -2819,8 +2819,8 @@ impl<'a> Compiler<'a> {
             self.inject_object_locals(object_locals, memory_manager, 0)?;
 
             self.parse_expr_notail(0, memory_manager)?;
-            self.emit_opcode(Opcode::Return, 0..0);
-            self.end_scope();
+            self.emit_opcode(Opcode::Return, span.clone());
+            self.end_scope(span.clone());
 
             let (field_chunk, field_upvalues) =
                 self.end_function((saved_scope_depth, saved_function_type));
@@ -2943,7 +2943,7 @@ impl<'a> Compiler<'a> {
                     next_precomputed,
                 )?;
 
-                self.end_scope();
+                self.end_scope(clause_span.clone());
                 self.emit_opcode(Opcode::Pop, clause_span.clone());
 
                 self.compiling_chunk.write_opcode_u16(
@@ -2963,7 +2963,7 @@ impl<'a> Compiler<'a> {
                 self.patch_jump(jump_to_end);
 
                 self.emit_opcode(Opcode::LoadNull, clause_span.clone());
-                self.end_scope();
+                self.end_scope(clause_span.clone());
             }
             ComprehensionClause::If {
                 condition_checkpoint,
@@ -3122,7 +3122,7 @@ impl<'a> Compiler<'a> {
             .write_opcode_u16(Opcode::LoadVar, result_slot as u16, span.clone());
 
         // End the comprehension scope
-        self.end_scope();
+        self.end_scope(span.clone());
 
         // Restore parser to after the comprehension
         self.parser.restore_checkpoint(source_end_checkpoint);
@@ -3307,7 +3307,7 @@ impl<'a> Compiler<'a> {
                 )?;
 
                 // End scope for loop variable
-                self.end_scope();
+                self.end_scope(span.clone());
                 // Pop the dummy value from recursion
                 self.emit_opcode(Opcode::Pop, span.clone());
 
@@ -3334,7 +3334,7 @@ impl<'a> Compiler<'a> {
                 self.emit_opcode(Opcode::LoadNull, clause_span.clone());
 
                 // End scope for loop state
-                self.end_scope();
+                self.end_scope(clause_span.clone());
             }
             ComprehensionClause::If {
                 condition_checkpoint,
@@ -3524,8 +3524,8 @@ impl<'a> Compiler<'a> {
                 self.declare_local("<closure>".to_string())?;
                 self.parse_expr(0, memory_manager)?;
                 let return_span = self.current_span();
-                self.emit_opcode(Opcode::Return, return_span);
-                self.end_scope();
+                self.emit_opcode(Opcode::Return, return_span.clone());
+                self.end_scope(return_span);
                 let (chunk, upvalues) = self.end_function(saved_state);
                 self.emit_thunk(chunk, upvalues, thunk_span, memory_manager)?;
             }
@@ -3562,8 +3562,16 @@ impl<'a> Compiler<'a> {
         // Parse body expression (with locals in scope)
         self.parse_expr(0, memory_manager)?;
 
+        // Use the last consumed token as the span for cleanup ops so they point at
+        // the end of the body rather than the EOF position.
+        let body_end_span = self
+            .parser
+            .previous_token()
+            .map(|t| t.span.clone())
+            .unwrap_or_else(|| self.current_span());
+
         // Exit scope - emit Pop for each local
-        self.end_scope();
+        self.end_scope(body_end_span);
 
         Ok(())
     }
@@ -3576,9 +3584,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Exit current scope, emitting Pop or CloseUpvalue instructions for locals at this depth
-    fn end_scope(&mut self) {
-        let span = self.current_span();
-
+    fn end_scope(&mut self, span: Range<usize>) {
         // Pop all locals at current depth (in reverse declaration order)
         // The body expression result is on top of the stack, and locals are below it.
         // For each local to pop, we swap it with the result and then pop/close it.
@@ -3994,9 +4000,9 @@ impl<'a> Compiler<'a> {
         self.in_tail_position = prev_tail;
 
         let return_span = self.current_span();
-        self.emit_opcode(Opcode::Return, return_span);
+        self.emit_opcode(Opcode::Return, return_span.clone());
 
-        self.end_scope();
+        self.end_scope(return_span);
 
         let (chunk, upvalues) = self.end_function(saved_state);
         self.emit_closure_with_params(
