@@ -8,3 +8,4 @@
 /.worktrees
 /.claude/settings.local.json
 /benchmark-results
+/.pi-lens/
