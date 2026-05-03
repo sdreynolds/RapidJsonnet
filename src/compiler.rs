@@ -3759,7 +3759,9 @@ impl<'a> Compiler<'a> {
         let (old_scope_depth, old_function_type) = saved_state;
 
         // Restore locals and upvalues and chunk from enclosing scope
-        let enclosing = self.enclosing.take()
+        let enclosing = self
+            .enclosing
+            .take()
             .unwrap_or_else(|| unreachable!("end_function called without matching begin_function"));
 
         let function_chunk = std::mem::replace(&mut self.compiling_chunk, enclosing.chunk);
