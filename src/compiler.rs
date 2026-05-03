@@ -684,7 +684,7 @@ impl<'a> Compiler<'a> {
                         let field_token =
                             self.parser.current_token().cloned().ok_or_else(|| {
                                 self.make_error(
-                                    next.as_ref().unwrap().span.clone(),
+                                    next.as_ref().map(|t| t.span.clone()).unwrap_or(0..0),
                                     "Expected field name after 'super.'".to_string(),
                                 )
                             })?;
