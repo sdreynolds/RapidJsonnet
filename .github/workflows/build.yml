@@ -21,6 +21,8 @@ jobs:
           disk-cache: ${{ github.workflow }}
           # Share repository cache between workflows.
           repository-cache: true
+      - name: Ensure disk cache directory exists
+        run: mkdir -p ~/.bazel/disk-cache
       - name: Run tests
         run: bazel test //...
       - run: echo "🍏 This job's status is ${{ job.status }}."
