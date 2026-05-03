@@ -114,15 +114,15 @@ The test runner (`run_test.sh`) marks any file containing `error`, `wrong`, `unm
 
 New files in `end2end/`:
 
-| File | Error triggered | Key quality |
-|---|---|---|
-| `super_dot_missing_field_error.jsonnet` | `super .` with no identifier after dot, inside an object | Span points at dot, not blank |
-| `local_missing_semicolon_error.jsonnet` | `local x = 1 x` (no `;` before body) | Points at `x` after value |
-| `local_missing_equals_error.jsonnet` | `local x 1` (no `=`) | Points at `1` where `=` expected |
-| `object_dynamic_key_missing_bracket_error.jsonnet` | `{ [expr: v }` — missing `]` | Points at `:` where `]` expected |
-| `function_required_after_default_error.jsonnet` | `function(a=1, b) b` — required param after default | Points at `b` |
-| `undefined_variable_error.jsonnet` | `foo + 1` | Span covers `foo` |
-| `dollar_outside_object_error.jsonnet` | `$ + 1` at top level | `$` used outside object scope |
+| File                                               | Error triggered                                          | Key quality                      |
+|----------------------------------------------------|----------------------------------------------------------|----------------------------------|
+| `super_dot_missing_field_error.jsonnet`            | `super .` with no identifier after dot, inside an object | Span points at dot, not blank    |
+| `local_missing_semicolon_error.jsonnet`            | `local x = 1 x` (no `;` before body)                     | Points at `x` after value        |
+| `local_missing_equals_error.jsonnet`               | `local x 1` (no `=`)                                     | Points at `1` where `=` expected |
+| `object_dynamic_key_missing_bracket_error.jsonnet` | `{ [expr: v }` — missing `]`                             | Points at `:` where `]` expected |
+| `function_required_after_default_error.jsonnet`    | `function(a=1, b) b` — required param after default      | Points at `b`                    |
+| `undefined_variable_error.jsonnet`                 | `foo + 1`                                                | Span covers `foo`                |
+| `dollar_outside_object_error.jsonnet`              | `$ + 1` at top level                                     | `$` used outside object scope    |
 
 Each test only needs to exit non-zero and print a useful ariadne-formatted error. No
 golden-file matching — the test framework just checks the exit code.
