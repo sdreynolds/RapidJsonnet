@@ -59,5 +59,6 @@ build:clippy --output_groups=+clippy_checks
 try-import %workspace%/user.bazelrc
 
 # For git worktrees to share the cache
-build --disk_cache=~/.cache/bazel-disk-cache
-test --disk_cache=~/.cache/bazel-disk-cache
+# Path matches setup-bazel's disk-cache location so CI restores correctly
+build --disk_cache=~/.cache/bazel-disk
+test --disk_cache=~/.cache/bazel-disk
