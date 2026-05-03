@@ -2710,8 +2710,7 @@ impl<'a> Compiler<'a> {
 
         self.compiling_chunk
             .write_opcode_u16(Opcode::CreateObject, 0, span.clone());
-        self.declare_local("__comp_result".to_string())?;
-        let result_slot = self.locals.last().unwrap().stack_slot;
+        let result_slot = self.declare_local("__comp_result".to_string())?;
 
         self.emit_object_comprehension_clauses(
             &clauses,
@@ -2870,8 +2869,7 @@ impl<'a> Compiler<'a> {
 
                 self.begin_scope();
 
-                self.declare_local("__comp_source".to_string())?;
-                let source_slot = self.locals.last().unwrap().stack_slot;
+                let source_slot = self.declare_local("__comp_source".to_string())?;
 
                 self.compiling_chunk.write_opcode_u16(
                     Opcode::LoadVar,
@@ -2879,12 +2877,10 @@ impl<'a> Compiler<'a> {
                     clause_span.clone(),
                 );
                 self.emit_opcode(Opcode::ArrayLength, clause_span.clone());
-                self.declare_local("__comp_length".to_string())?;
-                let length_slot = self.locals.last().unwrap().stack_slot;
+                let length_slot = self.declare_local("__comp_length".to_string())?;
 
                 self.emit_constant(0.0)?;
-                self.declare_local("__comp_counter".to_string())?;
-                let counter_slot = self.locals.last().unwrap().stack_slot;
+                let counter_slot = self.declare_local("__comp_counter".to_string())?;
 
                 // Hoist the next for-clause's source if it doesn't depend on var_name.
                 let next_precomputed = match clauses.get(clause_idx + 1) {
@@ -2895,8 +2891,7 @@ impl<'a> Compiler<'a> {
                         let next_src_cp = next_src_cp.clone();
                         self.parser.restore_checkpoint(next_src_cp);
                         self.parse_expr_notail(0, memory_manager)?;
-                        self.declare_local("__comp_hoisted_source".to_string())?;
-                        Some(self.locals.last().unwrap().stack_slot)
+                        Some(self.declare_local("__comp_hoisted_source".to_string())?)
                     }
                     _ => None,
                 };
@@ -3099,8 +3094,7 @@ impl<'a> Compiler<'a> {
         // Create empty result array, declare as hidden local
         self.compiling_chunk
             .write_opcode_u16(Opcode::CreateArray, 0, span.clone());
-        self.declare_local("__comp_result".to_string())?;
-        let result_slot = self.locals.last().unwrap().stack_slot;
+        let result_slot = self.declare_local("__comp_result".to_string())?;
         // Stack: [result]
 
         // Now emit the nested loops/conditions recursively
@@ -3225,8 +3219,7 @@ impl<'a> Compiler<'a> {
                 // Enter a scope for the loop state
                 self.begin_scope();
 
-                self.declare_local("__comp_source".to_string())?;
-                let source_slot = self.locals.last().unwrap().stack_slot;
+                let source_slot = self.declare_local("__comp_source".to_string())?;
 
                 // Dup source and get length, declare as hidden local
                 self.compiling_chunk.write_opcode_u16(
@@ -3235,13 +3228,11 @@ impl<'a> Compiler<'a> {
                     clause_span.clone(),
                 );
                 self.emit_opcode(Opcode::ArrayLength, clause_span.clone());
-                self.declare_local("__comp_length".to_string())?;
-                let length_slot = self.locals.last().unwrap().stack_slot;
+                let length_slot = self.declare_local("__comp_length".to_string())?;
 
                 // Push initial counter = 0, declare as hidden local
                 self.emit_constant(0.0)?;
-                self.declare_local("__comp_counter".to_string())?;
-                let counter_slot = self.locals.last().unwrap().stack_slot;
+                let counter_slot = self.declare_local("__comp_counter".to_string())?;
 
                 // Hoist the next for-clause's source if it doesn't depend on var_name.
                 // This avoids re-evaluating the inner source on every outer iteration.
@@ -3253,8 +3244,7 @@ impl<'a> Compiler<'a> {
                         let next_src_cp = next_src_cp.clone();
                         self.parser.restore_checkpoint(next_src_cp);
                         self.parse_expr_notail(0, memory_manager)?;
-                        self.declare_local("__comp_hoisted_source".to_string())?;
-                        Some(self.locals.last().unwrap().stack_slot)
+                        Some(self.declare_local("__comp_hoisted_source".to_string())?)
                     }
                     _ => None,
                 };
@@ -3467,8 +3457,7 @@ impl<'a> Compiler<'a> {
         let mut slots: Vec<usize> = Vec::new();
         for (name, span) in &binding_names {
             self.emit_opcode(Opcode::LoadNull, span.clone());
-            self.declare_local(name.clone())?;
-            slots.push(self.locals.last().unwrap().stack_slot);
+            slots.push(self.declare_local(name.clone())?);
         }
 
         // Phase 3: Parse and compile bindings sequentially, consuming tokens
@@ -3613,7 +3602,7 @@ impl<'a> Compiler<'a> {
 
     /// Declare a new local variable at the current scope depth
     /// The value must already be on the stack
-    fn declare_local(&mut self, name: String) -> Result<(), CompilerError> {
+    fn declare_local(&mut self, name: String) -> Result<usize, CompilerError> {
         // Check for duplicate in current scope
         for local in self.locals.iter().rev() {
             if local.depth < self.scope_depth {
@@ -3639,7 +3628,7 @@ impl<'a> Compiler<'a> {
             is_captured: false,
         });
 
-        Ok(())
+        Ok(stack_slot)
     }
 
     /// Resolve a variable name to its stack slot
@@ -3954,8 +3943,7 @@ impl<'a> Compiler<'a> {
         // Declare all parameters as locals
         let mut param_slots = Vec::new();
         for param in &parameters {
-            self.declare_local(param.name.clone())?;
-            param_slots.push(self.locals.last().unwrap().stack_slot);
+            param_slots.push(self.declare_local(param.name.clone())?);
         }
 
         // Emit default-initialization preamble for params with defaults.
