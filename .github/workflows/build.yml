@@ -22,7 +22,7 @@ jobs:
           # Share repository cache between workflows.
           repository-cache: true
       - name: Ensure disk cache directory exists
-        run: mkdir -p ~/.bazel/disk-cache
+        run: mkdir -p ~/.cache/bazel-disk
       - name: Run tests
         run: bazel test //...
       - run: echo "🍏 This job's status is ${{ job.status }}."
