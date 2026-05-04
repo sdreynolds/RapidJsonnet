@@ -184,6 +184,7 @@ pub struct Compiler<'a> {
     in_tail_position: bool, // Whether we are currently in a tail position
     tail_calls_emitted: usize, // Number of tail calls emitted so far
     anon_stack_depth: usize, // Count of anonymous temporaries on VM stack not tracked as locals
+    lhs_span_start: usize, // Start byte of the callee expression for call span attribution
 }
 
 impl<'a> Compiler<'a> {
@@ -206,6 +207,7 @@ impl<'a> Compiler<'a> {
             in_tail_position: false,
             tail_calls_emitted: 0,
             anon_stack_depth: 0,
+            lhs_span_start: 0,
         }
     }
 
@@ -262,8 +264,21 @@ impl<'a> Compiler<'a> {
         min_bp: u8,
         memory_manager: &mut MemoryManager,
     ) -> Result<(), CompilerError> {
+        // Record where this expression starts for call span attribution (see parse_infix LeftParen).
+        // Must be saved before and restored after parse_prefix because recursive parse_expr calls
+        // inside parse_prefix (e.g. for nested expressions) overwrite the field.
+        let expr_start = self
+            .parser
+            .current_token()
+            .map(|t| t.span.start)
+            .unwrap_or(0);
+        self.lhs_span_start = expr_start;
+
         // Parse left-hand side (prefix)
         self.parse_prefix(memory_manager)?;
+
+        // Restore: parse_prefix may have made recursive parse_expr calls that overwrote lhs_span_start.
+        self.lhs_span_start = expr_start;
 
         // Parse infix and postfix operators in a single loop to correctly handle precedence
         loop {
@@ -1496,7 +1511,7 @@ impl<'a> Compiler<'a> {
                 }
             }
             Token::LeftParen => {
-                let call_start = token.span.start; // byte position of '(' for span attribution
+                let call_start = self.lhs_span_start; // start of the callee expression
                 self.parser.advance()?; // consume '('
 
                 // Check if we are calling a native function
@@ -5330,5 +5345,30 @@ mod integration_tests {
     #[test]
     fn test_deeply_nested_upvalue() {
         assert_compiles("local f(a) = local g(b) = local h(c) = a + b + c; h; g; f(1)(2)(3)");
+    }
+
+    #[test]
+    fn test_call_span_covers_callee_name() {
+        // "local f = function(n) n; f(1)"
+        //  0123456789012345678901234567890
+        // 'f' at position 25, '(' at 26, ')' at 28 → span should be 25..29
+        let input = "local f = function(n) n; f(1)";
+        let mut scanner = scanner::Scanner::new(input, "test");
+        let compiler = crate::Compiler::new(&mut scanner, "test");
+        let mut memory_manager = memory_manager::MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        let call_pos = chunk
+            .code
+            .iter()
+            .position(|&x| x == chunk::Opcode::Call as u8)
+            .expect("Call opcode not found");
+
+        let call_span = chunk.get_span(call_pos).unwrap();
+        assert_eq!(
+            call_span.start, 25,
+            "call span should start at 'f' (25), not '(' (26)"
+        );
+        assert_eq!(call_span.end, 29, "call span should end after ')'");
     }
 }
