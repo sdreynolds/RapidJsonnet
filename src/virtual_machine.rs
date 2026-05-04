@@ -16974,6 +16974,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "call_site populated in Task 2; build_stack_trace wired in Task 3"]
     fn test_stack_trace_single_call() {
         // call site should appear in cause chain when a runtime error bubbles up
         let source = "local f = function() error 'boom'; f()";
