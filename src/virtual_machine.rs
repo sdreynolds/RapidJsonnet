@@ -31,7 +31,7 @@ extern crate serde_yaml;
 const MAX_FRAMES: usize = 1024;
 
 /// Represents a function call frame on the call stack
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CallFrame {
     /// The closure being executed in this frame
     pub closure: ClosureIndex,
@@ -48,6 +48,9 @@ pub struct CallFrame {
     /// When set, the return value of this frame should be cached in the VM's field_cache
     /// under (object_index, field_key, self_obj).
     pub cache_target: Option<(ObjectIndex, StringIndex, ObjectIndex)>,
+    /// Byte span and source_id of the Call opcode in the parent frame.
+    /// None for the top-level script frame (no parent).
+    pub call_site: Option<(Range<usize>, String)>,
 }
 
 impl CallFrame {
@@ -67,6 +70,7 @@ impl CallFrame {
             super_obj,
             field_name: None,
             cache_target: None,
+            call_site: None,
         }
     }
 }
@@ -16967,6 +16971,19 @@ mod tests {
     #[test]
     fn test_std_extended_parse_float_via_local() {
         assert_bool(r#"local e = stdExtended; e.parseFloat("3.14") == 3.14"#);
+    }
+
+    #[test]
+    fn test_stack_trace_single_call() {
+        // call site should appear in cause chain when a runtime error bubbles up
+        let source = "local f = function() error 'boom'; f()";
+        let err = run_jsonnet(source).expect_err("expected runtime error");
+        // The error itself has no cause (single frame), but call_site from f's frame
+        // should have been captured. With one level of wrapping there IS a cause.
+        assert!(
+            err.cause.is_some(),
+            "expected cause chain for a nested call, got none"
+        );
     }
 
     // Lines 2670, 2674: ArrayIndex on Object with raw (non-closure) field value or missing field
