@@ -129,8 +129,9 @@ impl ScanError {
                 .with_color(red),
         );
 
-        // Add caller frames as additional labels (all except the last/root cause)
-        for frame in chain.iter().take(chain.len().saturating_sub(1)) {
+        // Add caller frames as additional labels, innermost first so ariadne
+        // renders them closest-to-error first (standard stack trace order).
+        for frame in chain.iter().rev().skip(1) {
             builder = builder.with_label(
                 Label::new((frame.source_id.clone(), frame.span.clone()))
                     .with_message(&frame.message)
@@ -1065,13 +1066,43 @@ mod tests {
 
     #[test]
     fn test_into_report_with_cause() {
-        let cause = ScanError::new(0..3, "root cause".to_string(), "test".to_string());
-        let mut outer = ScanError::new(5..8, "outer error".to_string(), "test".to_string());
-        outer.cause = Some(Box::new(cause));
+        // Source with three spans on well-separated lines so ariadne
+        // places each in its own section (sections render in addition order).
+        // Line 1: "abc" (chars 0..3)   ← root error span
+        // Line 4: "def" (chars 6..9)   ← inner call site span
+        // Line 7: "ghi" (chars 12..15) ← outer call site span
+        let source_text = "abc\n\n\ndef\n\n\nghi";
+
+        let root = ScanError::new(0..3, "root error".to_string(), "test".to_string());
+        let mut inner = ScanError::new(6..9, "inner frame".to_string(), "test".to_string());
+        inner.cause = Some(Box::new(root));
+        let mut outer = ScanError::new(12..15, "outer frame".to_string(), "test".to_string());
+        outer.cause = Some(Box::new(inner));
 
         let (report, source_ids) = outer.into_report();
-        let _ = report; // just verify it doesn't panic
         assert_eq!(source_ids.len(), 1);
+
+        // Render to bytes — ariadne::Report::write accepts any W: Write
+        let mut output = Vec::<u8>::new();
+        report
+            .write(
+                ("test".to_string(), ariadne::Source::from(source_text)),
+                &mut output,
+            )
+            .unwrap();
+        let rendered = String::from_utf8_lossy(&output).into_owned();
+
+        let inner_pos = rendered
+            .find("inner frame")
+            .expect("inner frame label missing");
+        let outer_pos = rendered
+            .find("outer frame")
+            .expect("outer frame label missing");
+        assert!(
+            inner_pos < outer_pos,
+            "expected innermost label before outermost in rendered output\n{}",
+            rendered
+        );
     }
 
     #[test]
