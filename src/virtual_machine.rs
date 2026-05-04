@@ -1205,6 +1205,8 @@ impl VirtualMachine {
         // Validate arity: arg_count must be between required_params and arity
         let arity = function.arity as usize;
         let required = function.required_params as usize;
+        // Extract is_thunk before any mutable borrows of self (borrow checker).
+        let is_thunk = closure.is_thunk;
         if arg_count < required || arg_count > arity {
             if required == arity {
                 return Err(RuntimeError::new(
@@ -1253,10 +1255,14 @@ impl VirtualMachine {
         // Consume pending field name if set (for dynamic +: override thunks)
         new_frame.field_name = self.pending_field_name.take();
         new_frame.cache_target = self.pending_cache_target.take();
-        new_frame.call_site = Some((
-            self.get_current_span(),
-            self.current_chunk().source_id.to_string(),
-        ));
+        // Thunks are lazy-evaluation internals; their "call site" is stale (instruction_start_ip
+        // from the previous interpret cycle). Only record call_site for genuine function calls.
+        if !is_thunk {
+            new_frame.call_site = Some((
+                self.get_current_span(),
+                self.current_chunk().source_id.to_string(),
+            ));
+        }
 
         // Push frame
         if self.frame_count < self.frames.len() {
@@ -17028,6 +17034,35 @@ mod tests {
         }
         // Root error (g's frame) + call site for g() in f + call site for f() at top
         assert_eq!(chain_depth, 3, "expected 3 entries in cause chain");
+    }
+
+    #[test]
+    fn test_stack_trace_no_spurious_thunk_frame() {
+        // A field value that errors should NOT produce an extra thunk frame.
+        // Chain should be: root error + one call-site frame for f() = depth 2.
+        // Before the fix, the stale thunk frame pushed depth to 3.
+        let source = "local f = function() error 'boom'; { should_fail: f() }";
+        let mut scanner_inst = scanner::Scanner::new(source, "test.jsonnet");
+        let mut memory_manager = MemoryManager::new();
+        let compiler_inst = compiler::Compiler::new(&mut scanner_inst, "test.jsonnet");
+        let chunk = compiler_inst.compile(&mut memory_manager).expect("compile");
+        let err = execute_with_ext_vars(chunk, memory_manager, &[], &[], &[])
+            .expect_err("expected runtime error");
+
+        let mut depth = 0;
+        let mut current = &err;
+        loop {
+            depth += 1;
+            match &current.cause {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+        assert_eq!(
+            depth, 2,
+            "expected 2 entries in cause chain (error + f() call site), got {}",
+            depth
+        );
     }
 
     // Lines 2670, 2674: ArrayIndex on Object with raw (non-closure) field value or missing field
