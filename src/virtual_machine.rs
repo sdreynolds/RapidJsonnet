@@ -1581,9 +1581,22 @@ impl VirtualMachine {
         }
     }
 
+    fn build_stack_trace(&self, error: RuntimeError) -> RuntimeError {
+        let mut err = error;
+        for frame in self.frames[1..self.frame_count].iter().rev() {
+            if let Some((span, source_id)) = &frame.call_site {
+                let mut wrapper = RuntimeError::new(span.clone(), String::new(), source_id.clone());
+                wrapper.cause = Some(Box::new(err));
+                err = wrapper;
+            }
+        }
+        err
+    }
+
     /// Main interpretation loop
     pub fn interpret(&mut self) -> Result<Value, RuntimeError> {
         self.interpret_until(0)
+            .map_err(|e| self.build_stack_trace(e))
     }
 
     /// Force a field thunk to get its actual value.
@@ -16978,7 +16991,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "call_site populated in Task 2; build_stack_trace wired in Task 3"]
     fn test_stack_trace_single_call() {
         // call site should appear in cause chain when a runtime error bubbles up
         let source = "local f = function() error 'boom'; f()";
