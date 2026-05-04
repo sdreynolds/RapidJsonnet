@@ -1253,6 +1253,10 @@ impl VirtualMachine {
         // Consume pending field name if set (for dynamic +: override thunks)
         new_frame.field_name = self.pending_field_name.take();
         new_frame.cache_target = self.pending_cache_target.take();
+        new_frame.call_site = Some((
+            self.get_current_span(),
+            self.current_chunk().source_id.to_string(),
+        ));
 
         // Push frame
         if self.frame_count < self.frames.len() {
