@@ -11331,13 +11331,16 @@ pub fn execute_with_ext_vars(
             .memory_manager
             .load_function(vm.memory_manager.load_closure(ci).function);
         if func.required_params == 0 {
-            value = vm.call_test_closure(ci)?;
+            value = vm
+                .call_test_closure(ci)
+                .map_err(|e| vm.build_stack_trace(e))?;
         }
     }
 
     // Convert VM value to JSON value with circular reference detection
     let mut visited = std::collections::HashSet::new();
     vm.value_to_json(&value, &mut visited)
+        .map_err(|e| vm.build_stack_trace(e))
 }
 
 #[cfg(test)]
@@ -17001,6 +17004,30 @@ mod tests {
             err.cause.is_some(),
             "expected cause chain for a nested call, got none"
         );
+    }
+
+    #[test]
+    fn test_stack_trace_depth() {
+        // three levels deep: top-level → f → g → error
+        let source = r#"
+            local g = function() error "boom";
+            local f = function() g();
+            f()
+        "#;
+        let err = run_jsonnet(source).expect_err("expected runtime error");
+
+        // Collect the full cause chain
+        let mut chain_depth = 0;
+        let mut current = &err;
+        loop {
+            chain_depth += 1;
+            match &current.cause {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+        // Root error (g's frame) + call site for g() in f + call site for f() at top
+        assert_eq!(chain_depth, 3, "expected 3 entries in cause chain");
     }
 
     // Lines 2670, 2674: ArrayIndex on Object with raw (non-closure) field value or missing field
