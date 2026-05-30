@@ -1098,13 +1098,14 @@ impl<'a> Compiler<'a> {
         span: Range<usize>,
         memory_manager: &mut MemoryManager,
         is_thunk: bool,
+        name: Option<StringIndex>,
     ) -> Result<(), CompilerError> {
         // Convert chunk to owned chunk for storage
         let owned_chunk = chunk.into_owned();
 
         // Allocate function in memory manager
         let func_result =
-            memory_manager.allocate_function(None, arity, upvalues.len() as u8, owned_chunk);
+            memory_manager.allocate_function(name, arity, upvalues.len() as u8, owned_chunk);
 
         // Set parameter metadata BEFORE GC so param_names are reachable
         {
@@ -1154,10 +1155,11 @@ impl<'a> Compiler<'a> {
         upvalues: Vec<CompilerUpvalue>,
         span: Range<usize>,
         memory_manager: &mut MemoryManager,
+        name: Option<StringIndex>,
     ) -> Result<(), CompilerError> {
         let owned_chunk = chunk.into_owned();
         let func_result =
-            memory_manager.allocate_function(None, 0, upvalues.len() as u8, owned_chunk);
+            memory_manager.allocate_function(name, 0, upvalues.len() as u8, owned_chunk);
         if func_result.should_garbage_collect {
             self.run_garbage_collect(memory_manager, &[Value::Function(func_result.index)]);
         }
@@ -1182,6 +1184,7 @@ impl<'a> Compiler<'a> {
         &mut self,
         min_bp: u8,
         memory_manager: &mut MemoryManager,
+        name: Option<StringIndex>,
     ) -> Result<(), CompilerError> {
         let thunk_span = self.current_span(); // capture before parsing the element
         let saved_state = self.begin_function();
@@ -1192,7 +1195,7 @@ impl<'a> Compiler<'a> {
         self.emit_opcode(Opcode::Return, return_span.clone());
         self.end_scope(return_span);
         let (chunk, upvalues) = self.end_function(saved_state);
-        self.emit_thunk(chunk, upvalues, thunk_span, memory_manager)?;
+        self.emit_thunk(chunk, upvalues, thunk_span, memory_manager, name)?;
         Ok(())
     }
 
@@ -1929,6 +1932,7 @@ impl<'a> Compiler<'a> {
                         key_token_span.clone(),
                         memory_manager,
                         true,
+                        None,
                     )?;
 
                     // Attach the closure to the object
@@ -2074,11 +2078,15 @@ impl<'a> Compiler<'a> {
 
             if self.object_depth == 1 {
                 // local $ = self
-                self.emit_opcode(Opcode::LoadSelf, 0..0);
+                self.emit_opcode(Opcode::LoadSelf, key_token_span.clone());
                 self.declare_local("$".to_string())?; // Slot 3
             }
 
             self.inject_object_locals(&object_locals, memory_manager, 0)?;
+
+            let field_name_idx = field_key_name
+                .as_ref()
+                .map(|name| memory_manager.allocate_string(name).index);
 
             let prev_tail = self.in_tail_position;
             self.in_tail_position = !is_override; // can't tail-call if we need to Add after
@@ -2086,7 +2094,7 @@ impl<'a> Compiler<'a> {
                 // Method shorthand: span covers from field name through closing ')' of
                 // parameter list so multi-line definitions are fully attributed.
                 let fn_span = key_token_span.start..close_paren_span.end;
-                self.compile_function_body(params, fn_span, memory_manager)?;
+                self.compile_function_body(params, fn_span, memory_manager, field_name_idx)?;
             } else {
                 self.parse_expr(0, memory_manager)?;
             }
@@ -2139,6 +2147,7 @@ impl<'a> Compiler<'a> {
                 key_token_span.clone(),
                 memory_manager,
                 true,
+                field_name_idx,
             )?;
 
             // Emit ObjectInsert with visibility operand
@@ -2261,7 +2270,7 @@ impl<'a> Compiler<'a> {
         // during parsing. The buffered tokens are still valid lookahead that we'll use.
 
         // Regular array literal - parse first element as thunk for lazy evaluation
-        self.parse_expr_as_thunk(0, memory_manager)?;
+        self.parse_expr_as_thunk(0, memory_manager, None)?;
         element_count += 1;
         self.anon_stack_depth += 1; // element is anonymous temp during subsequent parsing
 
@@ -2280,7 +2289,7 @@ impl<'a> Compiler<'a> {
                             }
                         }
                         // Parse next element as thunk for lazy evaluation
-                        self.parse_expr_as_thunk(0, memory_manager)?;
+                        self.parse_expr_as_thunk(0, memory_manager, None)?;
                         element_count += 1;
                         self.anon_stack_depth += 1; // element is anonymous temp
                     }
@@ -2497,6 +2506,13 @@ impl<'a> Compiler<'a> {
                 self.parser
                     .restore_checkpoint(local_binding.checkpoint.clone());
                 self.parser.advance()?; // consume 'local'
+
+                // Extract name before advancing parser
+                let name_token = self.parser.current_token().cloned().unwrap();
+                let name_idx = match &name_token.token {
+                    Token::Identifier(name) => Some(memory_manager.allocate_string(name).index),
+                    _ => None,
+                };
                 self.parser.advance()?; // consume identifier
 
                 let is_function = matches!(
@@ -2519,7 +2535,8 @@ impl<'a> Compiler<'a> {
                         "Expected '=' after parameters",
                     )?;
                     let fn_span = span.start..close_paren_span.end;
-                    self.compile_function_body(parameters, fn_span, memory_manager)?;
+
+                    self.compile_function_body(parameters, fn_span, memory_manager, name_idx)?;
                 } else {
                     self.parser.consume(
                         Token::Operator("=".to_string()),
@@ -2826,7 +2843,7 @@ impl<'a> Compiler<'a> {
 
             if self.object_depth == 1 {
                 // local $ = self
-                self.emit_opcode(Opcode::LoadSelf, 0..0);
+                self.emit_opcode(Opcode::LoadSelf, span.clone());
                 self.declare_local("$".to_string())?; // Slot 3
             }
 
@@ -2849,6 +2866,7 @@ impl<'a> Compiler<'a> {
                 span.clone(),
                 memory_manager,
                 true,
+                None,
             )?;
 
             // ObjectInsert consumes the key string from the stack
@@ -3508,6 +3526,10 @@ impl<'a> Compiler<'a> {
                 Some(Token::LeftParen)
             );
 
+            let name_idx = memory_manager
+                .allocate_string(&binding_names[binding_idx].0)
+                .index;
+
             if is_function {
                 let (parameters, close_paren_span) = self.parse_parameter_list()?;
                 self.parser.consume(
@@ -3515,7 +3537,7 @@ impl<'a> Compiler<'a> {
                     "Expected '=' after parameters",
                 )?;
                 let fn_span = ident_span.start..close_paren_span.end;
-                self.compile_function_body(parameters, fn_span, memory_manager)?;
+                self.compile_function_body(parameters, fn_span, memory_manager, Some(name_idx))?;
             } else {
                 self.parser.consume(
                     Token::Operator("=".to_string()),
@@ -3531,7 +3553,7 @@ impl<'a> Compiler<'a> {
                 self.emit_opcode(Opcode::Return, return_span.clone());
                 self.end_scope(return_span);
                 let (chunk, upvalues) = self.end_function(saved_state);
-                self.emit_thunk(chunk, upvalues, thunk_span, memory_manager)?;
+                self.emit_thunk(chunk, upvalues, thunk_span, memory_manager, Some(name_idx))?;
             }
 
             self.emit_store_var(slots[binding_idx], binding_names[binding_idx].1.clone());
@@ -3936,6 +3958,7 @@ impl<'a> Compiler<'a> {
         parameters: Vec<FunctionParam>,
         name_span: Range<usize>,
         memory_manager: &mut MemoryManager,
+        name: Option<StringIndex>,
     ) -> Result<(), CompilerError> {
         let arity = parameters.len() as u8;
         let required_params = parameters.iter().filter(|p| !p.has_default).count() as u8;
@@ -3983,7 +4006,8 @@ impl<'a> Compiler<'a> {
 
                 // Compile default expression as a lazy thunk (forced on first access via LoadVar)
                 self.parser.restore_checkpoint(default_cp.clone());
-                self.parse_expr_as_thunk(0, memory_manager)?;
+                let param_name_idx = Some(param_name_indices[i]);
+                self.parse_expr_as_thunk(0, memory_manager, param_name_idx)?;
 
                 // Store the thunk into the parameter slot
                 self.emit_store_var(slot, span.clone());
@@ -4020,6 +4044,7 @@ impl<'a> Compiler<'a> {
             name_span,
             memory_manager,
             false,
+            name,
         )?;
 
         // Pop the external roots we pushed for param name protection
@@ -4043,7 +4068,7 @@ impl<'a> Compiler<'a> {
 
         let (parameters, close_paren_span) = self.parse_parameter_list()?;
         let fn_span = keyword_span.start..close_paren_span.end;
-        self.compile_function_body(parameters, fn_span, memory_manager)?;
+        self.compile_function_body(parameters, fn_span, memory_manager, None)?;
 
         Ok(())
     }

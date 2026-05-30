@@ -4,7 +4,7 @@
 
 **Goal:** Add optional ahead-of-time bytecode compilation to the `jsonnet_library` Bazel rule via a `precompile_bytecode` attribute.
 
-**Architecture:** Modify `jsonnet_compiler` to accept an explicit output path, then update the `jsonnet_library` rule to optionally run the compiler and include the `.jsonnetc` output alongside the source in transitive depsets.
+**Architecture:** Modify `jsonnet_aot` to accept an explicit output path, then update the `jsonnet_library` rule to optionally run the compiler and include the `.jsonnetc` output alongside the source in transitive depsets.
 
 **Tech Stack:** Rust, Bazel (Starlark), shell
 
@@ -12,16 +12,16 @@
 
 ---
 
-### Task 1: Modify `jsonnet_compiler` to accept an explicit output path
+### Task 1: Modify `jsonnet_aot` to accept an explicit output path
 
 **Files:**
-- Modify: `src/jsonnet_compiler.rs`
+- Modify: `src/jsonnet_aot.rs`
 
 The current compiler hardcodes the output path as `format!("{}c", filename)`. Bazel sandboxed actions require pre-declared output paths, so the compiler needs to accept an optional second argument for the output path.
 
 - [ ] **Step 1: Write a test that verifies two-argument mode**
 
-There is no existing test binary for `jsonnet_compiler`. Instead, create a small end-to-end test file and test with a shell command.
+There is no existing test binary for `jsonnet_aot`. Instead, create a small end-to-end test file and test with a shell command.
 
 Create `end2end/compiler_output_path.jsonnet`:
 ```jsonnet
@@ -30,14 +30,14 @@ Create `end2end/compiler_output_path.jsonnet`:
 
 Run:
 ```bash
-bazel build //:jsonnet_compiler
-bazel-bin/jsonnet_compiler end2end/compiler_output_path.jsonnet /tmp/test_output.jsonnetc
+bazel build //:jsonnet_aot
+bazel-bin/jsonnet_aot end2end/compiler_output_path.jsonnet /tmp/test_output.jsonnetc
 ```
 Expected: should fail because two-arg mode is not yet implemented.
 
 - [ ] **Step 2: Implement two-argument mode**
 
-Modify `src/jsonnet_compiler.rs` to handle both one-arg and two-arg invocation:
+Modify `src/jsonnet_aot.rs` to handle both one-arg and two-arg invocation:
 
 ```rust
 use compiler::Compiler;
@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let filename = args
         .get(1)
-        .expect("Usage: jsonnet_compiler <input> [<output>]");
+        .expect("Usage: jsonnet_aot <input> [<output>]");
 
     let output_path = match args.get(2) {
         Some(path) => path.clone(),
@@ -86,11 +86,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```bash
 # Two-arg mode (new):
-bazel run //:jsonnet_compiler -- $(pwd)/end2end/compiler_output_path.jsonnet /tmp/test_output.jsonnetc
+bazel run //:jsonnet_aot -- $(pwd)/end2end/compiler_output_path.jsonnet /tmp/test_output.jsonnetc
 ls -la /tmp/test_output.jsonnetc  # should exist
 
 # One-arg mode (backwards compat):
-bazel run //:jsonnet_compiler -- $(pwd)/end2end/compiler_output_path.jsonnet
+bazel run //:jsonnet_aot -- $(pwd)/end2end/compiler_output_path.jsonnet
 ls -la $(pwd)/end2end/compiler_output_path.jsonnetc  # should exist
 ```
 
@@ -102,8 +102,8 @@ rm -f /tmp/test_output.jsonnetc end2end/compiler_output_path.jsonnetc end2end/co
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/jsonnet_compiler.rs
-git commit -m "feat: accept explicit output path in jsonnet_compiler"
+git add src/jsonnet_aot.rs
+git commit -m "feat: accept explicit output path in jsonnet_aot"
 ```
 
 ---
@@ -120,10 +120,10 @@ In `rules/jsonnet.bzl`, add `precompile_bytecode` and `_compiler` to the `jsonne
 ```python
         "precompile_bytecode": attr.bool(
             default = False,
-            doc = "If True, ahead-of-time compile the source to bytecode using jsonnet_compiler.",
+            doc = "If True, ahead-of-time compile the source to bytecode using jsonnet_aot.",
         ),
         "_compiler": attr.label(
-            default = Label("//:jsonnet_compiler"),
+            default = Label("//:jsonnet_aot"),
             executable = True,
             cfg = "exec",
         ),

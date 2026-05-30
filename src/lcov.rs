@@ -91,6 +91,65 @@ pub fn generate_lcov(collector: &CoverageCollector, test_name: &str) -> String {
         output.push_str(&format!("TN:{}\n", test_name));
         output.push_str(&format!("SF:{}\n", source_id));
 
+        // Function coverage
+        let mut func_count = 0;
+        let mut func_hit = 0;
+        if let Some(functions) = collector.functions_for_source(source_id) {
+            let mut sorted_functions: Vec<_> = functions.iter().collect();
+            sorted_functions.sort_by_key(|(start, _, _)| *start);
+
+            for (start, _end, name) in &sorted_functions {
+                let line = byte_to_line[*start];
+                let func_name = name.clone().unwrap_or_else(|| {
+                    let mut col = 1;
+                    let mut current_byte = *start;
+                    while current_byte > 0 && content[current_byte - 1] != b'\n' {
+                        col += 1;
+                        current_byte -= 1;
+                    }
+                    format!("func@{:?}:{:?}", line, col)
+                });
+                output.push_str(&format!("FN:{},{}\n", line, func_name));
+            }
+
+            for (start, _end, name) in &sorted_functions {
+                let func_name = name.clone().unwrap_or_else(|| {
+                    let line = byte_to_line[*start];
+                    let mut col = 1;
+                    let mut current_byte = *start;
+                    while current_byte > 0 && content[current_byte - 1] != b'\n' {
+                        col += 1;
+                        current_byte -= 1;
+                    }
+                    format!("func@{:?}:{:?}", line, col)
+                });
+                output.push_str(&format!("FNDA:1,{}\n", func_name));
+                func_hit += 1;
+                func_count += 1;
+            }
+        }
+        output.push_str(&format!("FNF:{}\n", func_count));
+        output.push_str(&format!("FNH:{}\n", func_hit));
+
+        // Branch coverage
+        let mut branch_count = 0;
+        let mut branch_hit = 0;
+        if let Some(branches) = collector.branches_for_source(source_id) {
+            let mut sorted_branches: Vec<_> = branches.iter().collect();
+            sorted_branches.sort_by_key(|(_start, _end, ip, outcome)| (*ip, *outcome));
+
+            for (start, _end, ip, outcome) in sorted_branches {
+                let line = byte_to_line[*start];
+                // LCOV format: BRDA:<line>,<block>,<branch>,<taken>
+                // block = ip, branch = outcome, taken = 1 (since we only record if it happened)
+                output.push_str(&format!("BRDA:{},{},{},1\n", line, ip, outcome));
+                branch_hit += 1;
+                branch_count += 1;
+            }
+        }
+        output.push_str(&format!("BRF:{}\n", branch_count));
+        output.push_str(&format!("BRH:{}\n", branch_hit));
+
         let mut lines_found = 0usize;
         let mut lines_hit = 0usize;
         for line_num in 1..=total_lines {
@@ -300,5 +359,44 @@ mod tests {
             "TN field should contain test name: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_function_and_branch_coverage() {
+        // Line 1: "local f = function(x) x;"
+        // Line 2: "f(true);"
+        let content = b"local f = function(x) x;\nf(true);\n";
+        let path = write_temp("lcov_test_func_branch.jsonnet", content);
+        let mut collector = CoverageCollector::new();
+
+        // Record function hit on line 1
+        collector.record_function(&path, &(10..23), Some("my_func".to_string()));
+
+        // Record branch hit on line 2 (e.g. at IP 42, outcome 1)
+        collector.record_branch(&path, &(25..32), 42, 1);
+
+        // Also need some line coverage to avoid skipping the file
+        collector.record(&path, &(25..32));
+
+        let result = generate_lcov(&collector, "branch_test");
+
+        assert!(result.contains("SF:"), "Should contain SF record");
+        assert!(
+            result.contains("FN:1,my_func\n"),
+            "Should contain FN record for function"
+        );
+        assert!(
+            result.contains("FNDA:1,my_func\n"),
+            "Should contain FNDA record for function hit"
+        );
+        assert!(result.contains("FNF:1\n"), "Should contain FNF:1");
+        assert!(result.contains("FNH:1\n"), "Should contain FNH:1");
+
+        assert!(
+            result.contains("BRDA:2,42,1,1\n"),
+            "Should contain BRDA record for branch hit"
+        );
+        assert!(result.contains("BRF:1\n"), "Should contain BRF:1");
+        assert!(result.contains("BRH:1\n"), "Should contain BRH:1");
     }
 }

@@ -1226,6 +1226,18 @@ impl VirtualMachine {
             }
         }
 
+        // Record function coverage if enabled
+        if self.coverage_collector.is_some() {
+            let func_name = function
+                .name
+                .map(|n| self.memory_manager.load_string(n).to_string());
+            let source_id = function.chunk.source_id.clone();
+            let span = function.chunk.get_span(0).cloned().unwrap_or(0..0);
+            if let Some(collector) = &mut self.coverage_collector {
+                collector.record_function(&source_id, &span, func_name);
+            }
+        }
+
         // Pad missing optional arguments with Uninitialized
         for _ in arg_count..arity {
             self.push(Value::Uninitialized)?;
@@ -5714,7 +5726,23 @@ impl VirtualMachine {
                 Opcode::JumpIfFalse => {
                     let offset = self.read_i32_operand()?;
                     let condition = self.pop()?;
-                    if !self.is_truthy(condition)? {
+                    let is_truthy = self.is_truthy(condition)?;
+
+                    if self.coverage_collector.is_some() {
+                        let chunk = self.current_chunk();
+                        let source_id = chunk.source_id.clone();
+                        let span = chunk
+                            .get_span(self.instruction_start_ip)
+                            .cloned()
+                            .unwrap_or(0..0);
+                        let ip = self.instruction_start_ip;
+                        let outcome = if !is_truthy { 1 } else { 0 };
+                        if let Some(collector) = &mut self.coverage_collector {
+                            collector.record_branch(&source_id, &span, ip, outcome);
+                        }
+                    }
+
+                    if !is_truthy {
                         let frame = self.current_frame_mut();
                         frame.ip = (frame.ip as i32 + offset) as usize;
                     }
@@ -5724,7 +5752,23 @@ impl VirtualMachine {
                 Opcode::JumpIfTrue => {
                     let offset = self.read_i32_operand()?;
                     let condition = self.pop()?;
-                    if self.is_truthy(condition)? {
+                    let is_truthy = self.is_truthy(condition)?;
+
+                    if self.coverage_collector.is_some() {
+                        let chunk = self.current_chunk();
+                        let source_id = chunk.source_id.clone();
+                        let span = chunk
+                            .get_span(self.instruction_start_ip)
+                            .cloned()
+                            .unwrap_or(0..0);
+                        let ip = self.instruction_start_ip;
+                        let outcome = if is_truthy { 1 } else { 0 };
+                        if let Some(collector) = &mut self.coverage_collector {
+                            collector.record_branch(&source_id, &span, ip, outcome);
+                        }
+                    }
+
+                    if is_truthy {
                         let frame = self.current_frame_mut();
                         frame.ip = (frame.ip as i32 + offset) as usize;
                     }

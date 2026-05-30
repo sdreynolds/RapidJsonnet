@@ -11,16 +11,9 @@ local theNumbers = [
 
 {
    rootValue: 1,
-   stringValue: function(
-
-
-
-
-
-
-
-
-   )
+   stringValue: function()
    "hello",
-   arrayValue: theNumbers
+   arrayValue: theNumbers,
+   branchTest(x): if x then "true" else "false",
 }
+

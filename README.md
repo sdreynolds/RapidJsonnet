@@ -108,4 +108,4 @@ and run `bazel coverage` command to generate a lcov file per bazel target. Each 
 
 
 ## Experimental: Ahead of time compilation
-The project provides a `jsonnet_compiler` binary (`bazel build //:jsonnet_compiler`) which produces a [Apache Fory](https://fory.apache.org/) serialized file suffixed with `c` -- e.g. `.libsonnetc`. When the virtual machine is told to `local x = import "a_jsonnet_lib.libsonnet"`, the virtual machine *first* looks for a `a_jsonnet_lib.libsonnetc` file and if it exists loads that and skips parsing and compiling. This could provide performance benefits, those benefits are not yet objectively measured.
+The project provides a `jsonnet_aot` binary (`bazel build //:jsonnet_aot`) which produces a [Apache Fory](https://fory.apache.org/) serialized file suffixed with `c` -- e.g. `.libsonnetc`. When the virtual machine is told to `local x = import "a_jsonnet_lib.libsonnet"`, the virtual machine *first* looks for a `a_jsonnet_lib.libsonnetc` file and if it exists loads that and skips parsing and compiling. This could provide performance benefits, those benefits are not yet objectively measured.

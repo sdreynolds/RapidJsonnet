@@ -5,13 +5,13 @@
 ## Problem
 
 `src/compiler.rs` contains 14 non-test `unwrap`/`expect` calls that would produce cryptic
-Rust panics rather than actionable error messages. `src/jsonnet_compiler.rs` has one
+Rust panics rather than actionable error messages. `src/jsonnet_aot.rs` has one
 additional `expect` in `main()` that is user-facing but has been scoped out. Three categories
 of fixes are needed.
 
 ## Scope
 
-`jsonnet_compiler.rs` line 26 is explicitly out of scope — leave it alone.
+`jsonnet_aot.rs` line 26 is explicitly out of scope — leave it alone.
 
 ---
 

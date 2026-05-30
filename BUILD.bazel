@@ -225,8 +225,8 @@ rust_library(
 )
 
 rust_binary(
-    name = "jsonnet_compiler",
-    srcs = ["src/jsonnet_compiler.rs"],
+    name = "jsonnet_aot",
+    srcs = ["src/jsonnet_aot.rs"],
     deps = [
         ":compiler",
         ":memory_manager",
@@ -317,7 +317,7 @@ rustfmt_test(
         ":memory_manager",
         ":native",
         ":serialized_chunk",
-        ":jsonnet_compiler",
+        ":jsonnet_aot",
         ":coverage",
         ":lcov",
         ":test_reporter",
