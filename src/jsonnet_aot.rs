@@ -21,9 +21,7 @@ use std::fs;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
-    let filename = args
-        .get(1)
-        .expect("Usage: jsonnet_aot <input> [<output>]");
+    let filename = args.get(1).expect("Usage: jsonnet_aot <input> [<output>]");
 
     let output_path = match args.get(2) {
         Some(path) => path.clone(),

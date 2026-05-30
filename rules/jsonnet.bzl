@@ -78,7 +78,7 @@ jsonnet_library = rule(
             doc = "If True, ahead-of-time compile the source to bytecode using jsonnet_compiler.",
         ),
         "_compiler": attr.label(
-            default = Label("//:jsonnet_compiler"),
+            default = Label("//:jsonnet_aot"),
             executable = True,
             cfg = "exec",
         ),
