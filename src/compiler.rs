@@ -830,6 +830,18 @@ impl<'a> Compiler<'a> {
         let is_short_circuit_op =
             matches!(&token.token, Token::Operator(op) if op == "&&" || op == "||");
 
+        // '+' is eligible for LoadConst+Add/StringConcat fusion when the right operand
+        // turns out to be a bare literal - snapshot the code/spans position before parsing
+        // the right operand so we can detect and undo a trailing bare LoadConst.
+        let is_plus_op = matches!(&token.token, Token::Operator(op) if op == "+");
+        let rhs_checkpoint = is_plus_op.then(|| {
+            (
+                self.compiling_chunk.code.len(),
+                self.compiling_chunk.spans.len(),
+                self.compiling_chunk.spans.last().map(|s| s.repeated_values),
+            )
+        });
+
         self.parser.advance()?; // consume operator
 
         if !is_short_circuit_op {
@@ -845,13 +857,59 @@ impl<'a> Compiler<'a> {
                 let right_type = self.pop_type();
                 let left_type = self.pop_type();
 
-                // If both operands are known to be strings, use StringConcat
+                // Detect whether the right operand compiled to nothing but a bare
+                // `LoadConst <idx>` (3 bytes) - i.e. it was a literal token. If so, we can
+                // fuse it with the following Add/StringConcat into AddConst/ConcatConst,
+                // reusing the constant index already emitted rather than pushing/popping it.
+                let rhs_const_idx =
+                    rhs_checkpoint.and_then(|(code_start, spans_len, last_repeat)| {
+                        let rhs_len = self.compiling_chunk.code.len() - code_start;
+                        if rhs_len == 3
+                            && self.compiling_chunk.code[code_start] == Opcode::LoadConst as u8
+                        {
+                            let idx = u16::from_le_bytes([
+                                self.compiling_chunk.code[code_start + 1],
+                                self.compiling_chunk.code[code_start + 2],
+                            ]);
+                            // Undo the bare LoadConst emission (code + parallel run-length spans)
+                            // so we can replace it with the fused opcode below.
+                            self.compiling_chunk.code.truncate(code_start);
+                            self.compiling_chunk.spans.truncate(spans_len);
+                            if let Some(repeat) = last_repeat {
+                                if let Some(last) = self.compiling_chunk.spans.last_mut() {
+                                    last.repeated_values = repeat;
+                                }
+                            }
+                            Some(idx)
+                        } else {
+                            None
+                        }
+                    });
+
+                // If both operands are known to be strings, use StringConcat (or its fused
+                // ConcatConst variant when the right operand was a bare string literal)
                 if left_type == ExpressionType::String && right_type == ExpressionType::String {
-                    self.emit_opcode(Opcode::StringConcat, token.span);
+                    if let Some(const_idx) = rhs_const_idx {
+                        self.compiling_chunk.write_opcode_u16(
+                            Opcode::ConcatConst,
+                            const_idx,
+                            token.span,
+                        );
+                    } else {
+                        self.emit_opcode(Opcode::StringConcat, token.span);
+                    }
                     self.push_type(ExpressionType::String);
                 } else {
-                    // Fall back to Add for mixed/unknown types
-                    self.emit_opcode(Opcode::Add, token.span);
+                    // Fall back to Add (or its fused AddConst variant) for mixed/unknown types
+                    if let Some(const_idx) = rhs_const_idx {
+                        self.compiling_chunk.write_opcode_u16(
+                            Opcode::AddConst,
+                            const_idx,
+                            token.span,
+                        );
+                    } else {
+                        self.emit_opcode(Opcode::Add, token.span);
+                    }
 
                     // Determine result type
                     if left_type == ExpressionType::String || right_type == ExpressionType::String {
@@ -4215,8 +4273,137 @@ mod tests {
         assert_eq!(chunk.constants.len(), 2);
         assert_eq!(chunk.constants[0], Value::Number(3.0));
         assert_eq!(chunk.constants[1], Value::Number(4.0));
-        // LoadConst (3) + LoadConst (3) + Add (1) + Return (1) = 8 bytes
-        assert_eq!(chunk.code.len(), 8);
+        // LoadConst (3) + AddConst (3) + Return (1) = 7 bytes
+        // (right operand `4` is a bare literal, so LoadConst+Add fuse into AddConst)
+        assert_eq!(chunk.code.len(), 7);
+        assert_eq!(chunk.code[3], Opcode::AddConst as u8);
+    }
+
+    #[test]
+    fn test_addconst_fusion_with_variable() {
+        // `local x = 5; x + 1` - right operand `1` is a bare literal, so the
+        // trailing LoadConst+Add should fuse into a single AddConst.
+        let mut scanner = Scanner::new("local x = 5; x + 1", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert!(
+            chunk.code.contains(&(Opcode::AddConst as u8)),
+            "expected AddConst to be emitted for `x + 1`"
+        );
+        assert!(
+            !chunk.code.contains(&(Opcode::Add as u8)),
+            "plain Add should not be emitted when the right operand fuses"
+        );
+    }
+
+    #[test]
+    fn test_concatconst_fusion_for_string_literals() {
+        // `"a" + "b"` - both operands are statically String (both are literal
+        // tokens) and the right operand is a bare literal, so StringConcat+LoadConst
+        // should fuse into a single ConcatConst.
+        //
+        // Note: a `local` variable's static ExpressionType is always Unknown (Jsonnet
+        // locals aren't type-tracked through to their use site - see the Token::Identifier
+        // arm in parse_prefix), so `local x = "a"; x + "b"` does NOT statically resolve
+        // to String+String and falls back to plain Add/AddConst instead - this is
+        // pre-existing compiler behavior (same as the already-existing StringConcat
+        // optimization), not something this change alters.
+        let mut scanner = Scanner::new(r#""a" + "b""#, "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert!(
+            chunk.code.contains(&(Opcode::ConcatConst as u8)),
+            "expected ConcatConst to be emitted for `\"a\" + \"b\"`"
+        );
+        assert!(
+            !chunk.code.contains(&(Opcode::StringConcat as u8)),
+            "plain StringConcat should not be emitted when the right operand fuses"
+        );
+    }
+
+    #[test]
+    fn test_concatconst_fusion_chains_through_result_type() {
+        // `("a" + "b") + "c"` - after the inner `"a" + "b"` fuses into ConcatConst,
+        // its pushed result type is still String, so the outer `+ "c"` (also a bare
+        // literal) should fuse into ConcatConst too.
+        let mut scanner = Scanner::new(r#"("a" + "b") + "c""#, "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        let concat_const_count = chunk
+            .code
+            .iter()
+            .filter(|&&b| b == Opcode::ConcatConst as u8)
+            .count();
+        assert_eq!(
+            concat_const_count, 2,
+            "expected both `+` operations to fuse into ConcatConst"
+        );
+        assert!(!chunk.code.contains(&(Opcode::StringConcat as u8)));
+        assert!(!chunk.code.contains(&(Opcode::Add as u8)));
+    }
+
+    #[test]
+    fn test_addconst_fusion_for_string_variable_plus_literal() {
+        // `local x = "a"; x + "b"` - `x`'s static type is Unknown (locals aren't
+        // type-tracked), so this falls back to the general Add path rather than
+        // ConcatConst, but the right operand `"b"` is still a bare literal, so it
+        // should fuse into AddConst (which still correctly performs string
+        // concatenation at runtime via its full type dispatch).
+        let mut scanner = Scanner::new(r#"local x = "a"; x + "b""#, "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert!(
+            chunk.code.contains(&(Opcode::AddConst as u8)),
+            "expected AddConst to be emitted for `x + \"b\"` (x's type is unknown)"
+        );
+        assert!(!chunk.code.contains(&(Opcode::Add as u8)));
+        assert!(!chunk.code.contains(&(Opcode::StringConcat as u8)));
+        assert!(!chunk.code.contains(&(Opcode::ConcatConst as u8)));
+    }
+
+    #[test]
+    fn test_addconst_not_fused_for_computed_rhs() {
+        // `local x = 1; x + (x + 1)` - the right operand is not a bare literal
+        // (it's itself a compound expression), so fusion must not trigger.
+        let mut scanner = Scanner::new("local x = 1; x + (x + 1)", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        // The inner `x + 1` still fuses (its own right operand `1` is a bare
+        // literal), but the outer `x + (...)` must not, since its right operand
+        // is a parenthesized expression, not a bare literal.
+        assert!(
+            chunk.code.contains(&(Opcode::Add as u8)),
+            "outer `x + (...)` should remain a plain Add"
+        );
+    }
+
+    #[test]
+    fn test_addconst_not_fused_for_lhs_literal() {
+        // `local x = 1; 1 + x` - constant is on the LEFT, which is explicitly out
+        // of scope for fusion (Add is not commutative-safe for all value types).
+        let mut scanner = Scanner::new("local x = 1; 1 + x", "test");
+        let compiler = Compiler::new(&mut scanner, "test");
+        let mut memory_manager = MemoryManager::new();
+        let chunk = compiler.compile(&mut memory_manager).unwrap();
+
+        assert!(
+            chunk.code.contains(&(Opcode::Add as u8)),
+            "expected plain Add for `1 + x` (LHS-constant fusion is out of scope)"
+        );
+        assert!(
+            !chunk.code.contains(&(Opcode::AddConst as u8)),
+            "AddConst must not be emitted for `1 + x`"
+        );
     }
 
     #[test]
@@ -4240,8 +4427,10 @@ mod tests {
         let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 3);
-        // LoadConst (3) + LoadConst (3) + Add (1) + LoadConst (3) + Mul (1) + Return (1) = 12 bytes
-        assert_eq!(chunk.code.len(), 12);
+        // LoadConst (3) + AddConst (3) + LoadConst (3) + Mul (1) + Return (1) = 11 bytes
+        // (the `1 + 2` right operand `2` is a bare literal, so it fuses into AddConst;
+        // `* 3` is not a `+`, so it is not eligible for fusion)
+        assert_eq!(chunk.code.len(), 11);
     }
 
     #[test]
@@ -4400,13 +4589,13 @@ mod tests {
         assert_eq!(chunk.constants[0], Value::Number(1.0));
         assert_eq!(chunk.constants[1], Value::Number(2.0));
 
-        // Should compile to: LoadConst(1) + LoadConst(2) + Add + Error + Return
-        assert_eq!(chunk.code.len(), 9); // LoadConst (3) + LoadConst (3) + Add (1) + Error (1) + Return (1)
+        // Should compile to: LoadConst(1) + AddConst(2) + Error + Return
+        // (right operand `2` is a bare literal, so LoadConst+Add fuse into AddConst)
+        assert_eq!(chunk.code.len(), 8); // LoadConst (3) + AddConst (3) + Error (1) + Return (1)
         assert_eq!(chunk.code[0], Opcode::LoadConst as u8);
-        assert_eq!(chunk.code[3], Opcode::LoadConst as u8);
-        assert_eq!(chunk.code[6], Opcode::Add as u8);
-        assert_eq!(chunk.code[7], Opcode::Error as u8);
-        assert_eq!(chunk.code[8], Opcode::Return as u8);
+        assert_eq!(chunk.code[3], Opcode::AddConst as u8);
+        assert_eq!(chunk.code[6], Opcode::Error as u8);
+        assert_eq!(chunk.code[7], Opcode::Return as u8);
     }
 
     #[test]
@@ -4656,7 +4845,8 @@ mod tests {
         let chunk = compiler.compile(&mut memory_manager).unwrap();
 
         assert_eq!(chunk.constants.len(), 3);
-        // Verify order of operations: LoadConst(1), LoadConst(2), Add, LoadConst(3), Shl
+        // Verify order of operations: LoadConst(1), AddConst(2), LoadConst(3), Shl
+        // (`1 + 2`'s right operand `2` is a bare literal, so it fuses into AddConst)
         assert!(chunk.code.len() > 0);
     }
 

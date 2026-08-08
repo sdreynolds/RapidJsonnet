@@ -1476,7 +1476,9 @@ pub enum Opcode {
     BitXor = 63,
     BitOr = 64,
     Mod = 65,
+    AddConst = 66, // operand: u16 const_idx - fused LoadConst+Add for `<value> + <literal>`
     StringConcat = 67,
+    ConcatConst = 68, // operand: u16 const_idx - fused LoadConst+StringConcat for `<string> + <string literal>`
 
     // Unary Operators
     Neg = 70,
@@ -1561,7 +1563,9 @@ impl Opcode {
             63 => Some(Opcode::BitXor),
             64 => Some(Opcode::BitOr),
             65 => Some(Opcode::Mod),
+            66 => Some(Opcode::AddConst),
             67 => Some(Opcode::StringConcat),
+            68 => Some(Opcode::ConcatConst),
             70 => Some(Opcode::Neg),
             71 => Some(Opcode::Pos),
             72 => Some(Opcode::Not),
@@ -1937,7 +1941,12 @@ impl<'a> Chunk<'a> {
 
                 // Calculate instruction size and end position
                 let instruction_size = match opcode {
-                    Opcode::LoadConst | Opcode::Import | Opcode::ImportStr | Opcode::ImportBin => 3, // opcode + u16
+                    Opcode::LoadConst
+                    | Opcode::Import
+                    | Opcode::ImportStr
+                    | Opcode::ImportBin
+                    | Opcode::AddConst
+                    | Opcode::ConcatConst => 3, // opcode + u16
                     Opcode::LoadVar => 3,                 // opcode + u16
                     Opcode::CreateObject => 3,            // opcode + u16
                     Opcode::ObjectInsert => 2,            // opcode + u8
@@ -2861,8 +2870,8 @@ mod tests {
         let known_opcodes = [
             0u8, 1, 2, 3, 4, 5, 6, 10, 11, 12, 13, 14, 15, 16, 20, 21, 22, 23, 24, 25, 30, 31, 32,
             33, 34, 40, 41, 42, 43, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65,
-            67, 70, 71, 72, 73, 80, 81, 82, 83, 84, 90, 91, 92, 93, 100, 101, 102, 103, 104, 105,
-            106, 107, 108, 109,
+            66, 67, 68, 70, 71, 72, 73, 80, 81, 82, 83, 84, 90, 91, 92, 93, 100, 101, 102, 103,
+            104, 105, 106, 107, 108, 109,
         ];
         for &op in &known_opcodes {
             assert!(
@@ -2873,6 +2882,25 @@ mod tests {
         }
         assert_eq!(Opcode::from_u8(7), None);
         assert_eq!(Opcode::from_u8(200), None);
+    }
+
+    #[test]
+    fn test_addconst_concatconst_from_u8() {
+        assert_eq!(Opcode::from_u8(66), Some(Opcode::AddConst));
+        assert_eq!(Opcode::from_u8(68), Some(Opcode::ConcatConst));
+    }
+
+    #[test]
+    fn test_addconst_concatconst_disassemble_as_3_bytes() {
+        // Guards against forgetting the `instruction_size` match arm for the new
+        // opcodes - if missed, disassembly would misread the u16 operand bytes as
+        // opcodes and either panic or silently desync.
+        let mut chunk = Chunk::new("test");
+        chunk.write_opcode_u16(Opcode::AddConst, 0, 0..1);
+        chunk.write_opcode_u16(Opcode::ConcatConst, 1, 1..2);
+        chunk.write_opcode(Opcode::Return, 2..3);
+        assert_eq!(chunk.code.len(), 7); // 3 + 3 + 1
+        let _report = chunk.debug_compilation(); // should not panic
     }
 
     #[test]
@@ -2950,6 +2978,8 @@ mod tests {
         chunk.write_opcode_u16(Opcode::LoadVar, 0, 12..13);
         chunk.write_opcode_u16(Opcode::CreateObject, 0, 13..14);
         chunk.write_opcode_u16(Opcode::CreateArray, 0, 14..15);
+        chunk.write_opcode_u16(Opcode::AddConst, 0, 14..15);
+        chunk.write_opcode_u16(Opcode::ConcatConst, 0, 14..15);
         // u8-operand opcodes (2-byte instructions)
         chunk.write_opcode_u8(Opcode::ObjectInsert, 0, 15..16);
         chunk.write_opcode_u8(Opcode::LocalScope, 2, 16..17);

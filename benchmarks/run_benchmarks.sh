@@ -24,7 +24,7 @@ for item in "${BENCHMARKS[@]}"; do
 
     # Always benchmark RapidJsonnet
     hyperfine_args=(
-      "-w" "3"
+      "-w" "10"
       "--export-markdown" "$OUT_DIR/$filename-results.md"
       "-n" "RapidJsonnet: $filename" "$MAIN_BIN -q $item"
     )

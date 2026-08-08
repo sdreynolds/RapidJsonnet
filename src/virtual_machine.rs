@@ -1981,6 +1981,110 @@ impl VirtualMachine {
                     self.advance_pc();
                 }
 
+                // Fused LoadConst+Add: pops the single stack operand and reads the
+                // second operand directly from the constant pool instead of pushing
+                // and popping it. Must mirror Add's full type dispatch verbatim - the
+                // stack operand `a` is dynamically typed at runtime even though the
+                // compiler's static ExpressionType for it was only a hint (it could be
+                // an Object/Array despite the compiler expecting Number/String/Unknown).
+                Opcode::AddConst => {
+                    let const_idx = self.read_u16_operand()?;
+                    let chunk = self.current_chunk();
+
+                    if const_idx as usize >= chunk.constants.len() {
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Invalid constant index: {}", const_idx),
+                            chunk.source_id.to_string(),
+                        ));
+                    }
+
+                    let b = chunk.constants[const_idx as usize].clone();
+                    let a = self.pop_forced()?;
+
+                    match (&a, &b) {
+                        // Object merging (according to Jsonnet spec)
+                        (Value::Object(left_key), Value::Object(right_key)) => {
+                            let left_key = *left_key;
+                            let right_key = *right_key;
+                            let merged_key = self.merge_objects(left_key, right_key)?;
+                            self.push(Value::Object(merged_key))?;
+                            if self.memory_manager.should_collect() {
+                                self.run_garbage_collection();
+                            }
+                        }
+                        // Array concatenation
+                        (Value::Array(left_key), Value::Array(right_key)) => {
+                            let (left_array, right_array) = (
+                                self.memory_manager.load_array(*left_key),
+                                self.memory_manager.load_array(*right_key),
+                            );
+
+                            // Create concatenated elements
+                            let mut concatenated =
+                                Vec::with_capacity(left_array.len() + right_array.len());
+                            concatenated.extend_from_slice(&left_array.elements);
+                            concatenated.extend_from_slice(&right_array.elements);
+
+                            // Allocate new concatenated array
+                            let concat_allocation =
+                                self.memory_manager.allocate_array(concatenated);
+                            self.push(Value::Array(concat_allocation.index))?;
+
+                            if concat_allocation.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (Array concatenation in AddConst)",
+                                        self.current_frame().ip
+                                    );
+                                }
+                                self.run_garbage_collection();
+                            }
+                        }
+                        // String concatenation if either operand is a string
+                        // Must be before object/array error cases since Jsonnet
+                        // implicitly stringifies when either operand is a string.
+                        (Value::String(_), _) | (_, Value::String(_)) => {
+                            let a_str = self.value_to_string_for_concat(&a)?;
+                            let b_str = self.value_to_string_for_concat(&b)?;
+                            let result_str = format!("{}{}", a_str, b_str);
+                            let interned = self.memory_manager.allocate_string(&result_str);
+                            self.push(Value::String(interned.index))?;
+                            if interned.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (String concat in AddConst fallback)",
+                                        self.current_frame().ip
+                                    );
+                                }
+                                self.run_garbage_collection();
+                            }
+                        }
+                        (Value::Array(_), _) | (_, Value::Array(_)) => {
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "Must concatenate arrays with other arrays".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            ));
+                        }
+                        (Value::Object(_), _) | (_, Value::Object(_)) => {
+                            return Err(RuntimeError::new(
+                                self.get_current_span(),
+                                "Must concatenate objects with other objects".to_string(),
+                                self.current_chunk().source_id.to_string(),
+                            ));
+                        }
+                        // Numeric addition for all other cases
+                        _ => {
+                            let result = self.to_number(a)? + self.to_number(b)?;
+                            self.push(Value::Number(result))?;
+                        }
+                    }
+                    // read_u16_operand() already advanced ip by 3 - no separate advance_pc().
+                }
+
                 Opcode::Sub => {
                     let b = self.pop_forced()?;
                     let a = self.pop_forced()?;
@@ -2177,6 +2281,79 @@ impl VirtualMachine {
                         }
                     };
                     self.advance_pc();
+                }
+
+                // Fused LoadConst+StringConcat: only emitted by the compiler when both
+                // operand types were statically known to be String, so this skips the
+                // full Add-style type dispatch and goes straight to the string-concat
+                // fast path, mirroring StringConcat's own (defensively-guarded) shape.
+                //
+                // @TODO: unlike AddConst (measured ~11% faster on a tight numeric
+                // accumulation microbenchmark), ConcatConst showed no measurable
+                // improvement over unfused LoadConst+StringConcat in benchmarking
+                // (benchmarks/extra/microbench_concatconst.jsonnet, ~1% delta, within
+                // noise) - same outcome as StringConcat's own unresolved benchmark TODO
+                // above. The likely reason: each iteration's cost is dominated by
+                // allocate_string's format!+hashmap-intern work, not opcode dispatch, so
+                // collapsing LoadConst+StringConcat into one dispatch doesn't move the
+                // needle. Kept for correctness/consistency with AddConst's fusion logic
+                // in the compiler, but do not assume it is a proven perf win.
+                Opcode::ConcatConst => {
+                    let const_idx = self.read_u16_operand()?;
+                    let chunk = self.current_chunk();
+
+                    if const_idx as usize >= chunk.constants.len() {
+                        return Err(RuntimeError::new(
+                            self.get_current_span(),
+                            format!("Invalid constant index: {}", const_idx),
+                            chunk.source_id.to_string(),
+                        ));
+                    }
+
+                    let b = chunk.constants[const_idx as usize].clone();
+                    let a = self.pop_forced()?;
+
+                    match (&a, &b) {
+                        (Value::String(s1), Value::String(s2)) => {
+                            let result_str = format!(
+                                "{}{}",
+                                self.memory_manager.load_string(*s1),
+                                self.memory_manager.load_string(*s2)
+                            );
+                            let interned = self.memory_manager.allocate_string(&result_str);
+                            self.push(Value::String(interned.index))?;
+                            if interned.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (String concat in ConcatConst)",
+                                        self.current_frame().ip
+                                    );
+                                }
+                                self.run_garbage_collection();
+                            }
+                        }
+                        _ => {
+                            // This should not happen if compiler type tracking is correct.
+                            // Fall back to the same safe conversion StringConcat uses.
+                            let a_str = self.value_to_string_for_concat(&a)?;
+                            let b_str = self.value_to_string_for_concat(&b)?;
+                            let result_str = format!("{}{}", a_str, b_str);
+                            let interned = self.memory_manager.allocate_string(&result_str);
+                            self.push(Value::String(interned.index))?;
+                            if interned.should_garbage_collect {
+                                #[cfg(feature = "gc_debug")]
+                                {
+                                    eprintln!(
+                                        "[VirtualMachine] Running GC at PC={} (String concat in ConcatConst fallback)",
+                                        self.current_frame().ip
+                                    );
+                                }
+                                self.run_garbage_collection();
+                            }
+                        }
+                    };
+                    // read_u16_operand() already advanced ip by 3 - no separate advance_pc().
                 }
 
                 // Bitwise operations
@@ -11493,6 +11670,97 @@ mod tests {
         let result = vm.interpret().unwrap();
 
         assert_eq!(result, Value::Number(15.0));
+    }
+
+    #[test]
+    fn test_add_const_numeric() {
+        // Fused equivalent of test_add: pop one stack operand, read the other
+        // straight from the constant pool.
+        let mut chunk = create_test_chunk();
+        let idx1 = chunk.add_constant(Value::Number(10.0));
+        let idx2 = chunk.add_constant(Value::Number(5.0));
+
+        chunk.write_opcode_u16(Opcode::LoadConst, idx1 as u16, 0..5);
+        chunk.write_opcode_u16(Opcode::AddConst, idx2 as u16, 5..10);
+        chunk.write_opcode(Opcode::Return, 10..15);
+
+        let memory_manager = MemoryManager::new();
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        assert_eq!(result, Value::Number(15.0));
+    }
+
+    #[test]
+    fn test_add_const_matches_add_for_string_and_number() {
+        // AddConst must run the SAME full type dispatch as Add: the stack operand
+        // is dynamically typed, so `"x" + 1`-shaped stringification must still work
+        // even though the constant operand is a Number, not a String.
+        let mut chunk = create_test_chunk();
+        let mut memory_manager = MemoryManager::new();
+        let str_alloc = memory_manager.allocate_string("count: ");
+        let str_idx = chunk.add_constant(Value::String(str_alloc.index));
+        let num_idx = chunk.add_constant(Value::Number(5.0));
+
+        chunk.write_opcode_u16(Opcode::LoadConst, str_idx as u16, 0..5);
+        chunk.write_opcode_u16(Opcode::AddConst, num_idx as u16, 5..10);
+        chunk.write_opcode(Opcode::Return, 10..15);
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        match result {
+            Value::String(idx) => {
+                assert_eq!(vm.memory_manager.load_string(idx), "count: 5");
+            }
+            other => panic!("expected a String result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_add_const_object_lhs_errors_like_add() {
+        // Even though a compiler-emitted AddConst always has a Number/String
+        // constant on the RHS, the LHS popped off the stack is dynamically typed.
+        // Object + non-object (here, Object + Number) must still error, exactly
+        // like plain Add does.
+        let mut chunk = create_test_chunk();
+        let mut memory_manager = MemoryManager::new();
+        let obj_alloc = memory_manager.allocate_object();
+        let obj_idx = chunk.add_constant(Value::Object(obj_alloc.index));
+        let num_idx = chunk.add_constant(Value::Number(1.0));
+
+        chunk.write_opcode_u16(Opcode::LoadConst, obj_idx as u16, 0..5);
+        chunk.write_opcode_u16(Opcode::AddConst, num_idx as u16, 5..10);
+        chunk.write_opcode(Opcode::Return, 10..15);
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_concat_const() {
+        let mut chunk = create_test_chunk();
+        let mut memory_manager = MemoryManager::new();
+        let a_alloc = memory_manager.allocate_string("hello ");
+        let b_alloc = memory_manager.allocate_string("world");
+        let a_idx = chunk.add_constant(Value::String(a_alloc.index));
+        let b_idx = chunk.add_constant(Value::String(b_alloc.index));
+
+        chunk.write_opcode_u16(Opcode::LoadConst, a_idx as u16, 0..5);
+        chunk.write_opcode_u16(Opcode::ConcatConst, b_idx as u16, 5..10);
+        chunk.write_opcode(Opcode::Return, 10..15);
+
+        let mut vm = VirtualMachine::new(chunk, memory_manager);
+        let result = vm.interpret().unwrap();
+
+        match result {
+            Value::String(idx) => {
+                assert_eq!(vm.memory_manager.load_string(idx), "hello world");
+            }
+            other => panic!("expected a String result, got {:?}", other),
+        }
     }
 
     #[test]
